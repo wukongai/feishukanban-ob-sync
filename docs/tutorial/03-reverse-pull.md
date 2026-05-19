@@ -215,7 +215,7 @@ apply 后:
 **修复**:
 ```bash
 cd /path/to/your/vault
-python3 /path/to/feishu-ob-sync/sync.py --pull
+python3 /path/to/feishukanban-ob-sync/sync.py --pull
 ```
 
 或者把 sync.py copy 到 vault 内的某个工具目录跑。

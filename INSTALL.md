@@ -84,14 +84,14 @@ feishu-cli auth login --scope "base:record:retrieve base:record:update base:reco
 ## Step 4: 克隆本仓库
 
 ```bash
-git clone https://github.com/<YOUR-USER>/feishu-ob-sync.git
-cd feishu-ob-sync
+git clone https://github.com/wukongai/feishukanban-ob-sync.git
+cd feishukanban-ob-sync
 ```
 
 文件结构(关键文件):
 
 ```
-feishu-ob-sync/
+feishukanban-ob-sync/
 ├── sync.py                 主脚本
 ├── config.example.yaml     脱敏配置模板 ← 你要复制成 config.yaml
 ├── .gitignore              已排除 config.yaml(真 token 不会被 commit)
@@ -199,7 +199,7 @@ python3 sync.py --help
 在你的 Obsidian vault 找一个 journal 文件(或新建一个),加一行 task:
 
 ```markdown
-- [x] 【测试】feishu-ob-sync 首次 sync 验证 🔺 ➕ 2026-05-19 ✅ 2026-05-19
+- [x] 【测试】feishukanban-ob-sync 首次 sync 验证 🔺 ➕ 2026-05-19 ✅ 2026-05-19
 ```
 
 > 重点:`[x]` 已完成 + 有 `✅ YYYY-MM-DD` 完成日,这样 sync 会触发 CREATE 一个新 record(没飞书链接 = CREATE,有链接 = UPDATE)。
@@ -213,7 +213,7 @@ python3 sync.py "/path/to/your/journal.md" --only-completed
 期望输出类似:
 
 ```
---- Task 1: 【测试】feishu-ob-sync 首次 sync 验证
+--- Task 1: 【测试】feishukanban-ob-sync 首次 sync 验证
     🆕 无飞书链接 → 将创建新 record
 ⏳ 调 cli 拉全表 record 建标题索引(查重用)... ✅ 共 N 条 record, M 个独立标题
     ✅ 标题不重复,准备创建
@@ -240,7 +240,7 @@ python3 sync.py "/path/to/your/journal.md" --only-completed --apply
 1. cli 写入 1 条新 record
 2. sync.py 自动 Edit markdown 在 task 行插入 base URL:
    ```markdown
-   - [x] [【测试】feishu-ob-sync 首次 sync 验证](https://xxx.feishu.cn/base/<base_token>?table=<tbl>&view=<view>&record=recXXX) 🔺 ➕ 2026-05-19 ✅ 2026-05-19
+   - [x] [【测试】feishukanban-ob-sync 首次 sync 验证](https://xxx.feishu.cn/base/<base_token>?table=<tbl>&view=<view>&record=recXXX) 🔺 ➕ 2026-05-19 ✅ 2026-05-19
    ```
 
 ### 8.4 飞书后台验证

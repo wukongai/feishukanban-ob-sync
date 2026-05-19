@@ -1,4 +1,4 @@
-# feishu-ob-sync
+# feishukanban-ob-sync
 
 > 📋 在 **Obsidian 日志**和**飞书多维表项目管理**之间做双向同步,让你既享受 Obsidian 的 ADHD 友好「子弹笔记式任务流」,又拥有飞书的「项目看板可视化」。
 
@@ -106,8 +106,8 @@ field_map:
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/<YOUR-USER>/feishu-ob-sync.git
-cd feishu-ob-sync
+git clone https://github.com/wukongai/feishukanban-ob-sync.git
+cd feishukanban-ob-sync
 
 # 2. 装 feishu-cli(详见 INSTALL.md)
 brew install feishu-cli   # macOS;Linux 用 go install
@@ -193,4 +193,4 @@ python3 sync.py "path/to/your/journal-today.md"
 
 ---
 
-**仓库**:[feishu-ob-sync](https://github.com/) · **作者**:teacherai · **基于**:Claude Code · Obsidian · 飞书多维表
+**仓库**:[GitHub](https://github.com/wukongai/feishukanban-ob-sync) · [Gitee 镜像](https://gitee.com/teacherai/feishukanban-ob-sync) · **作者**:teacherai · **基于**:Claude Code · Obsidian · 飞书多维表
