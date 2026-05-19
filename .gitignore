@@ -1,0 +1,33 @@
+# 阻止 commit 任何含真 token 的 draft 文件(Phase 2 脱敏后会改名 .example)
+*.draft
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.venv/
+venv/
+.python-version
+
+# Local config(用户副本,绝不能上 git)
+config.yaml
+config.yml
+config.local.yaml
+
+# Cache / logs
+*.log
+.cache/
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Tutorial 测试副本(用户自己跑 tutorial 时生成的)
+tutorials/*/test-output/
+tutorials/*/local-config.yaml
