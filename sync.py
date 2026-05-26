@@ -2157,6 +2157,146 @@ def _scan_ob_task_md_by_feishu_record(task_dir: Path) -> dict:
     return index
 
 
+def _create_task_md_from_feishu_record(rid, row, fields_meta, config, vault_root):
+    """从飞书 record 反向建 OB task md(2026-05-26 v0.2.5 加)
+
+    字段映射(飞书 → OB task md frontmatter):
+    - 任务标题(text) → 标题 + 文件名
+    - 价值优先级 → priority(P0-P3 默认 P3)
+    - 执行状态 → status(Todo→todo / Doing→doing / Done→done / Block→block / SubDone→doing)
+    - 大类 → category;小类(list) → subcategory
+    - ADHD优先级 → adhd_priority
+    - 创建时间(ms) → created(ISO 北京)
+    - 完成时间(ms) → done_date(YYYY-MM-DD 北京)
+    - 截止日期(ms) → due(YYYY-MM-DD)
+    - 项目 → parent_project(若无飞书"项目"字段值且标题以【布丁】起始 → 默认"00 布丁")
+    - record_id → feishu_record;拼装 → feishu_url
+    - today: true(因为是被 filter 出 today=true 的 candidates)
+
+    Returns: 创建的 Path(成功) or None(已存在 / 跳过)
+    """
+    from datetime import datetime, timezone, timedelta
+
+    def _idx(field):
+        return fields_meta.index(field) if field in fields_meta else -1
+
+    def _get(field):
+        i = _idx(field)
+        return row[i] if 0 <= i < len(row) else None
+
+    def _list_first(v):
+        return v[0] if isinstance(v, list) and v else (v if not isinstance(v, list) else None)
+
+    def _ms_to_date(ms):
+        if not ms:
+            return ""
+        try:
+            dt = datetime.fromtimestamp(int(ms) / 1000, tz=timezone(timedelta(hours=8)))
+            return dt.strftime("%Y-%m-%d")
+        except Exception:
+            return ""
+
+    def _ms_to_iso(ms):
+        if not ms:
+            return None
+        try:
+            dt = datetime.fromtimestamp(int(ms) / 1000, tz=timezone(timedelta(hours=8)))
+            return dt.strftime("%Y-%m-%dT%H:%M:%S")
+        except Exception:
+            return None
+
+    # 字段抽取
+    title = _get("任务标题") or "(无标题)"
+    priority = _list_first(_get("价值优先级")) or "P3"
+    status_fs = _list_first(_get("执行状态")) or "Todo"
+    status_map = {
+        "Todo": "todo", "Doing": "doing", "Done": "done",
+        "Block": "block", "SubDone": "doing", "Idea": "todo"
+    }
+    status = status_map.get(status_fs, "todo")
+    category = _list_first(_get("大类")) or ""
+    subcategory = _get("小类") or []
+    adhd_priority = _list_first(_get("ADHD优先级")) or ""
+    estimate_hours = _get("估时") or ""
+    created_iso = _ms_to_iso(_get("创建时间"))
+    due = _ms_to_date(_get("截止日期"))
+    done_date = _ms_to_date(_get("完成时间"))
+
+    # parent_project — 飞书"项目"字段(单选),无则启发性默认
+    project_val = _list_first(_get("项目"))
+    parent_project = project_val or ""
+    if not parent_project and title.startswith("【布丁"):
+        parent_project = "00 布丁"
+
+    # 文件名安全
+    safe_title = re.sub(r'[/\\*?"<>|]', "_", title)
+    today_date = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+
+    task_dir = vault_root / "04 Inbox" / "task"
+    task_dir.mkdir(parents=True, exist_ok=True)
+    fpath = task_dir / f"{today_date}-{safe_title}.md"
+
+    if fpath.exists():
+        return None
+
+    # 拼飞书 URL
+    cfg = config["feishu"]
+    url = (
+        f"https://{cfg['tenant_domain']}/base/{cfg['base_token']}"
+        f"?table={cfg['table_id']}&view={cfg['default_view_id']}&record={rid}"
+    )
+
+    # 构造 frontmatter
+    parent_project_line = (
+        f'parent_project: "[[{parent_project}]]"' if parent_project else "parent_project:"
+    )
+    subcat_line = (
+        f"subcategory: {subcategory}" if subcategory else "subcategory:"
+    )
+    created_line = created_iso or (today_date + "T00:00:00")
+
+    content = f"""---
+priority: {priority}
+status: {status}
+today: true
+created: {created_line}
+due: {due}
+done_date: {done_date}
+category: {category}
+{subcat_line}
+adhd_priority: {adhd_priority}
+estimate_hours: {estimate_hours}
+efficiency:
+acceptance:
+thinking:
+resources:
+retrospective:
+{parent_project_line}
+parent_subproject:
+parent_inspiration:
+日志: "[[journals/{today_date}]]"
+feishu_record: {rid}
+feishu_url: '{url}'
+iteration_week:
+iteration_month:
+completion_month:
+tags:
+  - task
+  - pulled-from-feishu
+---
+
+# {title}
+
+## 📝 执行概述
+(从飞书拉回,详情见飞书 record)
+
+## ✅ 完成标记
+- [ ] [{title}]({url})
+"""
+    fpath.write_text(content, encoding="utf-8")
+    return fpath
+
+
 def pull_today_from_feishu(apply: bool = False) -> None:
     """拉飞书「是否今日」=true 的 record,同步更新 OB task md frontmatter today 字段。
 
@@ -2220,7 +2360,7 @@ def pull_today_from_feishu(apply: bool = False) -> None:
             else:
                 plan_set_true.append((rid, title, entry["path"]))
         else:
-            plan_missing.append((rid, title))
+            plan_missing.append((rid, title, row))  # ⚠️ v0.2.5:存 row 以便自动建 task md
 
     for rid, entry in ob_index.items():
         if entry["today"] and rid not in today_record_ids:
@@ -2251,25 +2391,25 @@ def pull_today_from_feishu(apply: bool = False) -> None:
             print(f"  ... 还有 {len(plan_skip) - 5} 条")
 
     if plan_missing:
-        print(f"\n--- ⚠️ 飞书「是否今日」=true 但 OB 无对应 task md({len(plan_missing)} 条)---")
-        print(f"    建议:Cmd+P「📝 快记任务」在 OB 端手建,或忽略(下次需要再建)")
-        for rid, title in plan_missing[:10]:
+        print(f"\n--- 🆕 飞书「是否今日」=true 但 OB 无对应 task md({len(plan_missing)} 条,v0.2.5 起 apply 时自动建)---")
+        for rid, title, row in plan_missing[:10]:
             print(f"  🆕 {title[:55]}  rid={rid}")
         if len(plan_missing) > 10:
             print(f"  ... 还有 {len(plan_missing) - 10} 条")
 
-    if not (plan_set_true or plan_set_false):
+    if not (plan_set_true or plan_set_false or plan_missing):
         print(f"\n✅ OB ↔ 飞书 today 状态已对齐,无需更新")
         return
 
     if not apply:
-        print(f"\n📌 dry-run 完成。--apply 真写 frontmatter")
+        print(f"\n📌 dry-run 完成。--apply 真写 frontmatter + 自动建 task md")
         return
 
     # Step 6: apply
     print(f"\n🚀 开始 apply...")
     success_count = 0
     fail_count = 0
+    created_count = 0
     for rid, title, p in plan_set_true:
         if update_md_frontmatter(p, {"today": True}):
             print(f"  ✅ {p.name}: today → true")
@@ -2286,7 +2426,18 @@ def pull_today_from_feishu(apply: bool = False) -> None:
             print(f"  ❌ {p.name}: 更新失败")
             fail_count += 1
 
-    print(f"\n✅ pull-today 完成({success_count} 成功 / {fail_count} 失败)")
+    # ⚠️ v0.2.5 新增:自动建 task md(飞书有 OB 无)
+    if plan_missing:
+        print(f"\n🆕 自动建 task md({len(plan_missing)} 条)...")
+        for rid, title, row in plan_missing:
+            created = _create_task_md_from_feishu_record(rid, row, fields_meta, config, vault_root)
+            if created:
+                print(f"  ✅ 建: {created.name}")
+                created_count += 1
+            else:
+                print(f"  ⚠️ 跳过: {title[:55]}(可能已存在)")
+
+    print(f"\n✅ pull-today 完成({success_count} 设 today / {created_count} 建新 task md / {fail_count} 失败)")
 
 
 # ============================================================
