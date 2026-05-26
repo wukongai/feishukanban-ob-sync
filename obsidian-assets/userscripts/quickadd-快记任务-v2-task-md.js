@@ -17,7 +17,7 @@
  *    详见 rules/feishu-project-sync.md「铁律 #1 飞书例外」section。
  *
  * 关联文件:
- *  - sync.py task md 模式:01 Project/00 进行中/06 小工具开发/CC命令/飞书项目同步/sync.py --task-md
+ *  - sync.py task md 模式:scripts/feishukanban-ob-sync/sync.py --task-md
  *  - task 模板:03 Resources/素材库/模版/task 模版.md
  *  - base 视图:04 Inbox/task/_task.base
  */
@@ -132,7 +132,7 @@ tags:
     const execAsync = util.promisify(exec);
 
     const vaultRoot = app.vault.adapter.basePath || app.vault.adapter.getBasePath();
-    const syncScript = `${vaultRoot}/01 Project/00 进行中/06 小工具开发/CC命令/飞书项目同步/sync.py`;
+    const syncScript = `${vaultRoot}/scripts/feishukanban-ob-sync/sync.py`;
     // shell-escape 路径
     const escapedTaskPath = `${vaultRoot}/${taskPath}`.replace(/"/g, '\\"');
     const syncCmd = `cd "${vaultRoot.replace(/"/g, '\\"')}" && python3 "${syncScript.replace(/"/g, '\\"')}" --task-md "${escapedTaskPath}" --apply`;

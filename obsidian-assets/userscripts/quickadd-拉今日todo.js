@@ -28,7 +28,7 @@ module.exports = async function (params) {
 
     const vaultRoot =
       app.vault.adapter.basePath || app.vault.adapter.getBasePath();
-    const syncScript = `${vaultRoot}/01 Project/00 进行中/06 小工具开发/CC命令/飞书项目同步/sync.py`;
+    const syncScript = `${vaultRoot}/scripts/feishukanban-ob-sync/sync.py`;
     const syncCmd = `cd "${vaultRoot.replace(
       /"/g,
       '\\"'
