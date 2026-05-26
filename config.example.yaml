@@ -169,6 +169,13 @@ task_md_fields:
   due:
     field_name: null               # null = 跳过
 
+  # parent_project(归属大项目):2026-05-26 v0.2.2 加
+  # task md frontmatter `parent_project: "[[<项目名>]]"` → 飞书"项目" select 字段
+  # Cmd+P「📝 快记任务」创建 task 时弹大项目选择菜单,自动填这里
+  # 飞书表必须先建好「项目」select 字段 + 加 enum 选项(每个项目一个)
+  parent_project:
+    field_name: 项目               # select(单)— null = 跳过同步
+
 # === 反向同步(飞书 → OB) ===
 # 2026-05-18 Phase 2.2 上线
 # 详见 spec: 04 Inbox/superpowers/specs/2026-05-18-sync.py-反向 pull 实现-设计.md

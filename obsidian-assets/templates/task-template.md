@@ -20,7 +20,8 @@ estimate_hours:                    # 数字,如 0.5 / 1 / 2
 efficiency:                        # 高 / 中 / 低(完成后回填)
 
 # === 关联 ===
-parent_subproject:                 # "[[<子项目>]]"(可空)
+parent_project:                    # "[[<大项目>]]"(2026-05-26 v0.2.2 加,Cmd+P 创建时自动填)
+parent_subproject:                 # "[[<子项目>]]"(可空,后续手敲)
 parent_inspiration:                # "[[<灵感>]]"(从灵感孵化时填)
 日志: "[[journals/2026-05-26]]"
 

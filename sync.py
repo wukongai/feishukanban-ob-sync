@@ -928,6 +928,18 @@ def parse_task_md(md_path: Path, config: dict) -> Optional[dict]:
             return v.split("T")[0] if "T" in v else v
         return v.isoformat() if hasattr(v, 'isoformat') else str(v)
 
+    def _strip_wikilink(v):
+        """frontmatter wikilink 字段值 → 纯名字
+        例:'[[06 小工具开发]]' → '06 小工具开发'
+            '06 小工具开发' → '06 小工具开发'(无 wikilink 直接返回)
+            None / '' → None
+        """
+        if not v:
+            return None
+        s = str(v).strip()
+        m = re.match(r'^\[\[([^\]|]+)(?:\|[^\]]*)?\]\]$', s)
+        return m.group(1).strip() if m else s
+
     done_date = _date_str(fm.get("done_date"))
     created_date = _date_str(fm.get("created"))
 
@@ -986,6 +998,9 @@ def parse_task_md(md_path: Path, config: dict) -> Optional[dict]:
         "retrospective_text": retrospective_text,
         "execution_summary": execution_summary,
         "due": _date_str(fm.get("due")),
+        # parent_project: 2026-05-26 v0.2.2 加 — task 关联到具体大项目
+        # frontmatter 形如 `parent_project: "[[<项目名>]]"` → 抽出项目名(去掉 [[]])
+        "parent_project": _strip_wikilink(fm.get("parent_project")),
     }
 
 

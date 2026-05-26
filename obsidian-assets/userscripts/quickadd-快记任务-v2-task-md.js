@@ -41,7 +41,33 @@ module.exports = async function (params) {
       return;
     }
 
-    // ============ Step 2: 弹任务标题输入 ============
+    // ============ Step 2: 弹大项目选择(2026-05-26 v0.2.2 加)============
+    // 扫 01 Project/00 进行中/ 下含 frontmatter project_type: 大项目 + status: active 的 md
+    const projectFiles = app.vault.getMarkdownFiles().filter(f => {
+      if (!f.path.startsWith("01 Project/00 进行中/")) return false;
+      const fm = app.metadataCache.getFileCache(f)?.frontmatter;
+      if (!fm) return false;
+      return fm.project_type === "大项目" && fm.status === "active";
+    });
+
+    // 按文件名排序(数字前缀编号自然排序)
+    projectFiles.sort((a, b) => a.basename.localeCompare(b.basename, "zh-CN"));
+
+    const projectOptions = [
+      "❌ 无 / 跳过(临时小事 / 暂不归类)",
+      ...projectFiles.map(f => `📁 ${f.basename}`),
+    ];
+    const projectValues = [null, ...projectFiles.map(f => f.basename)];
+
+    const projectChoice = await quickAddApi.suggester(projectOptions, projectValues);
+    // 注意:projectChoice 可能是 null(用户选"无")或 undefined(用户按 Esc 取消)
+    if (projectChoice === undefined) {
+      new Notice("❌ 已取消", 3000);
+      return;
+    }
+    console.log("[快记任务 v2] project:", projectChoice || "(无)");
+
+    // ============ Step 3: 弹任务标题输入 ============
     const title = await quickAddApi.inputPrompt("任务标题(简短;后续可加详情)");
     if (!title || !title.trim()) {
       new Notice("❌ 标题为空,已取消", 3000);
@@ -49,7 +75,7 @@ module.exports = async function (params) {
     }
     const titleTrimmed = title.trim();
 
-    // ============ Step 3: 计算北京时间 + 构造路径 ============
+    // ============ Step 4: 计算北京时间 + 构造路径 ============
     const bjISO = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 19);
     const bjDate = bjISO.slice(0, 10);
     // 文件名安全字符(替换 Windows/Mac 不允许的字符)
@@ -69,9 +95,15 @@ module.exports = async function (params) {
     }
 
     // ============ Step 5: 内联生成 task md 内容 ============
+    // parent_project 行:有项目就填 wikilink,无则空
+    const parentProjectLine = projectChoice
+      ? `parent_project: "[[${projectChoice}]]"`
+      : `parent_project:`;
+
     const content = `---
 priority: ${priorityChoice}
 status: todo
+today: false
 created: ${bjISO}
 due:
 done_date:
@@ -84,6 +116,7 @@ acceptance:
 thinking:
 resources:
 retrospective:
+${parentProjectLine}
 parent_subproject:
 parent_inspiration:
 日志: "[[${journalPath}]]"
