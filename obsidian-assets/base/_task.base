@@ -1,0 +1,153 @@
+filters:
+  and:
+    - file.inFolder("04 Inbox/task")
+    - file.ext == "md"
+    - file.name != "_说明"
+formulas:
+  is_today_plan: if(priority == "P0" || priority == "P1" || priority == "P2", "🎯 今日计划", "🐿️ 今日非计划")
+  days_since_created: if(created, (today() - date(created)).days.toString() + " 天", "")
+  feishu_synced: if(feishu_record, "✅", "⬜")
+properties:
+  priority:
+    displayName: 优先级
+  status:
+    displayName: 状态
+  category:
+    displayName: 大类
+  subcategory:
+    displayName: 小类
+  adhd_priority:
+    displayName: ADHD分类
+  due:
+    displayName: 截止日
+  done_date:
+    displayName: 完成日
+  estimate_hours:
+    displayName: 估时(h)
+  efficiency:
+    displayName: 效率
+  parent_subproject:
+    displayName: 归属子项目
+  created:
+    displayName: 创建时间
+  feishu_record:
+    displayName: 飞书record
+  feishu_url:
+    displayName: 飞书链接
+  formula.is_today_plan:
+    displayName: 看板段
+  formula.days_since_created:
+    displayName: 距今
+  formula.feishu_synced:
+    displayName: 飞书同步
+views:
+  - type: table
+    name: 🎯 今日计划(P0-P2 未完成)
+    filters:
+      and:
+        - status != "done"
+        - status != "cancel"
+        - priority != "P3"
+    order:
+      - file.name
+      - priority
+      - status
+      - due
+      - formula.days_since_created
+      - formula.feishu_synced
+    sort:
+      - property: priority
+        direction: ASC
+      - property: created
+        direction: DESC
+    columnSize:
+      file.name: 380
+  - type: table
+    name: 🐿️ 今日非计划(P3 未完成)
+    filters:
+      and:
+        - status != "done"
+        - status != "cancel"
+        - priority == "P3"
+    order:
+      - file.name
+      - status
+      - due
+      - formula.days_since_created
+      - formula.feishu_synced
+    sort:
+      - property: created
+        direction: DESC
+    columnSize:
+      file.name: 380
+  - type: table
+    name: 🔥 待抢救(ADHD)
+    filters:
+      and:
+        - status != "done"
+        - status != "cancel"
+        - adhd_priority == "待抢救"
+    order:
+      - file.name
+      - priority
+      - due
+      - formula.days_since_created
+    sort:
+      - property: due
+        direction: ASC
+    columnSize:
+      file.name: 380
+  - type: table
+    name: ⏰ 有 DDL(ADHD)
+    filters:
+      and:
+        - status != "done"
+        - status != "cancel"
+        - adhd_priority == "有 DDL"
+    order:
+      - file.name
+      - priority
+      - due
+      - formula.days_since_created
+    sort:
+      - property: due
+        direction: ASC
+    columnSize:
+      file.name: 380
+  - type: table
+    name: ✅ 已完成
+    filters:
+      and:
+        - status == "done"
+    order:
+      - file.name
+      - priority
+      - done_date
+      - efficiency
+      - formula.feishu_synced
+    sort:
+      - property: done_date
+        direction: DESC
+    columnSize:
+      file.name: 380
+  - type: table
+    name: 📋 全部 task
+    filters:
+      and: []
+    order:
+      - file.name
+      - priority
+      - status
+      - formula.is_today_plan
+      - due
+      - formula.days_since_created
+      - formula.feishu_synced
+    sort:
+      - property: status
+        direction: ASC
+      - property: priority
+        direction: ASC
+      - property: created
+        direction: DESC
+    columnSize:
+      file.name: 380

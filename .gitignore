@@ -31,3 +31,6 @@ config.local.yaml
 # Tutorial 测试副本(用户自己跑 tutorial 时生成的)
 tutorials/*/test-output/
 tutorials/*/local-config.yaml
+
+# install.sh 生成的 QuickAdd choices snippet
+.quickadd-choices.json

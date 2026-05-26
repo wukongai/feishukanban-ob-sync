@@ -1,11 +1,45 @@
 # 安装指南
 
-> 🎯 **目标**:新手 30 分钟从 0 跑通第一次 sync。
-> 跟做完这个文档,你能完成:OB 日志里勾对勾 → 跑 sync → 飞书后台看到字段被自动更新。
+> 🎯 **目标**:新手 5 分钟从 0 跑通 v0.2.0 完整工作流(用 install.sh 一键部署)。
+> 跟做完,你能 Cmd+P「📝 快记任务」5 秒在 Obsidian + 飞书建好 task。
 
 ---
 
-## 系统要求
+## 🚀 v0.2.0 一键部署(推荐,5 分钟)
+
+```bash
+# 1. clone
+git clone https://github.com/wukongai/feishukanban-ob-sync.git
+cd feishukanban-ob-sync
+
+# 2. dry-run 预览
+./install.sh
+
+# 3. 真执行
+./install.sh --apply
+
+# 4. 建飞书表 + 22 字段
+#    参考 docs/feishu-schema.md(含 feishu-cli 一键创建命令)
+
+# 5. 配置
+cp config.example.yaml ~/Documents/Obsidian/scripts/feishukanban-ob-sync/config.yaml
+# 编辑 config.yaml,填 base_token / table_id / tenant_domain
+
+# 6. feishu-cli OAuth(如未登录)
+feishu-cli auth login --scope "base:record:retrieve base:record:update base:record:create"
+
+# 7. Cmd+Q 重启 Obsidian → Cmd+P 测「📝 快记任务」
+```
+
+✅ 完成。详细问题排查见下方「v0.1 手动 onboard」(老流程仍可用作 fallback)。
+
+---
+
+## 📋 v0.1 手动 onboard(30 分钟,作为 fallback)
+
+> 如果 install.sh 出问题 / 你想精确控制每一步,走这个流程。
+
+### 系统要求
 
 | 项 | 要求 | 验证命令 |
 |---|------|---------|

@@ -1,196 +1,190 @@
 # feishukanban-ob-sync
 
-> 📋 在 **Obsidian 日志**和**飞书多维表项目管理**之间做双向同步,让你既享受 Obsidian 的 ADHD 友好「子弹笔记式任务流」,又拥有飞书的「项目看板可视化」。
+> 📋 **Obsidian ↔ 飞书项目管理多维表 全闭环同步工具**。让你既享受 Obsidian 的 ADHD 友好「子弹笔记式任务流」,又拥有飞书的「项目看板可视化」,**两端永远一致**。
 
-![demo](docs/demo.gif)
-
-> *演示 GIF 录制中——预计 Phase 5 上线*
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.2.0-blue.svg)](CHANGELOG.md)
 
 ---
 
-## ✨ 为什么需要这个工具
+## 🚀 v0.2.0 上线 — task md 化架构 + 完整工作流
 
-你也许已经在 Obsidian 用 `Tasks 插件`管理日常任务,飞书侧用「多维表」做项目看板。痛点是:
+**从 inline 子弹笔记升级为 "first-class entity"**:每个 task = 独立 md 文件 + frontmatter 与飞书 22 字段 1:1 对齐,4 个 Cmd+P 命令覆盖创建 / 拉今日 / 完成 / 自动统计的**完整工作流**。
+
+📖 完整变更见 [CHANGELOG.md](CHANGELOG.md) / 系统架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+
+---
+
+## ✨ 痛点解决
 
 | 痛点 | 现状 | 这个工具 |
 |------|------|---------|
-| OB 勾 `[x]` 完成 → 飞书侧字段不会自动联动 | 手动到飞书后台填"执行状态/完成时间/交付物链接" | OB 勾对勾 → sync 自动写入飞书字段 |
-| OB 写新 task 没有飞书 record_id → 无法挂看板 | 手动到飞书新建 record + 复制链接贴回 OB | sync 自动 CREATE record + 写回长链到 markdown |
-| 飞书侧新创建的 task("是否今日"标记)→ OB 端看不到 | 手动跨平台抄录 | 反向 `--pull` 自动拉到当日 journal |
-| task 行 CREATE 时 `🆔/➕/✅/🔁` emoji metadata 丢失 | 老正则只匹配第一个 emoji 前空白 | **inject_url_into_line bug 修复:保留所有 emoji 到行尾** ⭐ |
-| wiki 长链不稳定弹 record 详情(SDK race condition) | 用户体感"点击没跳到 record" | **base URL 全自动方案:稳定弹 record,完全程序化** ⭐ |
+| OB 勾 `[x]` 完成 → 飞书侧字段不会自动联动 | 手动到飞书后台填字段 | **Cmd+P「✅ 完成当前 task」一键 sync** |
+| OB 写新 task → 没飞书 record_id → 无法挂看板 | 手动复制粘贴 | **Cmd+P「📝 快记任务」5 秒自动 CREATE** |
+| 飞书 app 挑了今日 todo → OB 端看不到 | 手动跨平台抄录 | **Cmd+P「📥 拉今日 todo」一键同步** |
+| 没事先计划直接干活 → 日终复盘要回忆做了什么 | 翻 git log + 文件 | **Claudian 对话"统计今天工作"自动归纳 + 写日志 + 飞书** |
+| 跨日浏览找未完成 task | 翻 30 份 journal | **`_task.base` 6 视图全景** |
+| ADHD 看板被未完成 task 充斥分心 | 每天看堆积如山 | **`today=true` 字段过滤,today journal 只见今天聚焦的** |
 
 ---
 
-## 🎯 核心功能
+## 🎯 4 个 Cmd+P 命令 = 完整工作流
+
+```
+☀️ 早上 7:00(2 分钟仪式):
+   ① 飞书 app 周看板 → 长按 task 勾「是否今日」=true(挑 3-5 条)
+   ② Obsidian Cmd+P 「📥 拉今日 todo」
+   → OB today journal「🎯 今日计划」段自动渲染 3-5 条 checkbox ✅
+
+🏃 白天工作:
+   ① 想新加临时 task → Cmd+P「📝 快记任务」
+   → 弹优先级 → 输标题 → 5 秒后 task md + 飞书 record 全部建好 ✅
+
+   ② 做完一条 → 打开 task md → Cmd+P「✅ 完成当前 task」
+   → inline ☑ + frontmatter done + 飞书 UPDATE Done(一键全闭环)✅
+
+🌙 晚上 22:00(3 分钟):
+   ③ 跟 Claudian 说"统计今天工作"
+   → 扫 git + 文件改动 → LLM 归纳 → 写日志「📊 今日自动统计」+ batch CREATE 飞书 Done record ✅
+```
+
+---
+
+## 📦 核心组件
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│  📤 正向 sync          OB journal task → 飞书 record │
-│  🔄 反向 pull         飞书 task("是否今日") → OB    │
-│  🔗 短链自动反查      短链 token → record_id O(1) cache │
-│  🎨 字段映射定制      yaml 配置驱动,零代码改动     │
+│  🎯 Cmd+P 入口(4 个 QuickAdd UserScripts)          │
+│     📝 快记任务 / 📥 拉今日 todo / ✅ 完成 task /     │
+│     🎯 同步今日 task 到飞书                          │
+└─────────────────────┬────────────────────────────────┘
+                      ↓
+┌─────────────────────┴────────────────────────────────┐
+│  🐍 Python 桥接层(sync.py + auto_collect_today.py)  │
+│     CREATE / UPDATE / pull-today / batch CREATE     │
+└─────────────────────┬────────────────────────────────┘
+                      ↓
+┌─────────────────────┴────────────────────────────────┐
+│  ☁️ 飞书项目管理多维表(22 字段)                      │
+│     周看板 / 今日 todo / 已完成 / ADHD 待抢救...      │
+└──────────────────────────────────────────────────────┘
+                      ↑
+┌─────────────────────┴────────────────────────────────┐
+│  📝 Obsidian Vault                                   │
+│  ├─ 04 Inbox/task/YYYY-MM-DD-<标题>.md (task md)    │
+│  ├─ _task.base(6 视图全景)                        │
+│  └─ journals/YYYY-MM-DD.md (dataview TASK 渲染)     │
 └──────────────────────────────────────────────────────┘
 ```
 
-### 📤 正向 sync(OB → 飞书)
-
-```bash
-python3 sync.py "journals/2026-05-19.md" --only-completed --apply
-```
-
-扫描 markdown task 行 `- [x] ...`,自动映射到飞书字段:
-
-- `[x]/[ ]/[/]/[-]` → 执行状态(Done/Todo/Doing/Block)
-- `✅ YYYY-MM-DD` → 完成时间(datetime)
-- `📎 [[xxx.md]]` 或 callout 块 → 交付物字段
-- 优先级 `🔺/⏫/🔼/🔽` → 价值优先级(可选)
-- 完成日 → ISO 周/月 enum(执行迭代周/月)
-
-### 🔄 反向 pull(飞书 → OB)
-
-```bash
-python3 sync.py --pull --apply
-```
-
-扫描飞书侧"是否今日"标记的 task,生成对应 OB task 行,自动判断:
-
-- task 已在 vault 历史日志(全 vault grep 标题模糊匹配)→ 提示"已存在"
-- task 不在历史 → 写入当日 journal 「🎯 今日计划」/「🐿️ 今日非计划」段
-
-### 🔗 短链自动反查 + cache
-
-新建 task 时用户可能粘的是飞书后台「复制记录链接」拿到的**短链**(`feishu.cn/record/<27 位>`):
-
-```markdown
-- [x] 【布丁】调研直播功能 ✅ 2026-05-19 🆔 abc123
-```
-
-sync.py 会:
-1. 按标题反查飞书表(lazy cache,一次 sync 仅 1 次 cli)
-2. 拿到 `rec_id` → 在 task 行末尾注入 `<!-- rec=recXXX -->` 注释 cache
-3. 下次 sync:O(1) 读注释,无 cli 调用
-
-**用户体验**:从飞书后台复制短链 → 贴到 OB → sync 自动接管,**零手动 manage 链接格式**。
-
-### 🎨 字段映射定制(yaml 配置驱动)
-
-```yaml
-# config.yaml(脱敏版见 config.example.yaml)
-field_map:
-  status:
-    field_name: 执行状态
-    field_type: multi_select
-    map:
-      x: Done
-      blank: Todo
-      "/": Doing
-      "-": Block
-  completed_time:
-    field_name: 完成时间
-    field_type: datetime
-  delivery:
-    field_name: 交付
-    field_type: text
-    extract:
-      inline_emoji: 📎
-      callout_types: [note, info]
-      backlink_field: delivery_for
-```
-
-加新字段 / 改字段名 → 改 yaml,零代码改动。
-
 ---
 
-## 🚀 5 分钟上手
+## 🚀 快速开始(5 分钟)
+
+### Step 1: clone + install
 
 ```bash
-# 1. 克隆仓库
 git clone https://github.com/wukongai/feishukanban-ob-sync.git
 cd feishukanban-ob-sync
-
-# 2. 装 feishu-cli(详见 INSTALL.md)
-brew install feishu-cli   # macOS;Linux 用 go install
-
-# 3. OAuth 登录飞书
-feishu-cli auth login --scope "base:record:retrieve base:record:update base:record:create"
-
-# 4. cp 配置模板 + 填 7 个用户机密
-cp config.example.yaml config.yaml
-# 用编辑器打开 config.yaml,把 <your-xxx> 占位符替换成你的真值
-
-# 5. 跑一次 dry-run 看看(无副作用)
-python3 sync.py "path/to/your/journal-today.md"
+./install.sh                                # dry-run 看会改什么
+./install.sh --apply                        # 真执行
 ```
 
-详细 9 步安装指引 → **[INSTALL.md](./INSTALL.md)** (新手 30 分钟完成第一次 sync)
+→ 自动:
+- symlink scripts 到你的 vault
+- symlink 4 个 QuickAdd UserScripts
+- 复制 task 模板 + base 视图 + rules 文档(如不存在)
+- 输出 QuickAdd choices JSON 让你手动粘贴
+
+### Step 2: 创建飞书表 + 22 字段
+
+参考 [docs/feishu-schema.md](docs/feishu-schema.md) 的 feishu-cli 一键命令,或去飞书后台手动建。
+
+### Step 3: 配置
+
+```bash
+cp config.example.yaml ~/Documents/Obsidian/scripts/feishukanban-ob-sync/config.yaml
+# 编辑 config.yaml,填 base_token / table_id / tenant_domain
+```
+
+### Step 4: 重启 Obsidian + 测试
+
+`Cmd+Q` 重启 Obsidian → `Cmd+P` 搜「📝 快记任务」→ 弹优先级 → 输标题 → 看 5 秒后飞书有没有新 record。
 
 ---
 
-## 📚 完整文档
+## 📚 文档
 
-| 文档 | 适合 | 阅读时间 |
-|------|------|---------|
-| [INSTALL.md](./INSTALL.md) | 第一次安装的人 | 30 分钟实操 |
-| [docs/tutorial/01-basic-push-sync.md](./docs/tutorial/01-basic-push-sync.md) | 想理解正向 sync 流程 | 10 分钟 |
-| [docs/tutorial/02-short-link-auto-lookup.md](./docs/tutorial/02-short-link-auto-lookup.md) | 想理解短链反查 + cache 机制 | 10 分钟 |
-| [docs/tutorial/03-reverse-pull.md](./docs/tutorial/03-reverse-pull.md) | 想用反向 pull | 10 分钟 |
-| [docs/tutorial/04-field-mapping-customization.md](./docs/tutorial/04-field-mapping-customization.md) | 想定制字段映射 | 10 分钟 |
-| [docs/skill-claude-code.md](./docs/skill-claude-code.md) | Claude Code 用户(skill 集成) | 5 分钟 |
-| [docs/design/](./docs/design/) | 想深入理解架构 / 已知坑 | 深度阅读 |
-
----
-
-## ⚠️ 已知限制
-
-| 限制 | 影响 | 缓解 |
-|------|------|------|
-| 飞书表 > 10000 条时拉全表慢(用于标题查重) | 50 页 × ~2 秒/页 ≈ 100 秒 | Lazy cache,一次 sync 仅 1 次拉全表 |
-| 短链 27 位 token 不能从 record_id 反推 | 程序化生成短链不可行 | 改用 base 长链(等同体验,完全程序化) |
-| OAuth scope 需手动配置 | 首次跑必须 `auth login` | INSTALL.md 详细指引 |
-| 字段名拼写错误会创建后台孤立选项 | 多选/单选字段会产生重复 enum | dry-run 必看,apply 前检查 |
-| Tasks 插件 emoji metadata 顺序敏感 | 多字段排序 `sort by priority` 必须在 `sort by created` 之前 | 模板已固化,见已知坑 6 |
-| 反向 pull 模糊匹配可能假阳性 | 前缀相似的不同 task 被错误升级 | dry-run 必审,apply 时 `--exclude-record <rec_id>` 跳过 |
-
-完整 11 条已知坑 → [docs/design/known-gotchas.md](./docs/design/known-gotchas.md)
+| 文档 | 用途 |
+|------|------|
+| [INSTALL.md](INSTALL.md) | 详细安装步骤 + 排障 |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 系统架构 + 数据流图 + 8 条原则自评 |
+| [docs/feishu-schema.md](docs/feishu-schema.md) | 飞书表 22 字段定义 + feishu-cli 一键创建命令 |
+| [docs/tutorial/05-task-md-workflow.md](docs/tutorial/05-task-md-workflow.md) | v0.2 主流程教程 |
+| [docs/tutorial/01-basic-push-sync.md](docs/tutorial/01-basic-push-sync.md) | 基础正向同步(v0.1 legacy) |
+| [docs/tutorial/02-short-link-auto-lookup.md](docs/tutorial/02-short-link-auto-lookup.md) | 短链自动反查 |
+| [docs/tutorial/03-reverse-pull.md](docs/tutorial/03-reverse-pull.md) | 反向同步(v0.1 老 `--pull`,v0.2 推荐 `--pull-today`) |
+| [docs/tutorial/04-field-mapping-customization.md](docs/tutorial/04-field-mapping-customization.md) | 字段映射定制 |
+| [docs/skill-claude-code.md](docs/skill-claude-code.md) | Claude Code 用户专用入门 |
+| [CHANGELOG.md](CHANGELOG.md) | 版本变更日志 |
 
 ---
 
-## 🤝 贡献 / 反馈
+## 🎓 适合的人
 
-- 🐛 **Bug 报告**:GitHub Issue,附上 sync.py 命令行参数 + dry-run 输出
-- 💡 **功能建议**:GitHub Issue,标 `enhancement` label
-- 🔧 **PR 欢迎**:fork → branch → 测试通过 → PR(描述里说为什么 + 怎么测的)
-- 📚 **教学反馈**:跟做 INSTALL.md 卡在哪一步告诉我,我会改文档
+- **个人项目管理 / ADHD** — 4 个 Cmd+P 命令降低操作成本到极限,看板视图全景管多项目
+- **Obsidian + 飞书重度用户** — 解决两端数据孤岛
+- **Claude Code 用户** — Claudian 主导的场景 ③ 自动统计是 LLM × workflow 的好范例
+- **想做"Obsidian + AI"专题内容的博主 / 训练营讲师** — v0.2 完整工作流是高质量演示素材
+
+---
+
+## ⚙️ 技术栈
+
+- **Python 3.8+**(`sync.py` ~2300 行,无外部依赖,只用标准库 + 系统 `feishu-cli`)
+- **feishu-cli**(飞书官方 cli,负责 OAuth + API 调用)
+- **Obsidian + QuickAdd + Templater + Tasks + Dataview** 插件
+- **shell**(`install.sh` 部署脚本)
+
+---
+
+## 🛣 Roadmap
+
+### v0.2.0(2026-05-26 当前)
+- ✅ task md 化架构
+- ✅ 4 个 Cmd+P 命令(创建 / 拉今日 / 完成 / 同步)
+- ✅ 自动统计今日工作场景 ③
+- ✅ install.sh 一键部署
+
+### v0.3(规划)
+- [ ] 反向 status 同步(飞书改 Done → OB 跟着)
+- [ ] 多 profile config(支持多张飞书表 / 多 vault)
+- [ ] Cmd+P「↩️ 撤销 task 完成」+「💤 task 冬眠」+「🔺 改优先级」补全
+- [ ] Demo GIF + 视频教程
+
+### v0.4(社区驱动)
+- [ ] 支持其他笔记软件(Logseq / Notion local)
+- [ ] 支持其他云表(Notion DB / Airtable)
+- [ ] 自动统计场景 ③ 加 Time Block Pomodoro 数据源
 
 ---
 
 ## 📄 License
 
-[MIT](./LICENSE) — 你可以自由 fork / 改 / 商用,只要保留 LICENSE 文件即可。
+MIT — 详见 [LICENSE](LICENSE)
 
 ---
 
 ## 🙏 致谢
 
-- **Claude Code (Anthropic)** — 整个工具是用 Claude Code 协同开发的,从 brainstorm → spec → plan → 实施 → 自评 → 抽取开源的完整 cycle
-- **inject_url_into_line bug 修复** — 2026-05-19 由专门的 Claude Code 会话(短链接修复窗口)发现并修复,作为本仓库的核心改进
-- **base URL 全自动方案** — 2026-05-19 同会话发现 wiki node API 的 `obj_token` 即 `base_token`,实现完全程序化稳定 URL
-- 致敬所有 Obsidian + 飞书用户的工程化探索精神
+- [feishu-cli](https://github.com/feishu-cli/feishu-cli) — 提供飞书 API 桥接
+- Obsidian 社区插件:[QuickAdd](https://github.com/chhoumann/quickadd) / [Templater](https://github.com/SilentVoid13/Templater) / [Tasks](https://github.com/obsidian-tasks-group/obsidian-tasks) / [Dataview](https://github.com/blacksmithgu/obsidian-dataview)
+- **Claude Code(Anthropic)** — 整个工具的 AI 协同开发主力
 
 ---
 
-## 📊 项目状态
+## 🐙 仓库
 
-| 阶段 | 状态 |
-|------|------|
-| MVP | ✅ 上线(2026-05-17) |
-| Phase 2.1(执行迭代周/月) | ✅ 上线(2026-05-18) |
-| Phase 2.2(反向 pull) | ✅ 上线(2026-05-18) |
-| Phase 2.3(短链自动反查) | ✅ 上线(2026-05-18) |
-| base URL 全自动 + inject bug 修复 | ✅ 上线(2026-05-19) |
-| **开源仓库抽取** | ✅ 上线(2026-05-19) |
-
----
-
-**仓库**:[GitHub](https://github.com/wukongai/feishukanban-ob-sync) · [Gitee 镜像](https://gitee.com/teacherai/feishukanban-ob-sync) · **作者**:teacherai · **基于**:Claude Code · Obsidian · 飞书多维表
+- GitHub: [`wukongai/feishukanban-ob-sync`](https://github.com/wukongai/feishukanban-ob-sync)
+- Gitee 镜像: [`teacherai/feishukanban-ob-sync`](https://gitee.com/teacherai/feishukanban-ob-sync)
+- Issues / PRs welcome 🎉

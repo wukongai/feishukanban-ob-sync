@@ -141,9 +141,9 @@ def extract_link(body: str) -> tuple[str, Optional[str]]:
 
 def extract_record_id(url: str, config: dict) -> Optional[str]:
     """从飞书 URL 抽 record_id(支持短链、base 长链、wiki 长链)
-    - 短链:       https://xxx.feishu.cn/record/<short-link-token>
-    - base 长链:  https://xxx.feishu.cn/base/<your-base-token>?table=tblxxx&record=rec_xxxxxxxxxxxxxx  (2026-05-19 起新写)
-    - wiki 长链:  https://xxx.feishu.cn/wiki/<your-wiki-node-token>?table=tblxxx&record=rec_xxxxxxxxxxxxxx  (历史兼容)
+    - 短链:       https://xxx.feishu.cn/record/HrKrrZ1HOeDfu5cdgXMcYDYTnZg
+    - base 长链:  https://xxx.feishu.cn/base/Vy8ubUWKbad5u1s8BCJcd1TlnFf?table=tblxxx&record=recvjLmrOiJ11K  (2026-05-19 起新写)
+    - wiki 长链:  https://xxx.feishu.cn/wiki/PAtUwFxlLiIgcwkK5ixcIRuJnHb?table=tblxxx&record=recvjLmrOiJ11K  (历史兼容)
     返回:
     - 长链(base 或 wiki) → 真实 record_id(rec 开头)
     - 短链 → 短串(27 位,需要后续 search 反查 record_id)
@@ -172,23 +172,28 @@ def is_short_record_id(record_id: str) -> bool:
 def parse_callout_below(content: str, task_line_idx: int, callout_types: list) -> Optional[str]:
     """解析 task 行下方紧跟的 callout(用于抽交付字段)。
     返回 callout 正文(去掉 > 前缀,合并多行),无则返回 None
+
+    2026-05-19 bug fix: 容忍前导空格缩进(Obsidian 标准:list item 下嵌套 callout 要 2 空格缩进)
+    旧 regex `>\s*` 从字符串开头匹配,不接受前导空格 → 错过所有 list 嵌套场景
     """
     lines = content.split("\n")
     if task_line_idx + 1 >= len(lines):
         return None
-    # 下一行必须以 > [! 开头
+    # 下一行必须以(可选前导空格 +) > [! 开头
     next_line = lines[task_line_idx + 1]
-    callout_match = re.match(r">\s*\[!(\w+)[+\-]?\s*", next_line)
+    callout_match = re.match(r"\s*>\s*\[!(\w+)[+\-]?\s*", next_line)
     if not callout_match:
         return None
     found_type = callout_match.group(1).lower()
     if found_type not in [t.lower() for t in callout_types]:
         return None
-    # 抽 callout 后续所有 `> ` 开头的行
+    # 抽 callout 后续所有 `(空格+)> ` 开头的行
     callout_lines = []
     i = task_line_idx + 1
-    while i < len(lines) and lines[i].startswith(">"):
-        line = re.sub(r"^>\s?", "", lines[i])
+    while i < len(lines) and lines[i].lstrip().startswith(">"):
+        # 先 lstrip 去前导空格,再去 `> ` 前缀
+        stripped = lines[i].lstrip()
+        line = re.sub(r"^>\s?", "", stripped)
         callout_lines.append(line)
         i += 1
     # 第一行是 `[!success] 标题`,去掉
@@ -450,8 +455,12 @@ def _format_yaml_value(value) -> str:
     - ISO 8601 datetime → 无引号(Obsidian 偏好,见 base-and-frontmatter.md 三原则)
     - 纯字母数字/_/-/./ → 无引号
     - 其他字符串 → 单引号包裹(内部单引号变 '')
-    - 非字符串(数字/布尔等) → str()
+    - 布尔 → 小写 `true` / `false`(YAML 标准 + dataview 解析为 boolean)
+    - 非字符串(数字等) → str()
     """
+    # ⚠️ bool 必须在 isinstance(int) 之前 check (Python 里 True is int)
+    if isinstance(value, bool):
+        return "true" if value else "false"
     if not isinstance(value, str):
         return str(value)
     # ISO 8601 datetime: 2026-05-17T19:36:47
@@ -710,7 +719,9 @@ def format_delivery_link(item: dict, config: dict) -> str:
     note = item.get("note", "").strip()
     display = note or Path(path).stem
 
-    # === 优先级 1: 飞书云文档 ===
+    # === 优先级 1: 飞书云文档(双链:飞书 URL + OB 本地路径) ===
+    # 2026-05-19 升级: 「交付」字段同时给出 飞书云文档可点击链接 + OB vault 内相对路径
+    # 用户场景:在飞书后台看到飞书云文档 URL 可点击查看;复制 OB 路径回 OB 内 Cmd+O 直接打开本地原版
     if enable_doc:
         # 补 .md 后缀 + 拼绝对路径
         rel_path = path if path.endswith('.md') else path + '.md'
@@ -721,7 +732,9 @@ def format_delivery_link(item: dict, config: dict) -> str:
             if doc_token:
                 url_template = feishu_cfg.get("doc_url_template", "https://feishu.cn/docx/{doc_token}")
                 doc_url = url_template.format(doc_token=doc_token)
-                return f"- [{display}]({doc_url})"
+                # 双链格式:`- [name](飞书 URL) · 📁 OB 路径`
+                # 用户决策(2026-05-19): 单行点分隔, OB 路径在右侧纯文本(在飞书侧可复制回 OB 打开)
+                return f"- [{display}]({doc_url}) · 📁 {rel_path}"
             # doc 推送失败 → 落到下面降级
         # 文件不存在 → 降级到 wikilink(只在 OB 内能跳)
 
@@ -863,6 +876,120 @@ def parse_journal(file_path: Path) -> list[dict]:
 
 
 # ============================================================
+# task md 模式:解析 task md frontmatter + 正文(2026-05-25 上线)
+# 设计参考 rules/feishu-project-sync.md「task md 化架构」section
+# ============================================================
+
+def parse_task_md(md_path: Path, config: dict) -> Optional[dict]:
+    """解析 task md 文件,返回结构化字典(供 build_fields_payload 用)
+
+    Returns: task dict(和 parse_task_line 同结构 + task md 专属字段 `_task_md_mode=True`)
+    或 None(如果文件不是合法的 task md)
+    """
+    if not md_path.exists():
+        print(f"❌ 文件不存在: {md_path}", file=sys.stderr)
+        return None
+
+    text = md_path.read_text(encoding="utf-8")
+    fm, _, body = parse_frontmatter(text)
+    if fm is None:
+        print(f"❌ 文件无 frontmatter,不是合法 task md: {md_path}", file=sys.stderr)
+        return None
+
+    # 抽标题:优先 H1,fallback 文件名(去掉 YYYY-MM-DD- 前缀)
+    title = None
+    h1_m = re.search(r'^# +(.+?)$', body, re.MULTILINE)
+    if h1_m:
+        candidate = h1_m.group(1).strip()
+        # 跳过 "<task 标题>" 这种占位符
+        if not (candidate.startswith("<") and candidate.endswith(">")):
+            title = candidate
+    if not title:
+        stem = md_path.stem
+        m_prefix = re.match(r'^\d{4}-\d{2}-\d{2}-(.+)$', stem)
+        title = m_prefix.group(1) if m_prefix else stem
+
+    # status enum → OB checkbox char(供 build_fields_payload 的 status_cfg.map 使用)
+    status_map = {
+        "todo": " ", "doing": "/", "done": "x", "block": "-", "cancel": "-",
+    }
+    status_str = fm.get("status") or "todo"
+    status_char = status_map.get(status_str, " ")
+
+    # priority enum → OB emoji(用于 dry-run 显示)
+    priority_map = {"P0": "🔺", "P1": "⏫", "P2": "🔼", "P3": "🔽"}
+    priority_emoji = priority_map.get(fm.get("priority"))
+
+    def _date_str(v):
+        """yaml 解析的 datetime/date 对象 → 'YYYY-MM-DD' str"""
+        if not v:
+            return None
+        if isinstance(v, str):
+            return v.split("T")[0] if "T" in v else v
+        return v.isoformat() if hasattr(v, 'isoformat') else str(v)
+
+    done_date = _date_str(fm.get("done_date"))
+    created_date = _date_str(fm.get("created"))
+
+    def extract_section(body_text: str, h2_pattern: str) -> Optional[str]:
+        """抽 ## <pattern> 段内容(到下一个 ## 之前),去除 HTML 注释"""
+        m = re.search(
+            rf'^## +{re.escape(h2_pattern)}.*?\n(.*?)(?=\n## +|\Z)',
+            body_text, re.MULTILINE | re.DOTALL,
+        )
+        if not m:
+            return None
+        content = m.group(1).strip()
+        content = re.sub(r'<!--.*?-->', '', content, flags=re.DOTALL).strip()
+        return content if content else None
+
+    execution_summary = extract_section(body, "📝 执行概述")
+    acceptance = extract_section(body, "✅ 验收条件")
+    thinking = extract_section(body, "💡 执行思路")
+    resources = extract_section(body, "🔗 相关资料")
+    retrospective_text = extract_section(body, "🪞 复盘")
+
+    feishu_record = fm.get("feishu_record")
+    if feishu_record and not isinstance(feishu_record, str):
+        feishu_record = str(feishu_record)
+
+    return {
+        # journal task dict 同款字段(给 build_fields_payload 用)
+        "line_idx": 0,
+        "raw_line": "",
+        "status_char": status_char,
+        "title": title,
+        "url": fm.get("feishu_url"),
+        "record_id": feishu_record if feishu_record else None,
+        "done_date": done_date,
+        "created_date": created_date,
+        "canceled_date": None,
+        "priority": priority_emoji,
+        "deliveries_inline": [],
+        "deliveries_callout": [],
+        "delivery_callout_text": None,
+        "journal_date": created_date,
+        # task md 模式专属字段(build_fields_payload 通过 _task_md_mode 标记识别)
+        "_task_md_mode": True,
+        "_task_md_path": md_path,
+        # priority_str 直接传 P0/P1/P2/P3 字符串到飞书"价值优先级"
+        # (priority 字段保留 emoji 形态供 journal 兼容 + dry-run 显示)
+        "priority_str": fm.get("priority"),
+        "category": fm.get("category"),
+        "subcategory": fm.get("subcategory"),
+        "adhd_priority": fm.get("adhd_priority"),
+        "estimate_hours": fm.get("estimate_hours"),
+        "efficiency": fm.get("efficiency"),
+        "acceptance": acceptance,
+        "thinking": thinking,
+        "resources": resources,
+        "retrospective_text": retrospective_text,
+        "execution_summary": execution_summary,
+        "due": _date_str(fm.get("due")),
+    }
+
+
+# ============================================================
 # 飞书侧:cli 封装
 # ============================================================
 
@@ -936,7 +1063,7 @@ def best_match_enum(field_id: str, query: str, config: dict) -> Optional[str]:
     """调 feishu-cli field search-options 模糊匹配单/多选字段的 enum 选项
 
     Args:
-        field_id: 飞书字段 id(如 <your-fld-id>,从 feishu-cli bitable field list 拿)
+        field_id: 飞书字段 id(如 fld4dy5MJj,从 feishu-cli bitable field list 拿)
         query: 候选词(如 "26W20")
         config: 全局配置(用 feishu.base_token / table_id)
 
@@ -1179,6 +1306,33 @@ def build_fields_payload(task: dict, config: dict, vault_root: Path, existing_de
         template = retro_cfg["template"]
         out[retro_cfg["field_name"]] = template.format(date=task["journal_date"])
 
+    # === task md 模式专属字段(2026-05-25 上线)===
+    # 仅当 task 由 parse_task_md 返回(带 _task_md_mode 标记)时处理
+    # 新字段:category / subcategory / adhd_priority / estimate_hours /
+    #         efficiency / acceptance / thinking / resources /
+    #         retrospective_text / execution_summary
+    if task.get("_task_md_mode"):
+        task_md_cfg = config.get("task_md_fields", {})
+        for ob_key, fcfg in task_md_cfg.items():
+            field_name = fcfg.get("field_name")
+            if not field_name:
+                continue
+            value = task.get(ob_key)
+            if value is None or value == "":
+                continue
+            # select(多)字段需要 list 包裹
+            if ob_key == "subcategory":
+                out[field_name] = value if isinstance(value, list) else [value]
+            # number 字段
+            elif ob_key == "estimate_hours":
+                try:
+                    out[field_name] = float(value)
+                except (ValueError, TypeError):
+                    pass
+            # 其他全部当 text / select(单) 处理
+            else:
+                out[field_name] = str(value)
+
     return out
 
 
@@ -1396,6 +1550,90 @@ def push_journal(file_path: Path, apply: bool = False, only_completed: bool = Fa
         for action, err in failures:
             print(f"  - {action['task']['title'][:50]}: {err}")
     print(f"{'='*60}\n")
+
+
+def push_task_md(md_path: Path, apply: bool = False) -> None:
+    """单 task md 推送到飞书(CREATE/UPDATE) — 2026-05-25 上线
+
+    用法:python3 sync.py --task-md path/to/task.md [--apply]
+
+    流程:
+    1. parse_task_md 抽 frontmatter + 正文 H2 段
+    2. build_fields_payload 转飞书 payload(走 _task_md_mode 分支)
+    3. feishu_upsert_record CREATE/UPDATE
+    4. 成功后回写 feishu_record + feishu_url 到 task md frontmatter
+
+    铁律 #1 例外(rules/feishu-project-sync.md):
+    - 仅"单条 CREATE 新 task"自动跑(空白记录新建,无覆盖风险)
+    - UPDATE 仍需 dry-run + 用户审核(由调用方决定是否 --apply)
+    """
+    config = load_config()
+
+    print(f"\n{'=' * 60}")
+    print(f"📝 task md 模式: {md_path}")
+    if not apply:
+        print(f"📌 dry-run(--apply 才真写)")
+    print(f"{'=' * 60}\n")
+
+    task = parse_task_md(md_path, config)
+    if task is None:
+        sys.exit(1)
+
+    is_create = not task.get("record_id")
+    action = "CREATE" if is_create else "UPDATE"
+
+    print(f"--- {action}: {task['title']}")
+    print(f"    优先级: {task.get('priority') or '(无)'}")
+    print(f"    状态: [{task['status_char']}]")
+    if task.get("done_date"):
+        print(f"    完成日: {task['done_date']}")
+    if task.get("category"):
+        print(f"    大类: {task['category']}")
+    if task.get("subcategory"):
+        print(f"    小类: {task['subcategory']}")
+    if task.get("adhd_priority"):
+        print(f"    ADHD: {task['adhd_priority']}")
+    if task.get("estimate_hours"):
+        print(f"    估时: {task['estimate_hours']}h")
+
+    fields = build_fields_payload(task, config, VAULT_ROOT, existing_delivery="")
+    print(f"\n    Payload: {json.dumps(fields, ensure_ascii=False, indent=6)[:800]}")
+
+    if not apply:
+        print(f"\n📌 dry-run 完成。--apply 真写飞书 + 回写 feishu_record/url 到 task md")
+        return
+
+    print(f"\n🚀 开始 {action}...")
+    try:
+        result = feishu_upsert_record(
+            record_id=task.get("record_id"),
+            fields=fields,
+            config=config,
+            dry_run=False,
+        )
+    except Exception as e:
+        print(f"\n❌ {action} 失败: {e}")
+        sys.exit(1)
+
+    record_id = result.get("record_id")
+    if not record_id:
+        print(f"\n❌ {action} 成功但未返回 record_id: {result}")
+        sys.exit(1)
+
+    record_url = build_record_url(record_id, config)
+
+    print(f"\n✅ {action} 成功")
+    print(f"    record_id: {record_id}")
+    print(f"    URL: {record_url[:100]}...")
+
+    updates = {
+        "feishu_record": record_id,
+        "feishu_url": record_url,
+    }
+    if update_md_frontmatter(md_path, updates):
+        print(f"💾 已回写 feishu_record / feishu_url 到 {md_path.name}")
+    else:
+        print(f"⚠️  回写 frontmatter 失败,请手动加 feishu_record: {record_id}")
 
 
 def build_record_url(record_id: str, config: dict) -> str:
@@ -1821,6 +2059,222 @@ def scan_vault_record_ids(config: dict) -> set:
 
 
 # ============================================================
+# Pull-today 模式(2026-05-26 上线)
+# 飞书侧「是否今日」=true → OB task md frontmatter today=true
+# 双向对齐 - 飞书 false 时 OB 也跟着 set false
+# 配套 rules/feishu-project-sync.md「今日 todo 双层架构」section
+# ============================================================
+
+def _fetch_all_records_from_feishu(config: dict) -> tuple:
+    """拉飞书全表 record,自动分页(200/页)。
+
+    Returns: (records: list, ids: list, fields_meta: list)
+    复用 pull_from_feishu 里同样的拉取逻辑,但抽出为独立函数便于复用。
+    """
+    all_records, all_ids = [], []
+    fields_meta = None
+    offset = 0
+    while True:
+        result = run_cli([
+            "bitable", "record", "list",
+            "--base-token", config["feishu"]["base_token"],
+            "--table-id", config["feishu"]["table_id"],
+            "--limit", "200",
+            "--offset", str(offset),
+        ])
+        page_records = result.get("data", [])
+        page_ids = result.get("record_id_list", [])
+        if fields_meta is None:
+            fields_meta = result.get("fields", [])
+        if not page_records:
+            break
+        all_records.extend(page_records)
+        all_ids.extend(page_ids)
+        if len(page_records) < 200:
+            break
+        offset += 200
+    return all_records, all_ids, fields_meta
+
+
+def _scan_ob_task_md_by_feishu_record(task_dir: Path) -> dict:
+    """扫 04 Inbox/task/ 下所有 .md,按 feishu_record 字段建索引。
+
+    Returns: {rec_id: {"path": Path, "today": bool, "status": str}}
+    跳过没 feishu_record 字段的 task md(=本地新建未 sync 飞书的)
+    跳过 _ 开头的 _task.base / _说明.md 等
+    """
+    index = {}
+    for md_path in task_dir.rglob("*.md"):
+        if md_path.name.startswith("_"):
+            continue
+        try:
+            text = md_path.read_text(encoding="utf-8")
+        except Exception:
+            continue
+
+        # 简单 frontmatter parse(只读不动)
+        m = re.match(r"^---\r?\n(.*?)\r?\n---", text, re.DOTALL)
+        if not m:
+            continue
+        fm_text = m.group(1)
+
+        rec_id = None
+        today_val = False
+        status_val = "todo"
+        for line in fm_text.split("\n"):
+            line = line.rstrip()
+            if line.startswith("feishu_record:"):
+                val = line.split(":", 1)[1].strip().strip("'\"")
+                # 跳过空值 / 注释
+                if val and not val.startswith("#"):
+                    rec_id = val
+            elif line.startswith("today:"):
+                v = line.split(":", 1)[1].strip().strip("'\"").lower()
+                today_val = v in ("true", "yes", "1")
+            elif line.startswith("status:"):
+                v = line.split(":", 1)[1].strip().strip("'\"").lower()
+                if v and not v.startswith("#"):
+                    status_val = v
+
+        if rec_id:
+            index[rec_id] = {"path": md_path, "today": today_val, "status": status_val}
+
+    return index
+
+
+def pull_today_from_feishu(apply: bool = False) -> None:
+    """拉飞书「是否今日」=true 的 record,同步更新 OB task md frontmatter today 字段。
+
+    范围(双向对齐):
+    - 飞书 today=true,OB task md today=false → 改 OB today=true(plan_set_true)
+    - 飞书 today=false,OB task md today=true → 改 OB today=false(plan_set_false)
+    - 飞书 today=true,OB 无对应 task md → 报告(不自动建,提示用户手动建)
+    - 飞书 today=true,OB 已 today=true → 跳过(无操作)
+
+    设计决策:
+    - 不自动建 task md(避免反向映射 priority/category 等多字段易出错)
+    - 用户工作流:飞书 app 勾「是否今日」=true → 跑此命令 → OB today 同步
+    - "飞书有 OB 无"场景:用户可在 OB 端 Cmd+P「📝 快记任务」手动建,或不管
+
+    跨日清理策略(rules/feishu-project-sync.md「今日 todo」section):
+    - 每日早上**手动**在飞书 app 清掉昨天的「是否今日」标记 + 重新挑(ADHD friendly)
+    - 跑此命令时,OB today=true 但飞书 false 的会自动 set false
+    """
+    config = load_config()
+    vault_root = find_vault_root()
+    task_dir = vault_root / "04 Inbox" / "task"
+
+    print(f"\n{'='*60}")
+    print(f"📥 pull-today: 飞书「是否今日」=true → OB task md today=true")
+    print(f"{'='*60}\n")
+
+    if not task_dir.exists():
+        print(f"❌ task 目录不存在: {task_dir}")
+        return
+
+    # Step 1: 拉飞书全表
+    print("⏳ 拉飞书全表 record...")
+    all_records, all_ids, fields_meta = _fetch_all_records_from_feishu(config)
+    print(f"✅ 飞书共 {len(all_records)} 条 record\n")
+
+    # Step 2: 筛「是否今日」=true 的 candidates
+    today_candidates = filter_today_tasks(all_records, all_ids, fields_meta, config)
+    today_record_ids = {rid for rid, _ in today_candidates}
+    print(f"🔍 飞书「是否今日」=true: {len(today_record_ids)} 条")
+
+    # Step 3: 扫 OB 端 task md 建索引
+    print("⏳ 扫 OB task md(按 feishu_record 建索引)...")
+    ob_index = _scan_ob_task_md_by_feishu_record(task_dir)
+    print(f"✅ OB 共 {len(ob_index)} 个 task md(有 feishu_record 关联的)\n")
+
+    # Step 4: 分类计划
+    plan_set_true = []    # 飞书=true, OB 有 today=false → set true
+    plan_set_false = []   # 飞书=false, OB 有 today=true → set false
+    plan_missing = []     # 飞书=true, OB 无对应 task md → 报告
+    plan_skip = []        # 飞书=true, OB 已 today=true → 跳
+
+    title_field_name = config["reverse"]["field_to_ob"]["title_field"]
+    title_idx = fields_meta.index(title_field_name) if title_field_name in fields_meta else 0
+
+    for rid, row in today_candidates:
+        title = (row[title_idx] if title_idx < len(row) else "") or "(无标题)"
+        if rid in ob_index:
+            entry = ob_index[rid]
+            if entry["today"]:
+                plan_skip.append((rid, title, entry["path"]))
+            else:
+                plan_set_true.append((rid, title, entry["path"]))
+        else:
+            plan_missing.append((rid, title))
+
+    for rid, entry in ob_index.items():
+        if entry["today"] and rid not in today_record_ids:
+            plan_set_false.append((rid, entry["path"]))
+
+    # Step 5: 打印计划摘要
+    print(f"📋 计划摘要:")
+    print(f"  ➡️  设 today=true:    {len(plan_set_true)} 条")
+    print(f"  ⬅️  设 today=false:   {len(plan_set_false)} 条")
+    print(f"  ⏭️  已是 today,跳过: {len(plan_skip)} 条")
+    print(f"  ⚠️  飞书有 OB 无:    {len(plan_missing)} 条")
+
+    if plan_set_true:
+        print(f"\n--- 设 today=true({len(plan_set_true)} 条)---")
+        for rid, title, p in plan_set_true:
+            print(f"  ✅ {p.name[:55]}  ← {rid}")
+
+    if plan_set_false:
+        print(f"\n--- 设 today=false({len(plan_set_false)} 条)---")
+        for rid, p in plan_set_false:
+            print(f"  ⬜ {p.name[:55]}")
+
+    if plan_skip:
+        print(f"\n--- 已是 today,跳过({len(plan_skip)} 条)---")
+        for rid, title, p in plan_skip[:5]:
+            print(f"  ⏭  {p.name[:55]}")
+        if len(plan_skip) > 5:
+            print(f"  ... 还有 {len(plan_skip) - 5} 条")
+
+    if plan_missing:
+        print(f"\n--- ⚠️ 飞书「是否今日」=true 但 OB 无对应 task md({len(plan_missing)} 条)---")
+        print(f"    建议:Cmd+P「📝 快记任务」在 OB 端手建,或忽略(下次需要再建)")
+        for rid, title in plan_missing[:10]:
+            print(f"  🆕 {title[:55]}  rid={rid}")
+        if len(plan_missing) > 10:
+            print(f"  ... 还有 {len(plan_missing) - 10} 条")
+
+    if not (plan_set_true or plan_set_false):
+        print(f"\n✅ OB ↔ 飞书 today 状态已对齐,无需更新")
+        return
+
+    if not apply:
+        print(f"\n📌 dry-run 完成。--apply 真写 frontmatter")
+        return
+
+    # Step 6: apply
+    print(f"\n🚀 开始 apply...")
+    success_count = 0
+    fail_count = 0
+    for rid, title, p in plan_set_true:
+        if update_md_frontmatter(p, {"today": True}):
+            print(f"  ✅ {p.name}: today → true")
+            success_count += 1
+        else:
+            print(f"  ❌ {p.name}: 更新失败")
+            fail_count += 1
+
+    for rid, p in plan_set_false:
+        if update_md_frontmatter(p, {"today": False}):
+            print(f"  ✅ {p.name}: today → false")
+            success_count += 1
+        else:
+            print(f"  ❌ {p.name}: 更新失败")
+            fail_count += 1
+
+    print(f"\n✅ pull-today 完成({success_count} 成功 / {fail_count} 失败)")
+
+
+# ============================================================
 # CLI 入口
 # ============================================================
 
@@ -1832,14 +2286,21 @@ def main():
     )
     parser.add_argument("path", nargs="?", help="日志文件路径(push 模式必填)")
     parser.add_argument("--apply", action="store_true", help="真写(默认 dry-run)")
-    parser.add_argument("--pull", action="store_true", help="反向同步:从飞书拉到 OB")
+    parser.add_argument("--pull", action="store_true", help="反向同步:从飞书拉到 OB(老:写 journal inline)")
+    parser.add_argument("--pull-today", action="store_true",
+                        help="2026-05-26 上线:飞书「是否今日」=true → OB task md frontmatter today=true(双向对齐)")
     parser.add_argument("--since", help="--pull 模式的起始日期(YYYY-MM-DD)")
     parser.add_argument("--only-completed", action="store_true",
                         help="只同步已完成 task ([x] / [-]),跳过未完成的")
+    parser.add_argument("--task-md", help="task md 模式:单 task md 推送到飞书(CREATE/UPDATE)")
     args = parser.parse_args()
 
-    if args.pull:
+    if args.pull_today:
+        pull_today_from_feishu(apply=args.apply)
+    elif args.pull:
         pull_from_feishu(since_date=args.since, apply=args.apply)
+    elif args.task_md:
+        push_task_md(Path(args.task_md), apply=args.apply)
     elif args.path:
         push_journal(Path(args.path), apply=args.apply, only_completed=args.only_completed)
     else:

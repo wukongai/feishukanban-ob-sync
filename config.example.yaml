@@ -1,60 +1,48 @@
-# feishukanban-ob-sync 配置文件示例
+# feishukanban-ob-sync v0.2.0 配置文件示例
 # ============================================================
 # 使用方法:
 #   1. cp config.example.yaml config.yaml
 #   2. 把所有 <your_xxx> 占位符替换成你的真实值
-#   3. config.yaml 已被 .gitignore 屏蔽,不会被 commit
+#   3. 详细字段说明见 docs/feishu-schema.md
+#   4. config.yaml 已被 .gitignore 屏蔽,不会被 commit
 # ============================================================
-#
-# 把"绑定哪张多维表 + 字段映射"等可变项抽到 yaml,以后切换表只改这里。
+
+# 飞书项目同步 - 配置文件
+# 作用:把"绑定哪张多维表 + 字段映射"等可变项抽到 yaml,以后切换表只改这里(对应架构原则 #7 高复用修复)
 
 # === 飞书侧 ===
 feishu:
-  # 多维表 base_token
-  # 怎么找:
-  #   方式 A:用 feishu-cli wiki list 后从结果里找你目标表的 obj_token
-  #   方式 B:在浏览器打开飞书多维表,看 URL 里 ?token=xxxxx,xxxxx 就是 base_token
+  # 多维表 base_token(从 wiki 节点解析得到)
   base_token: <your_base_token>
-
-  # table_id
-  # 怎么找:feishu-cli bitable table list --base-token <your_base_token>
-  #   返回里 "table_id" 字段,通常 "tbl" 开头
   table_id: <your_table_id>
-
-  # 表名(用于 dry-run 输出可读性,不影响功能)
   table_name: 项目管理
-
   # 主视图 ID(用于拼链接,新建 record 后让链接默认打开此视图)
-  # 怎么找:feishu-cli bitable view list --base-token X --table-id Y
   default_view_id: <your_view_id>
-
   # 飞书租户域名(用于拼 URL)
-  # 怎么找:登录飞书后看浏览器地址栏,如 "https://xxxxx.feishu.cn/..." 里的 xxxxx.feishu.cn
   tenant_domain: <your_tenant>.feishu.cn
-
   # wiki 节点 token(用于拼 wiki 形式的长 URL)
-  # 怎么找:浏览器打开你的飞书 wiki 节点,看 URL "https://xxx.feishu.cn/wiki/<这一段>"
   wiki_node_token: <your_wiki_node_token>
 
-  # === 飞书云文档同步(可选) ===
-  # 把笔记本里 [[xxx.md]] 交付物推送为飞书云文档,在飞书侧显示为可点击的蓝色超链接
-  # 解决 obsidian:// URL Scheme 在飞书 security 跳转下完全失效的问题
-  doc_folder_token: null   # null = 飞书云空间根目录;想归档到指定文件夹改 folder_token
+  # === 飞书云文档(2026-05-17 Phase 1.7 升级)===
+  # 把 OB 交付物 .md 推到飞书云文档,「交付」字段用云文档 URL 替代死链 wikilink
+  # 解决 obsidian:// 在飞书 security 跳转下完全失效的问题(2026-05-17 事故)
+  # 默认 folder = null = 飞书云空间根目录;想归档到指定文件夹改 folder_token
+  doc_folder_token: null
+  # 云文档 URL 模板(变量: {doc_token})
   doc_url_template: "https://feishu.cn/docx/{doc_token}"
-  # 是否启用(true = sync 时把 .md 推送到飞书 + 交付字段用云文档 URL)
-  # 首次启用前先跑:feishu-cli auth login --scope "docx:document docx:document:create"
-  enable_doc_sync: false   # 不熟悉的用户先关闭,等基本流程跑通再开
+  # 是否启用飞书云文档同步(true = sync 时把 .md 推送到飞书 + 交付字段用云文档 URL)
+  enable_doc_sync: true
 
 # === 字段映射 ===
-# 笔记里的信号 → 飞书表的字段名
+# OB 笔记里的信号 → 飞书表的字段名
 fields:
   # 必填:任务标题(从 markdown 链接的 text 部分抽)
   title: 任务标题
 
-  # 完成状态(单选/多选 enum: Todo/Doing/Done/Block/Idea)
+  # 完成状态(单选/多选,enum: Todo/Doing/Done/Block/Idea)
   status:
     field_name: 执行状态
-    # 笔记 task 状态字符 → 飞书状态
+    # OB 信号映射
     map:
       "[ ]": Todo
       "[/]": Doing
@@ -67,16 +55,15 @@ fields:
     emoji: "✅"
 
   # 创建时间(datetime,从 Tasks 插件 ➕ YYYY-MM-DD 抽)
-  # 飞书表里如果没有此字段,会被静默跳过
   created_date:
-    field_name: 创建时间
+    field_name: 创建时间  # 飞书表里如果没有此字段,会被静默跳过
     emoji: "➕"
 
   # 优先级映射(默认禁用!)
-  # 设计取舍:Tasks 插件的 🔺⏫🔼🔽 语义是"紧急度",飞书的"价值优先级"语义是"商业价值",两者不一定等价
-  # 想统一时:把 field_name 改成 "价值优先级" 并保留 emoji_map 映射
+  # 原因:OB Tasks 插件的 🔺⏫🔼🔽 语义是"紧急度",飞书的"价值优先级"语义是"商业价值",两者不一定等价
+  # 你想统一时:把 field_name 改成 "价值优先级" 并加 emoji_map 映射
   priority:
-    field_name: null   # null = 禁用此映射,不写"价值优先级"字段
+    field_name: null  # null = 禁用此映射,不写"价值优先级"字段
     emoji_map:
       "🔺": P0
       "⏫": P1
@@ -84,20 +71,25 @@ fields:
       "🔽": P3
 
   # 交付字段(text)
-  # 扫 3 种 OB 端表达方式,合并 union 去重后写入飞书"交付"字段:
+  # D 混合架构:扫 3 种 OB 端表达方式,合并 union 去重后写入
   #   A 路径(同行 wikilink):task 行内 📎 后跟 [[xxx]] 多个
   #   B 路径(callout 块):task 行下方紧跟的 callout
   #   C 路径(反向 frontmatter):全 vault 扫 frontmatter `delivery_for: [<record_id>]`
   delivery:
     field_name: 交付
-    callout_types:        # B 路径:检测的 callout 类型
+    # B 路径:检测的 callout 类型(出现任一即抽)
+    callout_types:
       - success
       - done
       - note
-    inline_emoji: "📎"    # A 路径:同行 wikilink 的 emoji 触发符
-    backlink_field: delivery_for  # C 路径:笔记 frontmatter 里的反向链接字段名
+    # A 路径:同行 wikilink 的 emoji 触发符(后跟 [[xxx]] 才识别)
+    inline_emoji: "📎"
+    # C 路径:frontmatter 字段名(笔记里的反向链接字段)
+    backlink_field: delivery_for
     # 飞书侧展示格式 - markdown 列表 + 原话备注
     # 模板变量:{items_md} {original_text} {sync_date}
+    # items_md = "- [[xxx.md]] 教程文档\n- [[yyy.py]] 同步脚本"
+    # original_text = 飞书侧手工填的"原话"(不含 wikilink 时保留;含 wikilink 时丢弃旧自动生成的部分)
     format_template: |-
       交付物:
       {items_md}
@@ -113,35 +105,73 @@ fields:
       ——自动同步 {sync_date}——
 
   # 复盘字段
-  # 设计哲学:复盘是「人进行的反思」,留给手填心得
-  # 字段分工:交付 = 机器忙(扫笔记自动填); 复盘 = 人进行(去飞书后台手填)
+  # 用户决策(2026-05-17):取消 sync 自动填 —— 复盘是「人进行的反思」,留给手填心得
+  # 字段分工:交付 = 机器忙(扫 OB 产物自动填); 复盘 = 人进行(去飞书后台手填)
   # 想恢复自动填:把 field_name 改回 "复盘" + 用 template "[[journals/{date}]]"
   retrospective:
-    field_name: null   # null = 禁用此字段自动填
+    field_name: null  # null = 禁用此字段自动填
     template: "[[journals/{date}]]"
 
   # 执行迭代周(单选 enum, 基于完成日 ✅ 反推所在 ISO 周)
+  # 2026-05-18 上线 - 用户截图发现"涉及周看板"重要,详见:
+  #   spec: 04 Inbox/superpowers/specs/2026-05-18-飞书项目同步-执行迭代周月-自动写入设计.md
   # derive 候选词模板: {YY}W{NN:02d}  例: 26W20 (YY=年后2位, NN=ISO week number 0填充2位)
-  # 工作机制:cli search-options 用候选词模糊匹配 → 遍历 options 找第一个 query in name 的 → 取其 name
+  # cli search-options 用候选词模糊匹配 → 遍历 options 找第一个 query in name 的 → 取其 name
   # 未命中(飞书没建该周 enum)→ 静默跳过,该 task 此字段不写
   # 关闭此字段自动填: field_name: null
   iteration_week:
     field_name: 执行迭代周
-    # field_id 怎么找:feishu-cli bitable field list --base-token X --table-id Y
-    # 返回里找你的字段,取 "field_id"(通常 "fld" 开头)
-    field_id: <your_iteration_week_field_id>
+    field_id: <your_iter_week_field_id>            # cli search-options 必填,从 feishu-cli bitable field list 拿
     derive_template: "{YY}W{NN:02d}"
 
   # 执行迭代月(单选 enum, 基于完成日 ✅ 所在月份)
   # derive 候选词模板: "{YY} 年 {M} 月"  例: 26 年 5 月
-  # 注意中英文混排有半角空格(符合中文排版规范)
+  # (注意中英文混排有半角空格, 符合 base-and-frontmatter.md 中英文混排空格规范)
   iteration_month:
     field_name: 执行迭代月
-    field_id: <your_iteration_month_field_id>
+    field_id: <your_iter_month_field_id>
     derive_template: "{YY} 年 {M} 月"
 
+# === task md 模式专属字段(2026-05-25 上线) ===
+# 这些字段只在 `python3 sync.py --task-md <path>` 模式下生效
+# journal inline task 模式没有这些字段(用 H1 单标题 + emoji 元数据,不支持详细分类)
+# 详见 rules/feishu-project-sync.md「task md 化架构」section
+task_md_fields:
+  # task md 文件名 → 标题(去掉 YYYY-MM-DD- 前缀);frontmatter title 字段优先
+  # 飞书"任务标题"字段已由通用 title 处理,这里只列 task md 专属
+
+  # priority(P0/P1/P2/P3 → 飞书"价值优先级")
+  # 用户拍板:task md ↔ 飞书对齐,priority 直接映射
+  # journal 模式仍由全局 priority 配置控制(默认禁用,避免覆盖飞书后台手动评估)
+  priority_str:
+    field_name: 价值优先级
+  category:
+    field_name: 大类               # select(单)
+  subcategory:
+    field_name: 小类               # select(多)
+  adhd_priority:
+    field_name: ADHD优先级         # select(单)
+  estimate_hours:
+    field_name: 估时               # number
+  efficiency:
+    field_name: 完成效率           # select(单): 高/中/低
+  acceptance:
+    field_name: 验收条件           # text(从 task md「## ✅ 验收条件」段抽)
+  thinking:
+    field_name: 执行思路           # text(从 task md「## 💡 执行思路」段抽)
+  resources:
+    field_name: 相关资料           # text(从 task md「## 🔗 相关资料」段抽)
+  retrospective_text:
+    field_name: 复盘               # text(从 task md「## 🪞 复盘」段抽)
+  execution_summary:
+    field_name: 执行概述           # text(从 task md「## 📝 执行概述」段抽,也是正文主体)
+  # due(截止日期):飞书表暂无对应字段。等用户在后台加 datetime 字段后填 field_name
+  due:
+    field_name: null               # null = 跳过
+
 # === 反向同步(飞书 → OB) ===
-# sync.py --pull 命令的行为配置
+# 2026-05-18 Phase 2.2 上线
+# 详见 spec: 04 Inbox/superpowers/specs/2026-05-18-sync.py-反向 pull 实现-设计.md
 reverse:
   # 默认 filter: 飞书侧 "是否今日" 字段为 true 的 task
   # 简单版: 不支持 cli flag override (sync.py --pull 始终用这个)
@@ -150,11 +180,11 @@ reverse:
     field_name: 是否今日
     truthy: true
 
-  # 反向字段映射: 飞书字段 → 笔记 Tasks 行结构
+  # 反向字段映射: 飞书字段 → OB Tasks 行结构
   field_to_ob:
     title_field: 任务标题
     status_field: 执行状态
-    # 飞书状态 → 笔记 checkbox char
+    # 飞书状态 → OB checkbox char
     # fallback: 飞书 Done 但 完成时间空 → 降级为 " " ([ ] 未完成) + dry-run 警告
     status_map:
       Done: "x"
@@ -165,7 +195,7 @@ reverse:
       cancel: "-"
     done_date_field: 完成时间
     priority_field: 价值优先级
-    # 飞书价值优先级 → 笔记 Tasks 优先级 emoji
+    # 飞书价值优先级 → OB Tasks 优先级 emoji
     # 空 → 不写 emoji, 落「🐿️ 非计划」段
     priority_map:
       P0: "🔺"
@@ -182,7 +212,7 @@ reverse:
     section_with_priority: "## 🎯 今日计划"
     section_no_priority: "## 🐿️ 今日非计划"
 
-  # 查重策略
+  # 查重策略 (2026-05-18 rule 坑 #8 教训)
   dedup:
     # 按标题"前缀关键词"(去掉【】+ 取前 N 字)做 grep 全 vault journals/
     # 命中老 task → 升级老 task 的短链为新 wiki 长链(让老 task 进入 sync.py 可管理范围)
@@ -190,30 +220,30 @@ reverse:
     title_prefix_chars: 10
     on_match: upgrade_short_to_long  # 唯一支持的策略
 
-  # fallback 行为
+  # fallback 行为 (2026-05-18 D7 决策)
   fallback:
-    # 飞书 Done 但完成时间空 → 笔记写 [ ] 未完成 (不写 [x] + 不写 ✅)
+    # 飞书 Done 但完成时间空 → OB 写 [ ] 未完成 (不写 [x] + 不写 ✅)
     done_without_date: skip_checkmark
     warn: true  # dry-run 加 ⚠️ 警告
 
-# === Obsidian 侧 ===
+# === OB 侧 ===
 ob:
   # task 行的 markdown 链接需要匹配的 URL 前缀(用来识别"这行是不是飞书项目 task")
-  # 改成你自己的 tenant + wiki_node
   link_url_prefix:
-    - "https://<your_tenant>.feishu.cn/record/"
-    - "https://<your_tenant>.feishu.cn/wiki/<your_wiki_node_token>"
+    - "https://vbn7n4vn7h.feishu.cn/record/"
+    - "https://vbn7n4vn7h.feishu.cn/wiki/PAtUwFxlLiIgcwkK5ixcIRuJnHb"
 
-  # Obsidian vault 名(用于 URL Scheme)
-  # 注意:obsidian:// 在飞书 security 跳转下会失效,推荐直接关闭 use_obsidian_uri 走飞书云文档
-  vault_name: <your_vault_name>
-  use_obsidian_uri: false   # 推荐保持 false
+  # Obsidian vault 名(用于 URL Scheme,如果用 obsidian:// 时需要)
+  # 注:obsidian:// 在飞书 security 跳转下完全失效(2026-05-17 事故),已默认关闭
+  # 现在主用飞书云文档 URL(feishu.doc_url_template),只有 doc 推送失败时才降级到 wikilink
+  vault_name: OB
+  use_obsidian_uri: false  # ⚠️ 飞书 security 会破坏 obsidian:// 协议,禁用
 
-  # 默认日志目录(反向同步写入此目录下的 YYYY-MM-DD.md)
+  # 默认日志目录(Phase 2 反向同步:写入此目录下的 YYYY-MM-DD.md)
   journal_dir: journals
   # 反向同步写入位置(用 H2/H3 锚定)
   pull_anchor: "🎯 今日计划"
-  pull_anchor_level: "##"   # 或 ###/####
+  pull_anchor_level: "##"  # 或 ###/####
 
   # 反向同步默认时间窗口(天)
   pull_default_days: 7
