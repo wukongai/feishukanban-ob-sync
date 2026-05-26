@@ -98,7 +98,45 @@ module.exports = async function (params) {
     const failMatch = stdout.match(/(\d+)\s*成功\s*\/\s*(\d+)\s*失败/);
     if (failMatch) failCount = parseInt(failMatch[2], 10);
 
-    // ============ Step 4: 弹 Notice 报告 ============
+    // ============ Step 4: 自动刷新今日 journal(2026-05-26 v0.2.4 加)============
+    // 用户期望:UserScript 跑完后 journal 立即看到新渲染,不要手动 Cmd+R
+    // 方法 A:Dataview 命令强制 rebuild 全部 dataview 块
+    // 方法 B:重新加载所有打开 today journal 的 leaf(强制 preview rerender)
+    const bjDate = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+    const todayJournalPath = `journals/${bjDate}.md`;
+    const journalFile = app.vault.getAbstractFileByPath(todayJournalPath);
+
+    try {
+      // 方法 A:调 Dataview 全局 rebuild 命令
+      const dvCommands = [
+        "dataview:dataview-rebuild-current-view",
+        "dataview:rebuild",
+      ];
+      for (const cmdId of dvCommands) {
+        if (app.commands.findCommand?.(cmdId)) {
+          app.commands.executeCommandById(cmdId);
+          console.log(`[拉今日 todo v1] 触发 ${cmdId}`);
+          break;
+        }
+      }
+
+      // 方法 B:对所有打开 today journal 的 leaf,触发 preview rerender
+      if (journalFile) {
+        const leaves = app.workspace.getLeavesOfType("markdown");
+        for (const leaf of leaves) {
+          if (leaf.view?.file?.path === todayJournalPath) {
+            if (leaf.view.previewMode?.rerender) {
+              leaf.view.previewMode.rerender(true);
+              console.log("[拉今日 todo v1] preview rerender 触发");
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("[拉今日 todo v1] 自动刷新失败(不阻塞流程):", e);
+    }
+
+    // ============ Step 5: 弹 Notice 报告 ============
     const totalChanged = setTrueCount + setFalseCount;
 
     if (totalChanged === 0 && missingCount === 0) {
@@ -118,7 +156,7 @@ module.exports = async function (params) {
         msg += `⚠️ 飞书有 OB 无: ${missingCount} 条(去 Cmd+P 手建)\n`;
       if (failCount > 0)
         msg += `❌ 失败: ${failCount} 条(看 Console)\n`;
-      msg += `👀 刷新今日 journal(Cmd+R)查看「🎯 今日计划」段`;
+      msg += `👀 今日 journal 已自动刷新`;
 
       new Notice(msg, 10000);
     }

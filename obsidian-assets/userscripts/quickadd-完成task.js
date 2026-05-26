@@ -176,7 +176,30 @@ module.exports = async function (params) {
       return;
     }
 
-    // ============ Step 8: Notice 报告 ============
+    // ============ Step 8: 自动刷新今日 journal(2026-05-26 v0.2.4 加)============
+    const todayJournalPath = `journals/${bjDate}.md`;
+    const journalFile = app.vault.getAbstractFileByPath(todayJournalPath);
+    try {
+      const dvCommands = ["dataview:dataview-rebuild-current-view", "dataview:rebuild"];
+      for (const cmdId of dvCommands) {
+        if (app.commands.findCommand?.(cmdId)) {
+          app.commands.executeCommandById(cmdId);
+          break;
+        }
+      }
+      if (journalFile) {
+        const leaves = app.workspace.getLeavesOfType("markdown");
+        for (const leaf of leaves) {
+          if (leaf.view?.file?.path === todayJournalPath) {
+            if (leaf.view.previewMode?.rerender) leaf.view.previewMode.rerender(true);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("[完成 task v1] 自动刷新失败:", e);
+    }
+
+    // ============ Step 9: Notice 报告 ============
     if (syncOK) {
       new Notice(
         `✅ task 完成!\n📝 OB frontmatter: status=done + done_date=${bjDate}\n☁️ 飞书 UPDATE 成功(record: ${recordId || feishuRecord})\n📌 全闭环完成`,

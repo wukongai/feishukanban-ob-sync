@@ -3,12 +3,16 @@
  *
  * 触发方式: Cmd+P → 搜「快记任务」 → 回车
  *
- * 行为(v2 - 2026-05-25,task md 化架构升级):
+ * 行为(v2 - 2026-05-25 task md 化 + 2026-05-26 双层架构升级):
  * 1. 弹优先级选择(🔺 P0 / ⏫ P1 / 🔼 P2 / 🔽 P3)
- * 2. 弹任务标题输入
- * 3. 创建 `04 Inbox/task/YYYY-MM-DD-<标题>.md`(完整 frontmatter + 5 段正文骨架)
- * 4. 自动调 sync.py --task-md --apply 同步到飞书(铁律 #1 例外:单条 CREATE 自动跑)
- * 5. 在 today journal 对应 section(P0-P2→🎯今日计划 / P3→🐿️今日非计划)加 wikilink
+ * 2. 弹大项目选择(2026-05-26 v0.2.2 加,可选)
+ * 3. 弹任务标题输入
+ * 4. 创建 `04 Inbox/task/YYYY-MM-DD-<标题>.md`(默认 today: false,进需求池)
+ * 5. 自动调 sync.py --task-md --apply 同步到飞书(铁律 #1 例外:单条 CREATE 自动跑)
+ *
+ * ⚠️ 重要:task 默认 today: false → 不显示在今日 journal「🎯 今日计划」段
+ *    想"今天就做这条" → 飞书 app 勾「是否今日」=true + Mac 跑 `sync.py --pull-today --apply`
+ *    详见 rules/feishu-project-sync.md「今日 todo 双层架构」section
  *
  * ⚠️ 铁律 #1 例外说明:
  *    本 UserScript 自动跑 `sync.py --apply` 跳过 dry-run + 用户审批。
@@ -29,10 +33,10 @@ module.exports = async function (params) {
   try {
     // ============ Step 1: 弹优先级选择 ============
     const priorityOptions = [
-      "🔺 P0  今日必做(进🎯今日计划)",
-      "⏫ P1  本周必做(进🎯今日计划)",
-      "🔼 P2  有空就做(进🎯今日计划)",
-      "🔽 P3  非计划(进🐿️今日非计划)",
+      "🔺 P0  紧急重要",
+      "⏫ P1  本周必做",
+      "🔼 P2  有空就做",
+      "🔽 P3  非计划",
     ];
     const priorityValues = ["P0", "P1", "P2", "P3"];
     const priorityChoice = await quickAddApi.suggester(priorityOptions, priorityValues);
@@ -154,8 +158,8 @@ tags:
     // ============ Step 6: 创建 task md 文件 ============
     await app.vault.create(taskPath, content);
     new Notice(
-      `✅ 已创建 task: ${filename}\n🔄 正在同步飞书...(预计 5-10 秒)`,
-      4000
+      `✅ 已创建 task: ${filename}\n📥 进需求池(默认 today: false,不显示在今日 journal)\n🔄 正在同步飞书...(预计 5-10 秒)`,
+      5000
     );
 
     // ============ Step 7: 调 sync.py --task-md --apply ============
@@ -207,7 +211,7 @@ tags:
 
     if (syncOK) {
       new Notice(
-        `✅ 飞书同步成功!\nrecord_id: ${recordId}\n💾 task md frontmatter 已更新\n📌 journal 会通过 dataview 自动渲染`,
+        `✅ 飞书同步成功!\nrecord_id: ${recordId}\n💾 task md frontmatter 已更新\n📥 待在需求池(飞书勾「是否今日」+ pull-today 才进 journal)`,
         5000
       );
     }
