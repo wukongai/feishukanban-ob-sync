@@ -456,11 +456,16 @@ def _format_yaml_value(value) -> str:
     - 纯字母数字/_/-/./ → 无引号
     - 其他字符串 → 单引号包裹(内部单引号变 '')
     - 布尔 → 小写 `true` / `false`(YAML 标准 + dataview 解析为 boolean)
+    - list → inline YAML `[a, b, c]`(元素递归格式化,2026-05-26 v0.3.0 加,for today_history)
     - 非字符串(数字等) → str()
     """
     # ⚠️ bool 必须在 isinstance(int) 之前 check (Python 里 True is int)
     if isinstance(value, bool):
         return "true" if value else "false"
+    # list → inline YAML(2026-05-26 v0.3.0 加,for today_history 事件流)
+    if isinstance(value, list):
+        items = [_format_yaml_value(v) for v in value]
+        return "[" + ", ".join(items) + "]"
     if not isinstance(value, str):
         return str(value)
     # ISO 8601 datetime: 2026-05-17T19:36:47
@@ -928,6 +933,23 @@ def parse_task_md(md_path: Path, config: dict) -> Optional[dict]:
             return v.split("T")[0] if "T" in v else v
         return v.isoformat() if hasattr(v, 'isoformat') else str(v)
 
+    def _coerce_bool(v):
+        """frontmatter bool 字段值 → Python bool 或 None
+        - YAML 已解析的 bool → 直接返回
+        - 字符串 "true"/"false"/"yes"/"no"/"1"/"0" → 转 bool
+        - None / "" → None(表示字段未设置,sync.py 跳过同步)
+        """
+        if v is None or v == "":
+            return None
+        if isinstance(v, bool):
+            return v
+        s = str(v).strip().lower()
+        if s in ("true", "yes", "1"):
+            return True
+        if s in ("false", "no", "0"):
+            return False
+        return None
+
     def _strip_wikilink(v):
         """frontmatter wikilink 字段值 → 纯名字
         例:'[[06 小工具开发]]' → '06 小工具开发'
@@ -1001,6 +1023,9 @@ def parse_task_md(md_path: Path, config: dict) -> Optional[dict]:
         # parent_project: 2026-05-26 v0.2.2 加 — task 关联到具体大项目
         # frontmatter 形如 `parent_project: "[[<项目名>]]"` → 抽出项目名(去掉 [[]])
         "parent_project": _strip_wikilink(fm.get("parent_project")),
+        # today_flag: 2026-05-26 v0.2.4 加 — 是否今日
+        # YAML 已解析为 bool;但用户手写 "true"/"false" 字符串也兼容
+        "today_flag": _coerce_bool(fm.get("today")),
     }
 
 
@@ -1122,6 +1147,243 @@ def best_match_enum(field_id: str, query: str, config: dict) -> Optional[str]:
         print(f"⚠️  cli search-options 失败 field_id={field_id} query={query}: {e}")
         _ENUM_MATCH_CACHE[cache_key] = None
         return None
+
+
+# 模块级:link 关联表的 名字→record_id 索引缓存,key=link_table_id
+# v0.2.3 加入(配合 parent_project link 字段)— 同进程内只拉一次关联表,避免重复 API 调用
+_LINK_TABLE_INDEX_CACHE: dict[str, dict[str, str]] = {}
+
+
+def build_link_table_index(link_table_id: str, name_field: str, config: dict) -> dict[str, str]:
+    """拉关联表所有 record,建 {项目名: record_id} 索引(模块级缓存)
+
+    Args:
+        link_table_id: 被关联表 table_id(如「产品项目表」tblZ5Zu8v6m5AUx0)
+        name_field: 关联表里项目名所在字段(如「产品项目名」)
+        config: 全局 config(用 feishu.base_token)
+
+    Returns: {项目名: record_id} 映射;失败返回空 dict(不阻断主流程)
+
+    实现细节:
+        飞书 v3 record list 返回平行数组结构:
+            {"data": [["项目1名", ...], ["项目2名", ...]], "fields": [...], "record_id_list": [...]}
+        通过 fields.index(name_field) 找列号,zip data 和 record_id_list。
+    """
+    if link_table_id in _LINK_TABLE_INDEX_CACHE:
+        return _LINK_TABLE_INDEX_CACHE[link_table_id]
+
+    base_token = config["feishu"]["base_token"]
+    try:
+        result = run_cli([
+            "bitable", "record", "list",
+            "--base-token", base_token,
+            "--table-id", link_table_id,
+        ])
+    except Exception as e:
+        print(f"⚠️  拉 link 关联表 {link_table_id} 失败,parent_project 同步跳过: {e}")
+        _LINK_TABLE_INDEX_CACHE[link_table_id] = {}
+        return {}
+
+    fields = result.get("fields", [])
+    rows = result.get("data", [])
+    ids = result.get("record_id_list", [])
+
+    if name_field not in fields:
+        print(f"⚠️  关联表 {link_table_id} 没有字段「{name_field}」,parent_project 同步跳过")
+        _LINK_TABLE_INDEX_CACHE[link_table_id] = {}
+        return {}
+
+    name_idx = fields.index(name_field)
+    index: dict[str, str] = {}
+    for i, row in enumerate(rows):
+        if i >= len(ids):
+            break
+        name = row[name_idx] if name_idx < len(row) else None
+        # name 一般是字符串;防御性跳过 dict/list 等异常类型
+        if isinstance(name, str) and name.strip():
+            index[name.strip()] = ids[i]
+
+    _LINK_TABLE_INDEX_CACHE[link_table_id] = index
+    return index
+
+
+def resolve_link_record_id(
+    ob_value: str,
+    link_table_id: str,
+    name_field: str,
+    strip_prefix_regex: str,
+    config: dict,
+    override_map: Optional[dict] = None,
+) -> Optional[str]:
+    """把 OB 端名字(可能含「00 」「01 」等数字前缀)解析为飞书关联表 record_id
+
+    流程:
+    0. override_map 命中 → 替换为目标名(用于 OB 名 ≠ 飞书 record 名 / 强制 link 到二级)
+    1. 用 strip_prefix_regex 去 OB 名字前缀(如 "00 布丁" → "布丁";留空字符串则不去)
+    2. 在 link 关联表索引里精确匹配(先去前缀版本,再原值)
+    3. 失败 → 打 warning + 返回 None,调用方跳过该字段
+
+    Args:
+        ob_value: OB frontmatter 抽出的名字(已去 wikilink 括号,如 "00 布丁")
+        link_table_id: 关联表 table_id
+        name_field: 关联表里项目名字段
+        strip_prefix_regex: 去前缀正则(可空字符串 = 禁用)
+        config: 全局 config
+        override_map: OB 名 → 飞书 record name 的直接映射(如 zhixinggame → 布丁开发)
+
+    Returns: 匹配到的 record_id,或 None
+    """
+    if not ob_value:
+        return None
+
+    # 优先级 0: override_map(支持 OB 端原名或去前缀后的名字)
+    if override_map:
+        if ob_value in override_map:
+            ob_value = override_map[ob_value]
+        else:
+            stripped_for_override = re.sub(strip_prefix_regex, "", ob_value).strip() if strip_prefix_regex else ob_value
+            if stripped_for_override in override_map:
+                ob_value = override_map[stripped_for_override]
+
+    index = build_link_table_index(link_table_id, name_field, config)
+    if not index:
+        return None  # build_link_table_index 已打 warning
+
+    # 优先级 1: 去前缀后精确匹配("00 布丁" → "布丁")
+    stripped = re.sub(strip_prefix_regex, "", ob_value).strip() if strip_prefix_regex else ob_value.strip()
+    if stripped in index:
+        return index[stripped]
+
+    # 优先级 2: 原值精确匹配(防御:用户可能直接写无前缀名 / override 命中后的目标值)
+    if ob_value.strip() in index:
+        return index[ob_value.strip()]
+
+    print(f"⚠️  「{ob_value}」(去前缀「{stripped}」)在飞书关联表里找不到,parent_project 此条跳过")
+    print(f"    可用项目: {', '.join(sorted(index.keys())[:10])}{'...' if len(index) > 10 else ''}")
+    return None
+
+
+def query_subprojects_by_parent(
+    parent_record_id: str,
+    link_table_id: str,
+    name_field: str,
+    parent_field_name: str,
+    config: dict,
+) -> list[dict]:
+    """查飞书关联表里指定父 record_id 的所有子 records
+
+    用于 userscript 二级菜单:userscript 选完一级 → 调 sync.py --resolve-project →
+    sync.py 在此函数查飞书表「父产品」字段 link 到指定一级的所有子 → userscript 弹二级 suggester
+
+    Args:
+        parent_record_id: 父 record_id(如「布丁」recvjm91DZgp2I)
+        link_table_id: 关联表 table_id
+        name_field: 子 record 名字字段(如「产品项目名」)
+        parent_field_name: 父字段名(如「父产品」)
+        config: 全局 config
+
+    Returns: [{"name": "布丁开发", "record_id": "recv..."}, ...](顺序 = 表里的存储顺序)
+    """
+    base_token = config["feishu"]["base_token"]
+    try:
+        result = run_cli([
+            "bitable", "record", "list",
+            "--base-token", base_token,
+            "--table-id", link_table_id,
+        ])
+    except Exception as e:
+        print(f"⚠️  查子 record 失败: {e}", file=sys.stderr)
+        return []
+
+    fields = result.get("fields", [])
+    rows = result.get("data", [])
+    ids = result.get("record_id_list", [])
+
+    if name_field not in fields or parent_field_name not in fields:
+        return []
+
+    name_idx = fields.index(name_field)
+    parent_idx = fields.index(parent_field_name)
+
+    children = []
+    for i, row in enumerate(rows):
+        if i >= len(ids):
+            break
+        parent_val = row[parent_idx] if parent_idx < len(row) else None
+        # 父字段格式:list of {"id": "rec..."}(可能为空)
+        if not isinstance(parent_val, list) or not parent_val:
+            continue
+        parent_ids = [p.get("id") for p in parent_val if isinstance(p, dict)]
+        if parent_record_id not in parent_ids:
+            continue
+        name_val = row[name_idx] if name_idx < len(row) else None
+        if isinstance(name_val, str) and name_val.strip():
+            children.append({"name": name_val.strip(), "record_id": ids[i]})
+
+    return children
+
+
+def resolve_project_for_userscript(ob_name: str, config: dict) -> dict:
+    """给 userscript 用的"一站式"项目解析(查 override + 一级 record_id + 二级清单)
+
+    Args:
+        ob_name: OB 端项目文件名(含前缀,如 "00 布丁" / "zhixinggame")
+        config: 全局 config
+
+    Returns: JSON-serializable dict
+        {
+            "ob_name": 原 OB 名字,
+            "effective_name": override 后或原名(用于标题前缀),
+            "override_hit": True/False,
+            "parent_record_id": 一级 record_id 或 None,
+            "subprojects": [{"name": "...", "record_id": "..."}, ...]
+        }
+    """
+    cfg = config.get("task_md_fields", {}).get("parent_project", {})
+    link_table_id = cfg.get("link_table_id")
+    name_field = cfg.get("link_table_name_field", "产品项目名")
+    parent_field = cfg.get("link_table_parent_field", "父产品")
+    strip_regex = cfg.get("strip_prefix_regex", r"^\d+\s+")
+    override_map = cfg.get("override_map") or {}
+
+    result = {
+        "ob_name": ob_name,
+        "effective_name": ob_name,
+        "override_hit": False,
+        "parent_record_id": None,
+        "subprojects": [],
+    }
+
+    if not link_table_id:
+        return result
+
+    # 1. override 命中检查(原名 or 去前缀后)
+    effective_name = ob_name
+    if ob_name in override_map:
+        effective_name = override_map[ob_name]
+        result["override_hit"] = True
+    else:
+        stripped_for_override = re.sub(strip_regex, "", ob_name).strip() if strip_regex else ob_name
+        if stripped_for_override in override_map:
+            effective_name = override_map[stripped_for_override]
+            result["override_hit"] = True
+    result["effective_name"] = effective_name
+
+    # 2. 解析 effective_name → record_id
+    rec_id = resolve_link_record_id(effective_name, link_table_id, name_field, strip_regex, config)
+    result["parent_record_id"] = rec_id
+
+    # 3. override 命中时不查二级(已直接定位到具体 record)
+    if result["override_hit"]:
+        return result
+
+    # 4. 查该一级的子 records
+    if rec_id:
+        result["subprojects"] = query_subprojects_by_parent(
+            rec_id, link_table_id, name_field, parent_field, config
+        )
+
+    return result
 
 
 def feishu_search_by_short_link(short_link_or_title: str, config: dict) -> Optional[str]:
@@ -1344,6 +1606,27 @@ def build_fields_payload(task: dict, config: dict, vault_root: Path, existing_de
                     out[field_name] = float(value)
                 except (ValueError, TypeError):
                     pass
+            # checkbox(bool)字段 — today_flag → 飞书「是否今日」
+            elif ob_key == "today_flag":
+                out[field_name] = bool(value)
+            # parent_project:可能是 link 类型(配 link_table_id)或 select 类型(只配 field_name)
+            # link 类型需要查关联表拿 record_id,select 类型按字符串处理
+            elif ob_key == "parent_project":
+                link_table_id = fcfg.get("link_table_id")
+                if link_table_id:
+                    name_field = fcfg.get("link_table_name_field", "产品项目名")
+                    strip_regex = fcfg.get("strip_prefix_regex", r"^\d+\s+")
+                    override_map = fcfg.get("override_map") or {}
+                    rec_id = resolve_link_record_id(
+                        str(value), link_table_id, name_field, strip_regex, config,
+                        override_map=override_map,
+                    )
+                    if rec_id:
+                        out[field_name] = [rec_id]
+                    # 找不到时 resolve_link_record_id 已打 warning,这里不写 → 跳过该字段
+                else:
+                    # 老 select 模式(向后兼容):按字符串写
+                    out[field_name] = str(value)
             # 其他全部当 text / select(单) 处理
             else:
                 out[field_name] = str(value)
@@ -2259,6 +2542,7 @@ def _create_task_md_from_feishu_record(rid, row, fields_meta, config, vault_root
 priority: {priority}
 status: {status}
 today: true
+today_history: [{today_date}]
 created: {created_line}
 due: {due}
 done_date: {done_date}
@@ -2410,9 +2694,22 @@ def pull_today_from_feishu(apply: bool = False) -> None:
     success_count = 0
     fail_count = 0
     created_count = 0
+    # v0.3.0:append today_history 事件流(历史保真,见 rules/feishu-project-sync.md「今日 todo 历史保真」)
+    today_date_iso = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
     for rid, title, p in plan_set_true:
-        if update_md_frontmatter(p, {"today": True}):
-            print(f"  ✅ {p.name}: today → true")
+        # 读现有 today_history,append 当日(去重)
+        try:
+            fm_cur, _, _ = parse_frontmatter(p.read_text(encoding="utf-8"))
+            history = fm_cur.get("today_history", []) if fm_cur else []
+            if not isinstance(history, list):
+                history = []
+        except Exception:
+            history = []
+        if today_date_iso not in history:
+            history.append(today_date_iso)
+        # 一次性 update 两个字段(today + today_history)
+        if update_md_frontmatter(p, {"today": True, "today_history": history}):
+            print(f"  ✅ {p.name}: today → true (+ today_history += {today_date_iso})")
             success_count += 1
         else:
             print(f"  ❌ {p.name}: 更新失败")
@@ -2459,7 +2756,16 @@ def main():
     parser.add_argument("--only-completed", action="store_true",
                         help="只同步已完成 task ([x] / [-]),跳过未完成的")
     parser.add_argument("--task-md", help="task md 模式:单 task md 推送到飞书(CREATE/UPDATE)")
+    parser.add_argument("--resolve-project",
+                        help="给 userscript 用:解析 OB 项目名(如 '00 布丁')→ 输出 JSON(含 override 命中 / 一级 record_id / 二级子 records)")
     args = parser.parse_args()
+
+    if args.resolve_project:
+        # 静默模式:只输出 JSON,不打任何 progress 信息(给 userscript 解析)
+        config = load_config()
+        result = resolve_project_for_userscript(args.resolve_project, config)
+        print(json.dumps(result, ensure_ascii=False))
+        return
 
     if args.pull_today:
         pull_today_from_feishu(apply=args.apply)

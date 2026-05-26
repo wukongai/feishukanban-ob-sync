@@ -2,6 +2,72 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.3.0] - 2026-05-26 — **今日聚焦历史保真:`today_history` 事件流**
+
+### 🎯 问题背景
+
+v0.2.0 用 `today: true/false` 单字段管理"是否今日"。痛点:**全局 single source of truth,改 1 次影响所有历史 journal**。场景:
+- 5/26 标 today=true,做了一半
+- 5/27 早上飞书取消「是否今日」+ `sync.py --pull-today` → OB today=false
+- 回看 5/26 journal,dataview 查 `WHERE today=true` → **task 消失**,历史丢失
+
+dataview 是实时投影,无法做"时间穿越"。
+
+### ✨ 解决方案:事件流持久化
+
+task md frontmatter 新增 `today_history` 字段(YAML inline list,append-only,去重):
+
+```yaml
+today: false                  # 当前状态(动态)
+today_history:                # 事件流:曾经 today=true 的日期列表
+  - 2026-05-26
+  - 2026-05-27
+```
+
+dataview 查询改为 `contains(today_history, this.file.day)` → **5/26 journal 永远显示曾经在 5/26 聚焦过的 task**,不论后续 today 字段如何变化。
+
+### 🔧 实施细节
+
+#### sync.py 改动
+
+1. **`_format_yaml_value`** 加 list 支持(`[a, b, c]` inline 格式),底层 enabler 让 `update_md_frontmatter` 能写 list 字段
+2. **`pull_today_from_feishu`** 在 set OB today=true 时,read 当前 today_history → append 当日(去重)→ 一次性 update both fields
+3. **`_create_task_md_from_feishu_record`**(`--pull-today --apply` 自动建 task md 时)初始化 `today_history: [{today_date}]`
+4. **设 today=false 时**:**不动 today_history**(历史保留)
+
+#### Obsidian assets 改动
+
+- **`quickadd-快记任务-v2-task-md.js`**:创建 task md 时 init `today_history: []`(空 list,等用户飞书勾今日时 sync.py 自动 append)
+
+### 🔄 OB 端配套(独立改动)
+
+OB CC 同步改:
+- **task md 模板**(`03 Resources/素材库/模版/task 模版.md`)加 `today_history` 字段定义
+- **journal 模板 + 今日 journal**:「🎯 今日计划」+「🐿️ 今日非计划」dataview 查询从 `today = true` 改为 `contains(today_history, this.file.day)`
+- **历史 task 批量 backfill**:扫 12 个 today=true 的 task md,根据 created 日期 init today_history
+- **rules 更新**(`feishu-project-sync.md`「今日 todo 双层架构」section 加事件流持久化说明)
+
+### 📐 设计要点
+
+- **append-only**:取消 today 不删除历史(允许"曾经"语义)
+- **去重**:同一天反复设 today=true 只 append 1 次
+- **类型安全**:`_format_yaml_value` 递归处理 list 元素,纯日期 → 无引号,符合 dataview 类型推断
+- **向后兼容**:无 today_history 字段的旧 task md → `contains` 返回 false → 不显示(自然降级,需 backfill 或 sync.py 自动维护)
+
+### 🆙 升级路径(OB 端)
+
+1. 拉新版 sync.py(symlink 用户自动同步)
+2. 跑一次 `sync.py --pull-today --apply` → 所有飞书侧 today=true 的 task 自动 init today_history
+3. 历史 task 跑 backfill 脚本(参考 OB CC 实施记录)
+4. 模板 + journal 模板 + 今日 journal 改 dataview 查询条件
+
+### 🐛 已知边界
+
+- task md 创建时 today_history=[],只有走过 `sync.py --pull-today` 才会 append。如果用户跳过 sync 直接手敲 `today: true` → today_history 不变,需手动维护或下次 pull-today 自动修复
+- dataview `contains([2026-05-26], this.file.day)` 当 list 元素为 string 时,this.file.day 是 date 对象,dataview 内部做类型匹配(实证可行)
+
+---
+
 ## [v0.2.0] - 2026-05-26 — **task md 化架构 + 完整工作流 + 一键部署**
 
 ### 🎯 重大架构升级 — task 升级为 "first-class entity"

@@ -71,13 +71,113 @@ module.exports = async function (params) {
     }
     console.log("[快记任务 v2] project:", projectChoice || "(无)");
 
+    // ============ Step 2.5: 二级菜单 + override 处理(2026-05-26 v0.2.4 加)============
+    // 调 sync.py --resolve-project 查飞书侧的:
+    //   - override_map 命中(如 zhixinggame → 布丁开发)
+    //   - 当前一级在飞书「产品项目表」下的子 records(二级菜单)
+    // 命中 override → 不弹二级,标题加【effective_name】
+    // 有二级 record → 弹二级 suggester,选了就标题加【子 name】,跳过保持一级
+    // 都没 → 无二级菜单,标题不加前缀
+    //
+    // 设计要点:
+    // - 二级数据从飞书动态读(不在 config 维护重复列表),加新二级只改飞书
+    // - resolve-project 失败 → 降级走一级原值,不阻塞 task 创建(鲁棒性)
+    let chosenParentName = projectChoice;  // 最终写到 frontmatter 的项目名
+    let titlePrefix = "";                  // 加在标题前的前缀(含【】)
+
+    if (projectChoice) {
+      // 提前准备 exec(同 Step 7 用一份,避免重复)
+      const { exec: execEarly } = require("child_process");
+      const utilEarly = require("util");
+      const execAsyncEarly = utilEarly.promisify(execEarly);
+      const vaultRootEarly = app.vault.adapter.basePath || app.vault.adapter.getBasePath();
+      const syncScriptEarly = `${vaultRootEarly}/scripts/feishukanban-ob-sync/sync.py`;
+      const userPathsEarly = [
+        `${process.env.HOME}/.local/bin`,
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+      ];
+      const execEnvEarly = {
+        ...process.env,
+        PATH: `${userPathsEarly.join(":")}:${process.env.PATH || ""}`,
+      };
+
+      try {
+        const escapedChoice = projectChoice.replace(/"/g, '\\"');
+        const resolveCmd = `cd "${vaultRootEarly.replace(/"/g, '\\"')}" && python3 "${syncScriptEarly.replace(/"/g, '\\"')}" --resolve-project "${escapedChoice}"`;
+        console.log("[快记任务 v2] resolveCmd:", resolveCmd);
+        const { stdout: resolveStdout } = await execAsyncEarly(resolveCmd, {
+          timeout: 15000,
+          env: execEnvEarly,
+        });
+        // stdout 第一行 / 最后一行可能是 JSON,容错地取最后一个 { 开头的行
+        const lines = resolveStdout.trim().split("\n").filter(Boolean);
+        const jsonLine = lines.reverse().find(l => l.trim().startsWith("{"));
+        const resolved = jsonLine ? JSON.parse(jsonLine) : null;
+        console.log("[快记任务 v2] resolved:", resolved);
+
+        if (resolved && resolved.override_hit) {
+          // override 命中(如 zhixinggame → 布丁开发)
+          chosenParentName = resolved.effective_name;
+          titlePrefix = `【${resolved.effective_name}】`;
+          new Notice(
+            `📌 项目映射: ${projectChoice} → ${resolved.effective_name}\n标题将加前缀: ${titlePrefix}`,
+            3000
+          );
+        } else if (resolved && resolved.subprojects && resolved.subprojects.length > 0) {
+          // 有子 record → 弹二级 suggester
+          const subOptions = [
+            `❌ 跳过 / 用一级「${projectChoice}」(标题不加前缀)`,
+            ...resolved.subprojects.map(s => `📂 ${s.name}`),
+          ];
+          const subValues = [null, ...resolved.subprojects.map(s => s.name)];
+          const subChoice = await quickAddApi.suggester(subOptions, subValues);
+          if (subChoice === undefined) {
+            new Notice("❌ 已取消", 3000);
+            return;
+          }
+          if (subChoice) {
+            chosenParentName = subChoice;
+            titlePrefix = `【${subChoice}】`;
+            console.log("[快记任务 v2] 选了二级:", subChoice);
+          } else {
+            console.log("[快记任务 v2] 跳过二级,保持一级:", projectChoice);
+          }
+        }
+        // 都没 → 一级无 override 无子 → 不加前缀,frontmatter 写一级原值
+      } catch (e) {
+        console.warn("[快记任务 v2] resolve-project 失败,降级走一级:", e);
+        new Notice(
+          `⚠️ 二级菜单查询失败(降级用一级「${projectChoice}」,不加前缀)\n详情看 Console`,
+          4000
+        );
+        // chosenParentName / titlePrefix 保持初始值
+      }
+    }
+
+    // ============ Step 2.7: 是否今日(2026-05-26 v0.2.4 加)============
+    // 默认 today=false(进需求池,飞书侧自己挑日子)
+    // 选 today=true → frontmatter today: true + sync.py CREATE 时同步到飞书「是否今日」=true
+    // 免去"先创建 → 再去飞书 app 勾今日"的双步操作
+    const todayOptions = [
+      "📥 进需求池(默认,后续在飞书勾今日)",
+      "⭐ 今日(立即排进今日 journal)",
+    ];
+    const todayValues = [false, true];
+    const isToday = await quickAddApi.suggester(todayOptions, todayValues);
+    if (isToday === undefined) {
+      new Notice("❌ 已取消", 3000);
+      return;
+    }
+    console.log("[快记任务 v2] today:", isToday);
+
     // ============ Step 3: 弹任务标题输入 ============
     const title = await quickAddApi.inputPrompt("任务标题(简短;后续可加详情)");
     if (!title || !title.trim()) {
       new Notice("❌ 标题为空,已取消", 3000);
       return;
     }
-    const titleTrimmed = title.trim();
+    const titleTrimmed = `${titlePrefix}${title.trim()}`;
 
     // ============ Step 4: 计算北京时间 + 构造路径 ============
     const bjISO = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 19);
@@ -100,14 +200,18 @@ module.exports = async function (params) {
 
     // ============ Step 5: 内联生成 task md 内容 ============
     // parent_project 行:有项目就填 wikilink,无则空
-    const parentProjectLine = projectChoice
-      ? `parent_project: "[[${projectChoice}]]"`
+    // 注意:用 chosenParentName(可能是一级 / 二级名 / override 目标),不是原 projectChoice
+    const parentProjectLine = chosenParentName
+      ? `parent_project: "[[${chosenParentName}]]"`
       : `parent_project:`;
 
+    // today_history 事件流(v0.3.0):today=true 时立即 init 为 [今日],今日 journal 才能查到
+    const todayHistoryInit = isToday ? `[${bjDate}]` : `[]`;
     const content = `---
 priority: ${priorityChoice}
 status: todo
-today: false
+today: ${isToday}
+today_history: ${todayHistoryInit}
 created: ${bjISO}
 due:
 done_date:
@@ -157,8 +261,11 @@ tags:
 
     // ============ Step 6: 创建 task md 文件 ============
     await app.vault.create(taskPath, content);
+    const todayBanner = isToday
+      ? "⭐ 今日 task(today: true,会进今日 journal「🎯 今日计划」段)"
+      : "📥 进需求池(today: false,飞书勾今日 + pull-today 才进 journal)";
     new Notice(
-      `✅ 已创建 task: ${filename}\n📥 进需求池(默认 today: false,不显示在今日 journal)\n🔄 正在同步飞书...(预计 5-10 秒)`,
+      `✅ 已创建 task: ${filename}\n${todayBanner}\n🔄 正在同步飞书...(预计 5-10 秒)`,
       5000
     );
 
@@ -210,8 +317,11 @@ tags:
     }
 
     if (syncOK) {
+      const syncBanner = isToday
+        ? "⭐ 飞书「是否今日」已同步勾选 → 跑 pull-today 可写入今日 journal"
+        : "📥 task 在需求池;后续在飞书勾「是否今日」+ pull-today 才进 journal";
       new Notice(
-        `✅ 飞书同步成功!\nrecord_id: ${recordId}\n💾 task md frontmatter 已更新\n📥 待在需求池(飞书勾「是否今日」+ pull-today 才进 journal)`,
+        `✅ 飞书同步成功!\nrecord_id: ${recordId}\n💾 task md frontmatter 已更新\n${syncBanner}`,
         5000
       );
     }

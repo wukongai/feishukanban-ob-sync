@@ -169,12 +169,43 @@ task_md_fields:
   due:
     field_name: null               # null = 跳过
 
-  # parent_project(归属大项目):2026-05-26 v0.2.2 加
-  # task md frontmatter `parent_project: "[[<项目名>]]"` → 飞书"项目" select 字段
+  # today_flag(是否今日):2026-05-26 v0.2.4 加 — checkbox 字段
+  # task md frontmatter `today: true/false` → 飞书 checkbox 字段
+  # 用于"创建 task 时立即标记今日"的工作流(免去回飞书 app 手动勾)
+  today_flag:
+    field_name: 是否今日             # checkbox 字段名;null = 禁用
+
+  # parent_project(归属大项目):2026-05-26 v0.2.2 加 / v0.2.3 修(支持 link 字段)
+  # task md frontmatter `parent_project: "[[<项目名>]]"` → 飞书 link 字段(双向关联到「项目」表)
   # Cmd+P「📝 快记任务」创建 task 时弹大项目选择菜单,自动填这里
-  # 飞书表必须先建好「项目」select 字段 + 加 enum 选项(每个项目一个)
+  #
+  # 支持两种字段类型(根据飞书实际字段类型选一种配置):
+  #
+  # 【类型 A】link(双向关联,推荐)— 飞书侧有独立的「项目表」管理所有大项目
+  #   sync.py 会:
+  #     1. 用 strip_prefix_regex 去 OB 项目名前缀(如 "00 布丁" → "布丁",可选)
+  #     2. 在 link_table_id 表里按 link_table_name_field 精确匹配 → 拿 record_id
+  #     3. 匹配失败 → 跳过该字段并打 warning(不影响其他字段同步)
   parent_project:
-    field_name: 项目               # select(单)— null = 跳过同步
+    field_name: 产品项目                  # link 字段名 — null = 跳过同步
+    link_table_id: tblXXXXXXXXXX          # 关联表 table_id(从 feishu-cli bitable table list 拿)
+    link_table_name_field: 产品项目名      # 关联表里项目名字段
+    link_table_parent_field: 父产品        # 关联表里"父产品"字段名(用于二级菜单查子 record;无需二级则不用此字段)
+    strip_prefix_regex: '^\d+\s+'         # OB 端项目名前缀正则(去 "00 " "01 " 等;留空字符串 '' 禁用)
+
+    # v0.2.4 加:override_map — OB 项目名 → 飞书 record 名直接映射
+    # 用于 OB 项目名 ≠ 飞书 record 名 / 强制归到某二级 record 的场景
+    # userscript 命中 override → 不弹二级菜单 / 标题加【effective_name】前缀
+    # 不需要此 feature → 留空 {} 或注释掉
+    override_map:
+      # 例:OB 项目 "myproject1" 的任务都归到飞书「产品 A 开发」record
+      # myproject1: 产品 A 开发
+  #
+  # 【类型 B】select(单选,简单场景)— 飞书侧用 select enum 直接选项目
+  #   只配 field_name 即可,留空 link_table_id 等字段就走 select 模式
+  #   parent_project:
+  #     field_name: 项目             # select 字段名
+  #     # link_table_id: null         # 注释掉或不填即走 select 模式
 
 # === 反向同步(飞书 → OB) ===
 # 2026-05-18 Phase 2.2 上线

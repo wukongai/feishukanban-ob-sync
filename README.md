@@ -3,9 +3,13 @@
 > 📋 **Obsidian ↔ 飞书项目管理多维表 全闭环同步工具**。让你既享受 Obsidian 的 ADHD 友好「子弹笔记式任务流」,又拥有飞书的「项目看板可视化」,**两端永远一致**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.2.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.3.0-blue.svg)](CHANGELOG.md)
 
 ---
+
+## 🚀 v0.3.0 上线 — 历史保真:`today_history` 事件流(2026-05-26)
+
+dataview 是实时投影,无法做"时间穿越"。v0.2.0 用 `today: true/false` 单字段管理"今日",取消后历史 journal **消失**。v0.3.0 加 `today_history` append-only list 字段,**5/26 journal 永远显示曾经在 5/26 聚焦的 task**。详见 [CHANGELOG.md](CHANGELOG.md#v030---2026-05-26)。
 
 ## 🚀 v0.2.0 上线 — task md 化架构 + 完整工作流
 

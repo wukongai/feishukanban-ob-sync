@@ -7,7 +7,7 @@
 #   ./install.sh --vault-path <path>      # 指定 vault 路径(默认询问)
 #   ./install.sh --apply --force          # 覆盖已存在的文件(慎用)
 #
-# 行为(简化版,2026-05-26 v0.2.0):
+# 行为(简化版,2026-05-26 v0.3.0):
 #   1. 检查依赖(python3 / feishu-cli / Obsidian)
 #   2. 询问/解析 vault 路径
 #   3. symlink scripts(sync.py / auto_collect_today.py)到 vault
@@ -62,7 +62,7 @@ run_or_dry() {
 # ============================================================
 log ""
 log "============================================================"
-log "📦 feishukanban-ob-sync v0.2.0 install"
+log "📦 feishukanban-ob-sync v0.3.0 install"
 log "============================================================"
 [[ $APPLY -eq 0 ]] && log "📌 模式: dry-run(--apply 才真执行)" || log "🚀 模式: --apply(真执行)"
 log ""
@@ -313,6 +313,6 @@ if [[ $APPLY -eq 0 ]]; then
   log "============================================================"
 else
   log "============================================================"
-  ok "feishukanban-ob-sync v0.2.0 部署完成!"
+  ok "feishukanban-ob-sync v0.3.0 部署完成!"
   log "============================================================"
 fi
