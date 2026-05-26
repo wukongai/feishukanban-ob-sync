@@ -36,13 +36,27 @@ module.exports = async function (params) {
 
     console.log("[拉今日 todo v1] syncCmd:", syncCmd);
 
+    // ============ 注入 PATH(2026-05-26 v0.2.3 修复)============
+    // Obsidian GUI 启动时不继承 shell 的 PATH(.zshrc 不会被 source),
+    // 导致 feishu-cli(装在 ~/.local/bin/)找不到 → FileNotFoundError
+    // 修复:exec 时显式注入用户级 PATH(覆盖 ~/.local/bin / homebrew 等常见位置)
+    const userPaths = [
+      `${process.env.HOME}/.local/bin`,     // pipx / uv tool / 用户 Python tools
+      "/usr/local/bin",                      // Intel Mac homebrew
+      "/opt/homebrew/bin",                   // Apple Silicon homebrew
+    ];
+    const execEnv = {
+      ...process.env,
+      PATH: `${userPaths.join(":")}:${process.env.PATH || ""}`,
+    };
+
     new Notice(`🔄 正在拉飞书今日 todo...(预计 5-10 秒)`, 3000);
 
     // ============ Step 2: 跑 sync.py ============
     let stdout = "";
     let stderr = "";
     try {
-      const result = await execAsync(syncCmd, { timeout: 60000 });
+      const result = await execAsync(syncCmd, { timeout: 60000, env: execEnv });
       stdout = result.stdout || "";
       stderr = result.stderr || "";
       console.log("[拉今日 todo v1] stdout:", stdout);

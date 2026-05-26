@@ -172,10 +172,21 @@ tags:
 
     console.log("[快记任务 v2] syncCmd:", syncCmd);
 
+    // 注入 PATH(2026-05-26 v0.2.3 修复 — feishu-cli 找不到)
+    const userPaths = [
+      `${process.env.HOME}/.local/bin`,
+      "/usr/local/bin",
+      "/opt/homebrew/bin",
+    ];
+    const execEnv = {
+      ...process.env,
+      PATH: `${userPaths.join(":")}:${process.env.PATH || ""}`,
+    };
+
     let recordId = null;
     let syncOK = false;
     try {
-      const { stdout, stderr } = await execAsync(syncCmd, { timeout: 60000 });
+      const { stdout, stderr } = await execAsync(syncCmd, { timeout: 60000, env: execEnv });
       console.log("[快记任务 v2] sync stdout:", stdout);
       if (stderr) console.warn("[快记任务 v2] sync stderr:", stderr);
 
