@@ -255,7 +255,7 @@ cat docs/handoff/OB对接/2026-05-26-userscript-跨日-handoff.md
 ## 完成记录(feishukanban-ob-sync CC 填写)
 
 - 实际花费:~0.3 小时(含 spec 偏离讨论)
-- commit hash:**待 commit 后补**(见下方,合并 v0.3.1 块 ④)
+- commit hash:`2fd1848`(块 ④ 与 ① ② ③ 一起进 v0.3.1)
 - tag:**v0.3.1**(并入,非 v0.2.5 — 见 Spec 偏离)
 - 偏离点:**版本号 v0.2.5 → 并入 v0.3.1 块 ④**(原因:v0.2.5 / v0.3.0 已发,且工作树已有 v0.3.1 草稿。已与用户确认。)
 - 测试结果:**未实测**(本侧只改代码 + commit;实测 4 场景由用户在 OB vault 操作)
