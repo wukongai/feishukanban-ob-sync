@@ -653,7 +653,8 @@ def ensure_feishu_doc(md_path: Path, config: dict, force_update: bool = False) -
         # 写回 frontmatter
         ok = update_md_frontmatter(md_path, {
             "feishu_doc_token": doc_id,
-            "feishu_doc_synced_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            # v0.3.3: 显式 UTC+8,防 shell TZ=PDT 时算成美西时间
+            "feishu_doc_synced_at": datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%dT%H:%M:%S"),
         })
         if not ok:
             print(f"    ⚠️  doc 创建成功但 frontmatter 回写失败,下次 sync 会重复创建")
@@ -841,7 +842,8 @@ def build_delivery_value(items: list, existing_value: str, config: dict) -> str:
     delivery_cfg = config.get("fields", {}).get("delivery", {})
     format_template = delivery_cfg.get("format_template", "{items_md}")
     append_template = delivery_cfg.get("append_template", "{original_text}\n\n{items_md}")
-    sync_date = datetime.now().strftime("%Y-%m-%d")
+    # v0.3.3: 显式 UTC+8,防 shell TZ=PDT 时算成美西时间
+    sync_date = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
 
     # 格式化 items 为 markdown 列表
     # use_obsidian_uri=true → 用 obsidian:// 可点击链接;否则 [[wikilink]] 死链
@@ -2294,7 +2296,8 @@ def pull_from_feishu(since_date: Optional[str] = None, apply: bool = False) -> N
     """
     config = load_config()
     vault_root = find_vault_root()  # 关键: 找含 .obsidian/ 的目录, 不依赖 cwd
-    today = datetime.now().strftime(config["reverse"]["write_target"]["date_format"])
+    # v0.3.3: 显式 UTC+8,防 shell TZ=PDT 时 today journal 写错位置
+    today = datetime.now(timezone(timedelta(hours=8))).strftime(config["reverse"]["write_target"]["date_format"])
     today_journal = vault_root / config["reverse"]["write_target"]["journal_dir"] / f"{today}.md"
 
     print(f"\n{'='*60}")

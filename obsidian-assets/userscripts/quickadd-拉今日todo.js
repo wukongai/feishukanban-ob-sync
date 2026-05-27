@@ -49,6 +49,8 @@ module.exports = async function (params) {
     const execEnv = {
       ...process.env,
       PATH: `${userPaths.join(":")}:${process.env.PATH || ""}`,
+      // v0.3.3: 强制北京时区,sync.py 的 datetime.now() 不再受 shell TZ=PDT 影响
+      TZ: "Asia/Shanghai",
     };
 
     new Notice(`🔄 正在拉飞书今日 todo...(预计 5-10 秒)`, 3000);

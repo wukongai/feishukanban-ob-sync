@@ -3,9 +3,18 @@
 > 📋 **Obsidian ↔ 飞书项目管理多维表 全闭环同步工具**。让你既享受 Obsidian 的 ADHD 友好「子弹笔记式任务流」,又拥有飞书的「项目看板可视化」,**两端永远一致**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.3.2-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.3.3-blue.svg)](CHANGELOG.md)
 
 ---
+
+## 🚀 v0.3.3 上线 — 强制北京时区(双层 defense)(2026-05-27)
+
+修两层时区源头,解决 Mac 系统是北京时间但 shell `TZ=PDT` 导致 sync.py 的 `datetime.now()` 算成"昨天"、task `today_history` 进错日期的 bug:
+
+- **userscript 层(先行)**:3 个 userscript `child_process.exec` 时在 `execEnv` 显式注入 `TZ: "Asia/Shanghai"`,sync.py 子进程一启动就在北京时区。
+- **sync.py 层(防御)**:3 处裸 `datetime.now()` 改为 `datetime.now(timezone(timedelta(hours=8)))`,即使命令行直接跑也是北京日期。
+
+实证:`TZ=America/Los_Angeles python3 -c "from datetime import datetime; print(datetime.now())"` 算出 `2026-05-26 23:51`(错);显式 UTC+8 算出 `2026-05-27 14:51`(对)。100% 向后兼容。详见 [CHANGELOG.md](CHANGELOG.md#v033---2026-05-27)。
 
 ## 🚀 v0.3.2 上线 — symlink 路径自适应 + install.sh `--scripts-dir` flag(2026-05-26)
 

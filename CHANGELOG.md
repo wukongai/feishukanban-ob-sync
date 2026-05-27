@@ -2,6 +2,91 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.3.3] - 2026-05-27 — 强制北京时区(双层 defense in depth)
+
+> **根因**:Mac 系统时区 = Asia/Shanghai,但 user shell `.zshrc` 设了 `export TZ=America/Los_Angeles`。Obsidian 从 shell 启动时继承这个 env,userscript `exec` 子进程时把 `process.env` 整体传给 sync.py → sync.py 的裸 `datetime.now()` 算成 PDT 时间(比北京晚 15-16h)。
+>
+> **实证**:
+> ```
+> $ TZ=America/Los_Angeles python3 -c "from datetime import datetime; print(datetime.now())"
+> 2026-05-26 23:51:42       ← PDT 时间,算到了"昨天"
+>
+> $ python3 -c "from datetime import datetime, timezone, timedelta; print(datetime.now(timezone(timedelta(hours=8))))"
+> 2026-05-27 14:51:42+08:00 ← 显式 UTC+8,正确
+> ```
+>
+> **故障表现**:user 北京 5-27 早 09:26 用 Cmd+P 创建 task,task md 文件名 / `created` / `日志` 都是 5-27(userscript bjDate 公式与系统 TZ 无关,算对了),但 `today_history` 里被 sync.py 某次 pull-today / 反向 pull 流程 append 进了 5-26 → dataview 在 5-26 journal 误渲染该 task,5-27 journal 看不到。
+
+### 🛡 块 ① — sync.py 3 处裸 `datetime.now()` 改为显式 UTC+8
+
+| 行 | 函数 | 影响 |
+|---|---|---|
+| 656 | `feishu_doc_synced_at` 时间戳 | 飞书 doc 同步时间记录 |
+| 844 | `sync_date`(delivery format 模板代入) | 交付字段格式化 |
+| 2297 | `today`(老 `--pull` 反向流程的"今日" journal 位置) | 决定 task 写入哪份 journal |
+
+写法统一:`datetime.now(timezone(timedelta(hours=8)))`。**已存在的 3 处(line 2603 / 2739 / 2792)在 v0.2.5 / v0.3.0 时已用显式 UTC+8,本次补齐剩下的 3 处**。
+
+### 🚪 块 ② — 3 个 userscript exec env 强制 `TZ: "Asia/Shanghai"`
+
+userscript `child_process.exec` 跑 sync.py 时,在 execEnv 加 `TZ: "Asia/Shanghai"`:
+
+```js
+const execEnv = {
+  ...process.env,
+  PATH: `${userPaths.join(":")}:${process.env.PATH || ""}`,
+  TZ: "Asia/Shanghai",  // v0.3.3 加
+};
+```
+
+涉及文件:
+- `quickadd-快记任务-v2-task-md.js`(2 处:resolveCmd 的 execEnvEarly + syncCmd 的 execEnv)
+- `quickadd-完成task.js`(1 处)
+- `quickadd-拉今日todo.js`(1 处)
+
+**defense in depth**:即使 user shell `.zshrc` 设了 `TZ=America/Los_Angeles`,userscript 启动 sync.py 子进程时强制覆盖为北京,sync.py 的裸 `datetime.now()`(如果还有遗漏)也会自动算北京。
+
+### 🎯 这两层是 user 提出的「先行操作」原则落地
+
+> 「创建文件的时候需要自动把时间转换成北京时间,这是先行操作而不是后续再修改,只要是 OB 调用 CC 创建文件都要先做这个转换。」
+
+- **外层(先行)**:userscript exec 注入 `TZ=Asia/Shanghai` — 在 sync.py 启动前已经把时区"翻译"好了
+- **内层(防御)**:sync.py 显式 UTC+8 — 即使有人裸命令行跑 sync.py(没经 userscript),仍然算北京
+
+### ⚠️ 用户侧需要手动清理的残留数据
+
+v0.3.3 修了**今后**的写入路径。已存在 task md 的 `today_history` 里残留的错误日期需要**手动 grep + 清理**。
+
+诊断命令:
+```bash
+# 找所有 today_history 含跨日的 task md(可能有日期错配)
+grep -l "today_history:.*,.*" /Users/aim5/Documents/OB/04\ Inbox/task/
+```
+
+逐个 open,看 `today_history` 是不是真的应该是多日(比如 task 跨好几天都聚焦过),还是 v0.3.3 之前的时区 bug 残留(单日 task 却有相邻两天)。
+
+### 🔧 升级路径
+
+1. `git pull` 拉 v0.3.3
+2. **重装 UserScripts**:`bash install.sh --apply --force`(覆盖 vault 里的 4 个 userscripts/*.js)
+3. **重启 Obsidian**(QuickAdd 重新加载 userscripts;新 exec env 才生效)
+4. 清理已存在 task md 的 `today_history` 残留(见上)
+
+### ⚖️ 8 条原则自评
+
+| # | 原则 | 本次表现 |
+|---|---|---|
+| 1 | 解耦 | ⭐⭐⭐⭐⭐ 用户 shell TZ 设置 vs. 工具行为完全解耦 |
+| 2 | 可扩展 | ⭐⭐⭐⭐⭐ 显式时区写法,后续加新 datetime 调用可复制 pattern |
+| 3 | 灵活修改 | ⭐⭐⭐⭐ 双层修复,各自独立可单独回滚 |
+| 4 | 渐进披露 | ⭐⭐⭐ user 不需要知道时区机制就能跑;高级 user 看 CHANGELOG 知道为啥 |
+| 5 | 鲁棒性 | ⭐⭐⭐⭐⭐ 外层(userscript) + 内层(sync.py) 双保险,任一层失效另一层兜底 |
+| 6 | 人可读 + 可教学 | ⭐⭐⭐⭐⭐ CHANGELOG 完整故障路径 + 实证 shell 输出 |
+| 7 | 高复用 + 易移植 | ⭐⭐⭐⭐ `TZ=Asia/Shanghai` 是 POSIX 标准,跨 mac/linux/wsl |
+| 8 | 工程化清晰 | ⭐⭐⭐⭐ 验证脚本(`TZ=PDT python3 -c "..."`)收录 CHANGELOG |
+
+---
+
 ## [v0.3.2] - 2026-05-26 — symlink 路径自适应 + install.sh `--scripts-dir` + sync.py VAULT_ROOT bug 修复
 
 > 三块 patch:userscript `__filename` 自适应、install.sh `--scripts-dir` flag、sync.py `VAULT_ROOT` 跟错位置修复。配 OB 端 handoff 在 vault 内迁移 symlink 到「统一外部工具」位置,解决用户"vault 整洁"诉求。

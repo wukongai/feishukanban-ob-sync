@@ -119,6 +119,8 @@ module.exports = async function (params) {
       const execEnvEarly = {
         ...process.env,
         PATH: `${userPathsEarly.join(":")}:${process.env.PATH || ""}`,
+        // v0.3.3: 强制北京时区,sync.py 的 datetime.now() 不再受 shell TZ=PDT 影响
+        TZ: "Asia/Shanghai",
       };
 
       try {
@@ -320,6 +322,8 @@ tags:
     const execEnv = {
       ...process.env,
       PATH: `${userPaths.join(":")}:${process.env.PATH || ""}`,
+      // v0.3.3: 强制北京时区,sync.py 的 datetime.now() 不再受 shell TZ=PDT 影响
+      TZ: "Asia/Shanghai",
     };
 
     let recordId = null;
