@@ -9,7 +9,7 @@
 #                                                   # 默认 scripts/feishukanban-ob-sync
 #   ./install.sh --apply --force                    # 覆盖已存在的文件(慎用)
 #
-# 行为(简化版,2026-05-26 v0.3.2):
+# 行为(简化版,2026-05-26 v0.3.2 定型 / 2026-05-27 v0.3.3 仅版本 bump):
 #   1. 检查依赖(python3 / feishu-cli / Obsidian)
 #   2. 询问/解析 vault 路径
 #   3. symlink scripts(sync.py / auto_collect_today.py)到 vault/$SCRIPTS_DIR
@@ -73,7 +73,7 @@ run_or_dry() {
 # ============================================================
 log ""
 log "============================================================"
-log "📦 feishukanban-ob-sync v0.3.2 install"
+log "📦 feishukanban-ob-sync v0.3.3 install"
 log "============================================================"
 [[ $APPLY -eq 0 ]] && log "📌 模式: dry-run(--apply 才真执行)" || log "🚀 模式: --apply(真执行)"
 log "📂 装到 vault 相对路径: $SCRIPTS_DIR(用 --scripts-dir 改)"
@@ -325,6 +325,6 @@ if [[ $APPLY -eq 0 ]]; then
   log "============================================================"
 else
   log "============================================================"
-  ok "feishukanban-ob-sync v0.3.2 部署完成!"
+  ok "feishukanban-ob-sync v0.3.3 部署完成!"
   log "============================================================"
 fi
