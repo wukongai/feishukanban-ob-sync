@@ -136,10 +136,8 @@ module.exports = async function (params) {
       app.vault.adapter.basePath || app.vault.adapter.getBasePath();
     const syncScript = `${vaultRoot}/scripts/feishukanban-ob-sync/sync.py`;
     const escapedTaskPath = `${vaultRoot}/${activeFile.path}`.replace(/"/g, '\\"');
-    const syncCmd = `cd "${vaultRoot.replace(
-      /"/g,
-      '\\"'
-    )}" && python3 "${syncScript.replace(/"/g, '\\"')}" --task-md "${escapedTaskPath}" --apply`;
+    // v0.3.1: 用 --vault 替代 `cd && python3`,命令开头是 python3,Claude Code allowlist 友好
+    const syncCmd = `python3 "${syncScript.replace(/"/g, '\\"')}" --vault "${vaultRoot.replace(/"/g, '\\"')}" --task-md "${escapedTaskPath}" --apply`;
 
     console.log("[完成 task v1] syncCmd:", syncCmd);
 

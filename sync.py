@@ -24,12 +24,15 @@
   - PyYAML(pip install pyyaml)
 
 环境约定:
-  - 脚本必须从 vault 根目录跑(`cd /Users/aim5/Documents/OB && python3 ...`)
+  - 脚本会自己找到 vault 根目录,两种方式(任选其一):
+    1. 显式传 `--vault /path/to/OB`(推荐,适合 Claude Code 等不便 cd 的场景)
+    2. 从 vault 内某级目录跑(脚本自动向上找 `.obsidian/`)
   - 配置文件 config.yaml 在脚本同目录
 """
 
 import argparse                  # 命令行参数解析
 import json                      # 调 cli 时构造 payload
+import os                        # chdir 到 vault(--vault 参数)
 import re                        # 解析 markdown task 行
 import subprocess                # 调 feishu-cli
 import sys                       # 退出码 + stderr
@@ -533,6 +536,66 @@ def update_md_frontmatter(md_path: Path, updates: dict) -> bool:
     except Exception as e:
         print(f"⚠️  写 {md_path} 失败: {e}", file=sys.stderr)
         return False
+
+
+def inject_completion_link(md_path: Path, title: str, record_url: str) -> bool:
+    """task md「## ✅ 完成标记」段下的裸 `- [ ] <title>` 行 → 替换为带 URL 的 markdown link
+    `- [ ] [<title>](record_url)`,让 dataview TASK 渲染时变成可点击链接(直达飞书 record)
+
+    2026-05-26 v0.2.4 加 — 修 userscript 模板里说"sync 后自动改 link"但 sync.py 没实现的 bug
+
+    幂等:
+    - 行已经是 markdown link 形式([text](url))→ 不动,返回 False
+    - 找不到匹配的 checkbox 行 → 返回 False(不报错,不影响主流程)
+    - 成功改写 → 返回 True
+
+    匹配规则:
+    - 找「## ✅ 完成标记」段标题(或包含该字符串的 H2 标题)
+    - 该段之后第一个 `- [ ]` / `- [x]` 等 checkbox 行
+    - 跳过 `<!-- -->` HTML 注释 / 空行
+    - 行 body 已是 `[text](url)` → 视为已处理,不动
+    """
+    try:
+        text = md_path.read_text(encoding="utf-8")
+        lines = text.split("\n")
+    except Exception as e:
+        print(f"⚠️  inject_completion_link 读文件失败: {e}", file=sys.stderr)
+        return False
+
+    # 1. 定位「## ✅ 完成标记」段标题行
+    marker_idx = None
+    for i, line in enumerate(lines):
+        if line.startswith("## ") and "完成标记" in line:
+            marker_idx = i
+            break
+    if marker_idx is None:
+        return False
+
+    # 2. 在该段(到下一个 H2 之前)找第一个 checkbox 行
+    checkbox_re = re.compile(r"^(?P<prefix>\s*-\s+\[[ x\-/]\]\s+)(?P<body>.+)$")
+    link_re = re.compile(r"^\[.+?\]\(.+?\)\s*$")  # 已是 [text](url) 形式
+    for i in range(marker_idx + 1, len(lines)):
+        line = lines[i]
+        if line.startswith("## "):  # 进入下一段,停止
+            break
+        stripped = line.rstrip()
+        m = checkbox_re.match(stripped)
+        if not m:
+            continue
+        body = m.group("body").strip()
+        if link_re.match(body):
+            return False  # 已经是 markdown link,不重复改
+        # 改写:- [ ] <body> → - [ ] [<body>](url)
+        # 注意:用 body 作为 link text(而非 title 参数),避免 title 含特殊字符不匹配
+        lines[i] = f'{m.group("prefix")}[{body}]({record_url})'
+        try:
+            md_path.write_text("\n".join(lines), encoding="utf-8")
+            return True
+        except Exception as e:
+            print(f"⚠️  inject_completion_link 写文件失败: {e}", file=sys.stderr)
+            return False
+
+    return False
 
 
 def ensure_feishu_doc(md_path: Path, config: dict, force_update: bool = False) -> Optional[str]:
@@ -1933,6 +1996,13 @@ def push_task_md(md_path: Path, apply: bool = False) -> None:
     else:
         print(f"⚠️  回写 frontmatter 失败,请手动加 feishu_record: {record_id}")
 
+    # v0.2.4 加:CREATE 时回写「## ✅ 完成标记」段裸 checkbox 行 → 带 URL 的 markdown link
+    # 给 dataview TASK 渲染时呈现可点击链接(直达飞书 record)
+    # UPDATE 时不动(行可能已经有 link 或被用户手改过)
+    if is_create:
+        if inject_completion_link(md_path, task["title"], record_url):
+            print(f"🔗 已把「## ✅ 完成标记」段 checkbox 行改为带链接的 markdown link")
+
 
 def build_record_url(record_id: str, config: dict) -> str:
     """构造 record 的 markdown 链接 URL(base URL 形式)
@@ -2397,9 +2467,11 @@ def _fetch_all_records_from_feishu(config: dict) -> tuple:
 def _scan_ob_task_md_by_feishu_record(task_dir: Path) -> dict:
     """扫 04 Inbox/task/ 下所有 .md,按 feishu_record 字段建索引。
 
-    Returns: {rec_id: {"path": Path, "today": bool, "status": str}}
+    Returns: {rec_id: {"path": Path, "today": bool, "status": str, "today_history": list[str]}}
     跳过没 feishu_record 字段的 task md(=本地新建未 sync 飞书的)
     跳过 _ 开头的 _task.base / _说明.md 等
+
+    v0.2.5 修:加 today_history 抽取(用于 pull_today_from_feishu 防御性清理"残留"日期)
     """
     index = {}
     for md_path in task_dir.rglob("*.md"):
@@ -2419,6 +2491,7 @@ def _scan_ob_task_md_by_feishu_record(task_dir: Path) -> dict:
         rec_id = None
         today_val = False
         status_val = "todo"
+        today_history: list[str] = []
         for line in fm_text.split("\n"):
             line = line.rstrip()
             if line.startswith("feishu_record:"):
@@ -2433,9 +2506,21 @@ def _scan_ob_task_md_by_feishu_record(task_dir: Path) -> dict:
                 v = line.split(":", 1)[1].strip().strip("'\"").lower()
                 if v and not v.startswith("#"):
                     status_val = v
+            elif line.startswith("today_history:"):
+                # 解析 inline YAML list 形式:`today_history: [2026-05-26, 2026-05-27]`
+                v = line.split(":", 1)[1].strip()
+                if v.startswith("[") and v.endswith("]"):
+                    inner = v[1:-1].strip()
+                    if inner:
+                        today_history = [d.strip().strip("'\"") for d in inner.split(",")]
 
         if rec_id:
-            index[rec_id] = {"path": md_path, "today": today_val, "status": status_val}
+            index[rec_id] = {
+                "path": md_path,
+                "today": today_val,
+                "status": status_val,
+                "today_history": today_history,
+            }
 
     return index
 
@@ -2646,8 +2731,15 @@ def pull_today_from_feishu(apply: bool = False) -> None:
         else:
             plan_missing.append((rid, title, row))  # ⚠️ v0.2.5:存 row 以便自动建 task md
 
+    # v0.2.5 修:plan_set_false 触发条件加 today_history 含今日的兜底
+    # 原因:journal dataview 用 contains(today_history, this.file.day) 渲染
+    # 如果 today 已是 false 但 today_history 仍含今日 → 仍然显示在今日 journal → 用户期望"清理"
+    today_date_for_scan = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
     for rid, entry in ob_index.items():
-        if entry["today"] and rid not in today_record_ids:
+        if rid in today_record_ids:
+            continue
+        history_has_today = today_date_for_scan in (entry.get("today_history") or [])
+        if entry["today"] or history_has_today:
             plan_set_false.append((rid, entry["path"]))
 
     # Step 5: 打印计划摘要
@@ -2716,8 +2808,25 @@ def pull_today_from_feishu(apply: bool = False) -> None:
             fail_count += 1
 
     for rid, p in plan_set_false:
-        if update_md_frontmatter(p, {"today": False}):
-            print(f"  ✅ {p.name}: today → false")
+        # v0.2.5 修:set today=false 时同步从 today_history remove 今日日期
+        # 原因:journal dataview 用 `contains(today_history, this.file.day)` 判断渲染
+        # 只 set today=false 而不 remove today_history → dataview 仍渲染 → unprick 不生效
+        # 对称设计:plan_set_true append 今天 / plan_set_false remove 今天
+        try:
+            fm_cur, _, _ = parse_frontmatter(p.read_text(encoding="utf-8"))
+            history = fm_cur.get("today_history", []) if fm_cur else []
+            if not isinstance(history, list):
+                history = []
+        except Exception:
+            history = []
+        new_history = [d for d in history if str(d) != today_date_iso]
+        history_changed = len(new_history) != len(history)
+        updates = {"today": False}
+        if history_changed:
+            updates["today_history"] = new_history
+        if update_md_frontmatter(p, updates):
+            suffix = f" (+ today_history -= {today_date_iso})" if history_changed else ""
+            print(f"  ✅ {p.name}: today → false{suffix}")
             success_count += 1
         else:
             print(f"  ❌ {p.name}: 更新失败")
@@ -2748,6 +2857,7 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument("path", nargs="?", help="日志文件路径(push 模式必填)")
+    parser.add_argument("--vault", help="vault 根目录(给了就 chdir,避免外层用 `cd /OB && python3 ...`)")
     parser.add_argument("--apply", action="store_true", help="真写(默认 dry-run)")
     parser.add_argument("--pull", action="store_true", help="反向同步:从飞书拉到 OB(老:写 journal inline)")
     parser.add_argument("--pull-today", action="store_true",
@@ -2759,6 +2869,16 @@ def main():
     parser.add_argument("--resolve-project",
                         help="给 userscript 用:解析 OB 项目名(如 '00 布丁')→ 输出 JSON(含 override 命中 / 一级 record_id / 二级子 records)")
     args = parser.parse_args()
+
+    # --vault: 显式切到 vault 根目录,让所有相对路径(args.path / Path(".") / find_vault_root 的 cwd 起点)正确解析
+    # 这样上层就可以写 `python3 /path/to/sync.py --vault /OB --pull-today`(命令开头是 python3,allowlist 友好)
+    # 而不必写 `cd /OB && python3 ...`(cd 开头会绕过 Claude Code 的 allowlist 前缀匹配,引发 permission 风暴)
+    if args.vault:
+        vault_path = Path(args.vault).expanduser().resolve()
+        if not (vault_path / ".obsidian").exists():
+            print(f"❌ --vault {vault_path} 下未找到 .obsidian/ 目录,不像是 OB vault", file=sys.stderr)
+            sys.exit(1)
+        os.chdir(vault_path)
 
     if args.resolve_project:
         # 静默模式:只输出 JSON,不打任何 progress 信息(给 userscript 解析)

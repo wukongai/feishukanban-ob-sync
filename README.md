@@ -3,9 +3,19 @@
 > 📋 **Obsidian ↔ 飞书项目管理多维表 全闭环同步工具**。让你既享受 Obsidian 的 ADHD 友好「子弹笔记式任务流」,又拥有飞书的「项目看板可视化」,**两端永远一致**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.3.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.3.1-blue.svg)](CHANGELOG.md)
 
 ---
+
+## 🚀 v0.3.1 上线 — `--vault` 参数 + 跨日 dateContext + 完成段链 + today_history 清理(2026-05-26)
+
+四块 patch 合并:
+- **`--vault <path>` 参数**:命令开头是 `python3` 而非 `cd ... && python3 ...`,**Claude Code allowlist 前缀匹配可命中**,不再每次弹 permission 窗。4 个 UserScript 同步更新,新增项目级 `.claude/settings.json`。
+- **`inject_completion_link`**:CREATE 时把「✅ 完成标记」段裸 checkbox 自动改为带飞书 record URL 的 markdown link,dataview 渲染可点击直达飞书。
+- **`pull-today` today_history 残留清理**:取消飞书今日时清理 OB `today_history`,journal 不再误渲染。
+- **`快记任务` 跨日 dateContext**:在 `journals/YYYY-MM-DD.md` 触发时用 journal 日期(而非北京时间)作为新 task 的文件名前缀 / `today_history` / `日志`,解决 Mac 非北京时区跨日 task "消失"问题。
+
+100% 向后兼容。详见 [CHANGELOG.md](CHANGELOG.md#v031---2026-05-26)。
 
 ## 🚀 v0.3.0 上线 — 历史保真:`today_history` 事件流(2026-05-26)
 

@@ -29,10 +29,8 @@ module.exports = async function (params) {
     const vaultRoot =
       app.vault.adapter.basePath || app.vault.adapter.getBasePath();
     const syncScript = `${vaultRoot}/scripts/feishukanban-ob-sync/sync.py`;
-    const syncCmd = `cd "${vaultRoot.replace(
-      /"/g,
-      '\\"'
-    )}" && python3 "${syncScript.replace(/"/g, '\\"')}" --pull-today --apply`;
+    // v0.3.1: 用 --vault 替代 `cd && python3`,命令开头是 python3,Claude Code allowlist 友好
+    const syncCmd = `python3 "${syncScript.replace(/"/g, '\\"')}" --vault "${vaultRoot.replace(/"/g, '\\"')}" --pull-today --apply`;
 
     console.log("[拉今日 todo v1] syncCmd:", syncCmd);
 

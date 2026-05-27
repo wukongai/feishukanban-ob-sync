@@ -9,6 +9,10 @@
  * 3. 弹任务标题输入
  * 4. 创建 `04 Inbox/task/YYYY-MM-DD-<标题>.md`(默认 today: false,进需求池)
  * 5. 自动调 sync.py --task-md --apply 同步到飞书(铁律 #1 例外:单条 CREATE 自动跑)
+ * 6. 日期上下文(2026-05-26 v0.3.1 加跨日支持):
+ *    - 当前打开 journal(`journals/YYYY-MM-DD.md`)→ 用 journal 日期作为文件名前缀 / today_history / 日志字段
+ *    - 其他场景 → fallback 北京时间(原行为)
+ *    详见 docs/handoff/OB对接/2026-05-26-userscript-跨日-handoff.md
  *
  * ⚠️ 重要:task 默认 today: false → 不显示在今日 journal「🎯 今日计划」段
  *    想"今天就做这条" → 飞书 app 勾「是否今日」=true + Mac 跑 `sync.py --pull-today --apply`
@@ -25,6 +29,19 @@
  *  - task 模板:03 Resources/素材库/模版/task 模版.md
  *  - base 视图:04 Inbox/task/_task.base
  */
+
+// 算 dateContext:优先用当前打开 journal 日期(跨日工作友好),fallback 北京时间
+// 详见 docs/handoff/OB对接/2026-05-26-userscript-跨日-handoff.md
+function getDateContext(app) {
+  // 1) 优先:当前打开的 journal 日期
+  const active = app.workspace.getActiveFile();
+  if (active && active.path.startsWith("journals/")
+      && /^\d{4}-\d{2}-\d{2}\.md$/.test(active.name)) {
+    return active.name.slice(0, 10);  // "YYYY-MM-DD"
+  }
+  // 2) fallback:北京时间(原 bjDate 行为)
+  return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+}
 
 module.exports = async function (params) {
   const { app, obsidian, quickAddApi } = params;
@@ -104,7 +121,8 @@ module.exports = async function (params) {
 
       try {
         const escapedChoice = projectChoice.replace(/"/g, '\\"');
-        const resolveCmd = `cd "${vaultRootEarly.replace(/"/g, '\\"')}" && python3 "${syncScriptEarly.replace(/"/g, '\\"')}" --resolve-project "${escapedChoice}"`;
+        // v0.3.1: 用 --vault 替代 `cd && python3`,命令开头是 python3,Claude Code allowlist 友好
+        const resolveCmd = `python3 "${syncScriptEarly.replace(/"/g, '\\"')}" --vault "${vaultRootEarly.replace(/"/g, '\\"')}" --resolve-project "${escapedChoice}"`;
         console.log("[快记任务 v2] resolveCmd:", resolveCmd);
         const { stdout: resolveStdout } = await execAsyncEarly(resolveCmd, {
           timeout: 15000,
@@ -179,14 +197,18 @@ module.exports = async function (params) {
     }
     const titleTrimmed = `${titlePrefix}${title.trim()}`;
 
-    // ============ Step 4: 计算北京时间 + 构造路径 ============
+    // ============ Step 4: 计算日期上下文 + 北京时间 + 构造路径 ============
+    // dateContext 优先用「当前打开 journal 日期」(跨日工作支持),fallback 北京时间
+    // bjISO 保留(用于 created 完整时间戳;时间部分始终北京时间)
     const bjISO = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 19);
-    const bjDate = bjISO.slice(0, 10);
+    const dateContext = getDateContext(app);
+    // created:日期部分用 dateContext,时间部分用北京时间 HH:mm:ss
+    const createdISO = `${dateContext}T${bjISO.slice(11)}`;
     // 文件名安全字符(替换 Windows/Mac 不允许的字符)
     const safeTitle = titleTrimmed.replace(/[\\\/:*?"<>|]/g, "_");
-    const filename = `${bjDate}-${safeTitle}.md`;
+    const filename = `${dateContext}-${safeTitle}.md`;
     const taskPath = `04 Inbox/task/${filename}`;
-    const journalPath = `journals/${bjDate}`;
+    const journalPath = `journals/${dateContext}`;
 
     console.log("[快记任务 v2] priority:", priorityChoice);
     console.log("[快记任务 v2] title:", titleTrimmed);
@@ -206,13 +228,14 @@ module.exports = async function (params) {
       : `parent_project:`;
 
     // today_history 事件流(v0.3.0):today=true 时立即 init 为 [今日],今日 journal 才能查到
-    const todayHistoryInit = isToday ? `[${bjDate}]` : `[]`;
+    // 这里用 dateContext(支持跨日:journal 触发用 journal 日期 / 否则北京时间)
+    const todayHistoryInit = isToday ? `[${dateContext}]` : `[]`;
     const content = `---
 priority: ${priorityChoice}
 status: todo
 today: ${isToday}
 today_history: ${todayHistoryInit}
-created: ${bjISO}
+created: ${createdISO}
 due:
 done_date:
 category:
@@ -279,7 +302,8 @@ tags:
     const syncScript = `${vaultRoot}/scripts/feishukanban-ob-sync/sync.py`;
     // shell-escape 路径
     const escapedTaskPath = `${vaultRoot}/${taskPath}`.replace(/"/g, '\\"');
-    const syncCmd = `cd "${vaultRoot.replace(/"/g, '\\"')}" && python3 "${syncScript.replace(/"/g, '\\"')}" --task-md "${escapedTaskPath}" --apply`;
+    // v0.3.1: 用 --vault 替代 `cd && python3`,命令开头是 python3,Claude Code allowlist 友好
+    const syncCmd = `python3 "${syncScript.replace(/"/g, '\\"')}" --vault "${vaultRoot.replace(/"/g, '\\"')}" --task-md "${escapedTaskPath}" --apply`;
 
     console.log("[快记任务 v2] syncCmd:", syncCmd);
 

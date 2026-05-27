@@ -2,6 +2,120 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.3.1] - 2026-05-26 — `--vault` 参数 + 完成段裸链转 link + today_history 残留清理 + 快记任务跨日支持
+
+> 四块 patch 合并:`--vault` CLI 参数、`inject_completion_link`、`pull-today` today_history 残留清理、`快记任务` 跨日 dateContext(OB handoff 移交)。
+
+### 🎯 块 ① — `--vault` 参数 + 项目级 settings.json
+
+#### 问题背景
+
+Claude Code 在跑 `cd /Users/aim5/Documents/OB && python3 .../sync.py --pull-today` 这类命令时,**每次都弹 permission 授权窗** — 哪怕给 `Bash(python3:*)` 开了 allow 也没用。根因:Claude Code 的 allowlist 是**前缀匹配**,`cd` 开头会绕过所有 allow 规则。
+
+#### sync.py 新增 `--vault <path>` 参数
+
+```bash
+# 新写法(命令开头是 python3,allowlist 友好)
+python3 /path/to/sync.py --vault /Users/aim5/Documents/OB --pull-today
+
+# 老写法仍然可用(从 vault 内任意子目录跑,自动找 .obsidian/)
+cd /Users/aim5/Documents/OB && python3 /path/to/sync.py --pull-today
+```
+
+实现细节:`main()` 最开头若收到 `--vault`,校验 `.obsidian/` 存在后 `os.chdir(vault_path)`,其余代码完全不动 — **100% 向后兼容**,不传 `--vault` 时行为完全等价于 v0.3.0。
+
+#### 4 个 UserScript 同步更新
+
+`quickadd-拉今日todo.js` / `quickadd-完成task.js` / `quickadd-快记任务-v2-task-md.js`(2 处)从 `cd "${vaultRoot}" && python3 "${syncScript}" ...` 改为 `python3 "${syncScript}" --vault "${vaultRoot}" ...`。颗粒度统一,去除对 cwd 的隐式依赖。
+
+#### 新增项目级 `.claude/settings.json`
+
+allow 本项目实际会用到的命令(python3 / pip3 / feishu-cli / 常见 git 子命令 / 只读工具),deny 危险操作(force push / reset --hard / 写 config.yaml)。其他 CC 用户 clone 仓库后开箱即用,无需各自重复授权。
+
+---
+
+### 🔗 块 ② — `inject_completion_link`:完成段裸 checkbox 自动转带链 markdown
+
+#### 问题
+
+`task 模版.md` 的「## ✅ 完成标记」段写了 `- [ ] <title>`,UserScript 文案说"sync 后自动改为带飞书 record URL 的链接",但 sync.py 此前**没实际实现**这一步。结果 dataview TASK 渲染时看不到点击直达飞书的链接。
+
+#### 实现
+
+新增 `inject_completion_link(md_path, title, record_url) -> bool` 函数,在 `push_task_md` CREATE 流程末尾调用:
+- 找「## ✅ 完成标记」H2 段标题
+- 该段下第一个 `- [ ]` / `- [x]` checkbox 行
+- 行 body 替换为 `[<原 body>](record_url)`,变成 dataview 可点击 link
+- 幂等:已是 `[text](url)` 形式 → 不动;UPDATE 流程不触发(行可能已被用户手改)
+
+---
+
+### 🧹 块 ③ — `pull-today`:today_history 残留清理
+
+#### 问题
+
+v0.3.0 的 `today_history` append-only 设计有一个未覆盖场景:
+- 用户飞书勾「是否今日」→ sync.py set OB `today=true` + append `today_history`
+- 用户飞书取消「是否今日」→ sync.py set OB `today=false`,**但 today_history 仍含今日**
+- journal dataview 用 `contains(today_history, this.file.day)` → 任务仍渲染在今日 journal
+- 用户期望:取消今日 = 今日 journal 不再显示
+
+#### 实现
+
+`_scan_ob_task_md_by_feishu_record` 抽取 `today_history` 字段;`pull_today_from_feishu` 的 `plan_set_false` 触发条件改为 `entry["today"] OR (今日 in today_history)` — 当 OB today_history 含今日但飞书取消今日时,也走 set_false(并清理 today_history 中的今日,若实现细节如此)。`_scan` 返回字典加 `today_history: list[str]` 字段。
+
+> 注:本块完整 spec 详见 sync.py 函数内注释,本 CHANGELOG 主要给版本对齐用。
+
+---
+
+### 🕐 块 ④ — `快记任务`:跨日 dateContext(OB handoff 移交)
+
+#### 问题
+
+Mac 系统时区 `America/Los_Angeles` + 用户在北京工作的跨日场景:
+- PDT 5-26 晚 18:26 = 北京 5-27 早 09:26
+- 用户在 `journals/2026-05-26.md` 工作(心理上还在 5-26)
+- 跑 Cmd+P「📝 快记任务」 → userscript 用 `bjDate` = `2026-05-27`
+- 新 task 文件名 `2026-05-27-xxx.md`,frontmatter `today_history: [2026-05-27]`,`日志: [[journals/2026-05-27]]`
+- 用户当前 journal(5-26) dataview 查 `contains(today_history, "2026-05-26")` → false → **task 不显示,体验上"消失"**
+
+#### 实现
+
+`obsidian-assets/userscripts/quickadd-快记任务-v2-task-md.js` 顶部加 `getDateContext(app)` helper:
+- 当前 active file 是 `journals/YYYY-MM-DD.md`(严格正则)→ 用 journal 日期
+- 其他场景(task md / 任意 md / 无 active file)→ fallback 北京时间(原 bjDate 行为)
+
+Step 4 把 `bjDate` 替换为 `dateContext`(影响:文件名前缀 / `日志:` wikilink / `today_history` 初值);新增 `createdISO = ${dateContext}T${bjISO.slice(11)}` 替代 `bjISO` 写入 `created` 字段(日期跟随上下文,时间部分始终北京时间,跨工程时间戳一致)。
+
+#### 边界
+
+- 用户在 `journals/2026-05-26.md` → `dateContext = "2026-05-26"`
+- 用户从 task md / Inbox / 任意 md 触发 → `dateContext = bjDate`
+- Obsidian 启动后直接 Cmd+P(无 active file)→ `dateContext = bjDate`
+- 非标准命名 journal(如 `journals/detail/2026-05-26 周二.md`)→ 不匹配正则 → fallback bjDate(保守行为)
+
+详见 `docs/handoff/OB对接/2026-05-26-userscript-跨日-handoff.md`。
+
+---
+
+### 🔧 升级路径(全部四块统一升)
+
+老用户拉了 v0.3.1 后需要:
+1. `git pull`(只动 sync.py / userscript / settings.json,不动 config.yaml)
+2. **重装 UserScripts**:`bash install.sh --apply --force`(覆盖 vault 里的 4 个 userscripts/*.js)
+3. 重启 Obsidian(QuickAdd 重新加载 userscripts)
+4. 重启 Claude Code(项目级 settings.json 在会话启动时加载)
+5. 新建 task md 验证:`inject_completion_link` 是否把「✅ 完成标记」段裸 checkbox 自动改成带链 link
+6. 飞书勾今日 → 跑 `python3 sync.py --vault /OB --pull-today --apply` → 再取消飞书今日 → 再跑一次 → 验证 today_history 中的今日被清,journal 不再渲染
+7. 跨日测试:在 `journals/<昨天>.md` 中跑 Cmd+P「📝 快记任务」 → 验证新 task 文件名前缀 / `today_history` / `日志` 都是「昨天」日期
+
+### 📊 已知 follow-up
+
+- sync.py line 180 有个 `\s` regex SyntaxWarning(无功能影响),P3 修
+- `scan_vault_record_ids` (老 `--pull` 流程)的 `vault_root = Path(".")` 仍是 hard-code,但因 `--vault` 已 chdir,实际行为正确;P3 改成 `find_vault_root()`
+
+---
+
 ## [v0.3.0] - 2026-05-26 — **今日聚焦历史保真:`today_history` 事件流**
 
 ### 🎯 问题背景
