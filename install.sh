@@ -73,7 +73,7 @@ run_or_dry() {
 # ============================================================
 log ""
 log "============================================================"
-log "📦 feishukanban-ob-sync v0.3.3 install"
+log "📦 feishukanban-ob-sync v0.3.4 install"
 log "============================================================"
 [[ $APPLY -eq 0 ]] && log "📌 模式: dry-run(--apply 才真执行)" || log "🚀 模式: --apply(真执行)"
 log "📂 装到 vault 相对路径: $SCRIPTS_DIR(用 --scripts-dir 改)"
@@ -149,22 +149,37 @@ fi
 log ""
 
 # ============================================================
-# Step 4: symlink QuickAdd UserScripts
+# Step 4: 装 QuickAdd UserScripts(cp + sed 注入 sync.py 路径)
 # ============================================================
-log "Step 4: symlink QuickAdd UserScripts(4 个)"
+# v0.3.4 改造背景:v0.3.2 用 __filename 在 userscript 里推导 sync.py 路径,
+# 但 Obsidian QuickAdd 上下文里 __filename 指向 electron.asar 内部,不是 vault 内
+# 真实位置 → sync.py 路径推导成 /Applications/Obsidian.app/.../sync.py(不存在)→ 报错
+# 修复:install.sh 时 cp(不再 symlink) + sed 替换占位符 __SYNC_PY_ABS_PATH__ 为
+# $REPO_DIR/sync.py 真实绝对路径,userscript 不再依赖 __filename
+# trade-off:升级 obsidian-assets/userscripts/*.js 后需要重跑 install.sh --force
+log "Step 4: 装 QuickAdd UserScripts(cp + sed 注入,v0.3.4)"
 US_TARGET="$SCRIPTS_TARGET/userscripts"
 run_or_dry mkdir -p "$US_TARGET"
+
+SYNC_PY_ABS="$REPO_DIR/sync.py"
 
 for js in "$REPO_DIR/obsidian-assets/userscripts/"*.js; do
   name=$(basename "$js")
   target="$US_TARGET/$name"
   if [[ -e "$target" && $FORCE -eq 0 ]]; then
-    warn "  $name 已存在 → 跳过"
+    warn "  $name 已存在 → 跳过(用 --force 覆盖)"
     continue
   fi
-  [[ $APPLY -eq 1 && -e "$target" ]] && rm "$target"
-  run_or_dry ln -s "$js" "$target"
-  ok "  symlink: $target"
+  if [[ $APPLY -eq 1 ]]; then
+    [[ -e "$target" || -L "$target" ]] && rm "$target"
+    cp "$js" "$target"
+    # macOS sed -i 需要 '' 参数(BSD sed)
+    sed -i '' "s|__SYNC_PY_ABS_PATH__|$SYNC_PY_ABS|g" "$target"
+    ok "  cp + sed inject: $target(sync.py → $SYNC_PY_ABS)"
+  else
+    log "  [dry-run] cp $js → $target"
+    log "  [dry-run] sed inject __SYNC_PY_ABS_PATH__ → $SYNC_PY_ABS"
+  fi
 done
 log ""
 
@@ -325,6 +340,6 @@ if [[ $APPLY -eq 0 ]]; then
   log "============================================================"
 else
   log "============================================================"
-  ok "feishukanban-ob-sync v0.3.3 部署完成!"
+  ok "feishukanban-ob-sync v0.3.4 部署完成!"
   log "============================================================"
 fi

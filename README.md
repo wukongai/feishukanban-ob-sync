@@ -3,9 +3,13 @@
 > 📋 **Obsidian ↔ 飞书项目管理多维表 全闭环同步工具**。让你既享受 Obsidian 的 ADHD 友好「子弹笔记式任务流」,又拥有飞书的「项目看板可视化」,**两端永远一致**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.3.3-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.3.4-blue.svg)](CHANGELOG.md)
 
 ---
+
+## 🚀 v0.3.4 上线 — 修 dataview 跨天完成"消失"bug(2026-05-27)
+
+journal 模板里 `(!done_date OR done_date = this.file.day)` 过滤条件导致**跨天才完成的 task** 在历史 journal 里消失。修法:**完全移除 done_date 过滤**,只靠 `today_history` 控范围,完成态由 inline `- [x] ✅ <date>` 自然渲染。详见 [CHANGELOG v0.3.4](CHANGELOG.md#v034---2026-05-27--修-dataview-跨天完成消失bug)。
 
 ## 🚀 v0.3.3 上线 — 强制北京时区(双层 defense)(2026-05-27)
 

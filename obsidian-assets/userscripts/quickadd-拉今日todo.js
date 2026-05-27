@@ -29,9 +29,10 @@ module.exports = async function (params) {
 
     const vaultRoot =
       app.vault.adapter.basePath || app.vault.adapter.getBasePath();
-    // v0.3.2: __filename 自适应,不管 install.sh 装在 vault 哪里都能找到 sync.py
-    // 约定:install.sh 把 sync.py 装在 userscripts/ 的上一级(同 SCRIPTS_TARGET 父目录)
-    const syncScript = path.resolve(path.dirname(__filename), "..", "sync.py");
+    // v0.3.4: install.sh 装的时候 sed 替换占位符为 sync.py 绝对路径
+    // (v0.3.2 用 __filename 推导失败 — Obsidian QuickAdd 上下文里 __filename 指向
+    //  /Applications/Obsidian.app/Contents/Resources/electron.asar/,不是 vault 内 .js 真实位置)
+    const syncScript = "__SYNC_PY_ABS_PATH__";
     // v0.3.1: 用 --vault 替代 `cd && python3`,命令开头是 python3,Claude Code allowlist 友好
     const syncCmd = `python3 "${syncScript.replace(/"/g, '\\"')}" --vault "${vaultRoot.replace(/"/g, '\\"')}" --pull-today --apply`;
 

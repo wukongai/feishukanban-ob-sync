@@ -2,6 +2,136 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.3.4] - 2026-05-27 — 修 __filename + dataview 跨天 两个 bug
+
+> **2 个独立 bug fix 合并到同一版本号**(v0.3.2 / v0.3.3 修补)。
+> Part 1:`__filename` 推导失败导致 4 个 Cmd+P 命令全部不可用(本次会话 01:00 实测发现)。
+> Part 2:dataview 跨天完成 task "消失"bug(v0.3.4 主体)。
+
+---
+
+## Part 1:修 `__filename` bug(OB CC 跨边界例外修)
+
+> **现象**:Cmd+P 跑「📝 快记任务 / 📥 拉今日 todo / ✅ 完成 task」全部报错:
+> ```
+> Command failed: python3 "/Applications/Obsidian.app/Contents/Resources/electron.asar/sync.py" ...
+> can't open file '/Applications/Obsidian.app/Contents/Resources/electron.asar/sync.py': [Errno 2] No such file or directory
+> ```
+
+### 🐛 根因
+
+v0.3.2 设计的"`__filename` 自适应"在 Obsidian QuickAdd userscript 上下文里**根本不成立**:
+
+```js
+// v0.3.2 写法(失败)
+const syncScript = path.resolve(path.dirname(__filename), "..", "sync.py");
+```
+
+Node 的 `__filename` global 在 QuickAdd 加载 userscript 时**指向 Electron asar bundle 内部**(`/Applications/Obsidian.app/Contents/Resources/electron.asar/...`),**不是** vault 里 .js 的真实位置 → `path.resolve(..., "..", "sync.py")` 推出来是不存在的路径。
+
+漏改 4 处:
+- `quickadd-拉今日todo.js` line 34
+- `quickadd-完成task.js` line 140
+- `quickadd-快记任务-v2-task-md.js` line 113(Step 2.5 调 `--resolve-project` 查飞书子项目)
+- `quickadd-快记任务-v2-task-md.js` line 308(Step 7 调 `--task-md` sync 飞书)
+
+⚠️ 用户实测发现 v2 macro **小类(subcategory)二级菜单不出现**,根因就是 line 113 调用 sync.py 失败 → catch 走降级 → 跳过二级 suggester。
+
+### 🛠 修法
+
+`install.sh` 装的时候 `cp` + `sed` 注入 sync.py 绝对路径:
+
+**1. userscript 用占位符**(3 个 userscript 4 处):
+```js
+// v0.3.4: install.sh 装的时候 sed 替换占位符为 sync.py 绝对路径
+const syncScript = "__SYNC_PY_ABS_PATH__";
+```
+
+**2. install.sh Step 4 `ln -s` → `cp` + `sed`**:
+```bash
+cp "$js" "$target"
+# macOS sed -i 需要 '' 参数(BSD sed)
+sed -i '' "s|__SYNC_PY_ABS_PATH__|$SYNC_PY_ABS|g" "$target"
+```
+
+**Trade-off**:升级 `obsidian-assets/userscripts/*.js` 后需要重跑 `install.sh --force`(symlink 不自动跟着更新)。这是 install 工具的本意,可接受。
+
+### 📝 改动文件
+
+- `install.sh` Step 4(banner v0.3.3 → v0.3.4,Step 4 ln → cp + sed,+22 -7)
+- `obsidian-assets/userscripts/quickadd-拉今日todo.js`(line 34 占位符)
+- `obsidian-assets/userscripts/quickadd-完成task.js`(line 140 占位符)
+- `obsidian-assets/userscripts/quickadd-快记任务-v2-task-md.js`(line 113 + line 308 两处占位符)
+
+### ⚠️ 跨边界例外说明
+
+本次 fix **OB Claudian 在 OB vault 跨边界改的独立仓库源码** — 经用户显式授权,按 [cross-project.md 2026-05-26 例外条款](https://github.com/wukongai/OB) 符合 3 条:
+1. ✅ 服务对象唯一是 OB vault
+2. ✅ 风险可控(本地未 push,可 reset)
+3. ✅ 用户明确授权
+
+**OB CC 做了**:edit 3 个 userscript + edit install.sh + 重跑 install.sh 重装 vault 内文件 + 4 个 Cmd+P 用户实测通过 + 写本 CHANGELOG 段 + 写反向回执(`docs/handoff/OB对接/2026-05-27-v0.3.4-__filename-修复-跨边界例外-反向回执.md`)+ git commit。
+
+**OB CC 没做**:git push(留给独立 CC review + push)。
+
+### ✅ 验证(用户实测通过 2026-05-27)
+
+- ✅ ① 📝 快记任务:优先级 → 大类 → **小类二级菜单出现** → 是否今日 → 标题 → task md 创建 + 飞书 CREATE 成功
+- ✅ ② 📥 拉今日 todo:同步成功(无 electron.asar 错)
+- ✅ ③ ✅ 完成 task:frontmatter status:done + 飞书 UPDATE 成功
+- ✅ ④ 🎯 同步今日 task 到飞书:Claudian 自动调起
+
+---
+
+## Part 2:修 dataview 跨天完成"消失"bug
+
+> **现象**:用户在 27 日 journal 勾选 inline checkbox 完成 task → 该 task 立刻从 27 日 journal 消失,无法看到当天的完成情况。
+
+### 🐛 根因
+
+journal 模板的 dataview 过滤条件包含 `(!done_date OR done_date = this.file.day)`(或更早版本的 `(!completed OR completion = this.file.day)`),这个条件本意是"只显示当日完成的,过去日完成的不显示",但**副作用**:
+
+- 当日 journal 看一个 task:`done_date = today` → 显示 ✓
+- 26 日 journal 看一个 27 日才完成的 task(`today_history=[26,27]`,`done_date=2026-05-27`):`done_date(27) ≠ this.file.day(26)` → **消失 ❌**
+
+跨天 task 在 26 日 journal 应该仍然可见(显示为 `- [x] ✅ 2026-05-27` 跨天完成态),用户复盘"那天看到什么"的语义被破坏。
+
+### 🛠 修法
+
+**完全移除 `done_date` / `completed` 过滤**,把范围控制全部交给 `today_history`(`sync.py --pull-today` 维护的"曾经是今日"日期数组)。完成状态由 inline `- [x] ✅ <date>` 自然渲染:
+
+```dataview
+TASK
+FROM "04 Inbox/task"
+WHERE !contains(file.name, "_说明")
+  AND contains(today_history, this.file.day)
+  AND (priority = "P0" OR priority = "P1" OR priority = "P2")
+SORT priority ASC, created DESC
+```
+
+### 📝 改动文件
+
+**Vault 端**(用户私域):
+- `journals/2026-05-25.md` — 删旧字段 `(!completed OR completion = this.file.day)`(2 处 dataview block)
+- `journals/2026-05-26.md` — 删新字段 `(!done_date OR done_date = this.file.day)`(2 处)
+- `journals/2026-05-27.md` — 删旧字段 `(!completed OR completion = this.file.day)`(2 处)
+- `03 Resources/素材库/模版/日志模版 5.0 1.md`(templater 主模板)— 删 done_date 过滤(2 处),防止以后创建的 journal 复发
+
+**仓库端**(本 repo):
+- `docs/tutorial/05-task-md-workflow.md` — 更新示例 dataview 块
+- `obsidian-assets/rules/feishu-project-sync.md` — 更新示例 + TASK 查询语义说明段,记录历史教训
+
+### ✅ 验证步骤(用户测)
+
+1. 重新打开 `journals/2026-05-27.md`(刷新 dataview)
+2. 看「🎯 今日计划」section,确认勾选完成的 task 仍显示成 `- [x] ✅ 2026-05-27`(不再消失)
+3. 也可看 26 日 journal,确认 27 日才完成的 task 在 26 日也能看到完成态(跨天显示)
+
+### ⚠️ 注意
+
+- **该修复不动 sync.py**,只改 journal/template/docs 中的 dataview 查询语法
+- 当 today_history 残留 ≠ 当日的日期时(如 task 早就完成但 today_history 没清),旧 journal 也会"反复"显示。这属于 `sync.py pull-today` 的 today_history 清理范畴(v0.3.0 已建立事件流机制),本次不重叠
+
 ## [v0.3.3] - 2026-05-27 — 强制北京时区(双层 defense in depth)
 
 > **根因**:Mac 系统时区 = Asia/Shanghai,但 user shell `.zshrc` 设了 `export TZ=America/Los_Angeles`。Obsidian 从 shell 启动时继承这个 env,userscript `exec` 子进程时把 `process.env` 整体传给 sync.py → sync.py 的裸 `datetime.now()` 算成 PDT 时间(比北京晚 15-16h)。

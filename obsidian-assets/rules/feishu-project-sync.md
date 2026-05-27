@@ -76,17 +76,17 @@ inline marker 状态(按 frontmatter `status` 决定):
 TASK
 FROM "04 Inbox/task"
 WHERE !contains(file.name, "_说明")
+  AND contains(today_history, this.file.day)
   AND (priority = "P0" OR priority = "P1" OR priority = "P2")
-  AND (!completed OR completion = this.file.day)
 SORT priority ASC, created DESC
 ```
 
 ### TASK 查询语义
 
-- **`!completed`**:inline 未勾(`- [ ]` 或 `- [/]`)→ 显示
-- **`completion = this.file.day`**:inline 今日勾的(`- [x] ... ✅ <today>`)→ 显示
-- **历史日勾的**:`completion ≠ this.file.day` → 不显示(跨日浏览旧 journal 自动只显示该日完成的)
-- **`priority`**:dataview TASK 自动 inherit 所在 file 的 frontmatter
+- **`contains(today_history, this.file.day)`**:task md 的 `today_history`(由 `sync.py --pull-today` 维护的"曾经是今日"日期数组)包含当前 journal 的日期 → 显示。是"哪一天 journal 看到这条 task"的唯一决定条件。
+- **`priority`**:dataview TASK 自动 inherit 所在 file 的 frontmatter,用于分流「🎯 今日计划」(P0-P2)和「🐿️ 今日非计划」(P3)。
+- **不过滤完成态**:完成的 task 在当天 journal 仍然显示,inline `- [x] ✅ <date>` 自然渲染成 ☑;跨天完成的也保留在历史 journal 里,让用户复盘"那天看到什么"。
+- **历史依据**:早期方案用 `(!done_date OR done_date = this.file.day)` 过滤,但导致跨天完成的 task 在历史 journal "消失"(2026-05-27 用户反馈 bug)。改用 today_history 单一过滤后,完成情况由 inline checkbox 状态直接传达,更符合"每天 journal 是历史快照"的语义。
 
 ### 三个交互点一行实现
 
@@ -154,9 +154,8 @@ QuickAdd choice:`✅ 完成当前 task`
 OB task md frontmatter today: true | false
                      ↓ dataview 查询过滤
 OB today journal 「🎯 今日计划」段
-  WHERE today = true
+  WHERE contains(today_history, this.file.day)
     AND (priority = "P0" OR "P1" OR "P2")
-    AND (!completed OR completion = this.file.day)
 ```
 
 ### 关键决策

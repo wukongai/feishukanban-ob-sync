@@ -58,10 +58,11 @@ dataview 查询条件:
 ```dql
 TASK
 FROM "04 Inbox/task"
-WHERE today = true
+WHERE contains(today_history, this.file.day)
   AND (priority = "P0" OR "P1" OR "P2")
-  AND (!completed OR completion = this.file.day)
 ```
+
+> 不过滤完成态:完成的 task 在当天 journal 仍以 `- [x] ✅ <date>` 显示,跨天完成的也保留在历史 journal 里(2026-05-27 修复)。
 
 ---
 

@@ -109,8 +109,8 @@ module.exports = async function (params) {
       const pathEarly = require("path");
       const execAsyncEarly = utilEarly.promisify(execEarly);
       const vaultRootEarly = app.vault.adapter.basePath || app.vault.adapter.getBasePath();
-      // v0.3.2: __filename 自适应,不依赖 install.sh 装在 vault 哪里
-      const syncScriptEarly = pathEarly.resolve(pathEarly.dirname(__filename), "..", "sync.py");
+      // v0.3.4: install.sh 装的时候 sed 替换占位符为 sync.py 绝对路径(同 Step 7,共用 sync.py)
+      const syncScriptEarly = "__SYNC_PY_ABS_PATH__";
       const userPathsEarly = [
         `${process.env.HOME}/.local/bin`,
         "/usr/local/bin",
@@ -304,8 +304,10 @@ tags:
     const execAsync = util.promisify(exec);
 
     const vaultRoot = app.vault.adapter.basePath || app.vault.adapter.getBasePath();
-    // v0.3.2: __filename 自适应,不依赖 install.sh 装在 vault 哪里
-    const syncScript = path.resolve(path.dirname(__filename), "..", "sync.py");
+    // v0.3.4: install.sh 装的时候 sed 替换占位符为 sync.py 绝对路径
+    // (v0.3.2 用 __filename 推导失败 — Obsidian QuickAdd 上下文里 __filename 指向
+    //  /Applications/Obsidian.app/Contents/Resources/electron.asar/,不是 vault 内 .js 真实位置)
+    const syncScript = "__SYNC_PY_ABS_PATH__";
     // shell-escape 路径
     const escapedTaskPath = `${vaultRoot}/${taskPath}`.replace(/"/g, '\\"');
     // v0.3.1: 用 --vault 替代 `cd && python3`,命令开头是 python3,Claude Code allowlist 友好
