@@ -39,15 +39,25 @@ fields:
   # 必填:任务标题(从 markdown 链接的 text 部分抽)
   title: 任务标题
 
-  # 完成状态(单选/多选,enum: Todo/Doing/Done/Block/Idea)
+  # 完成状态(单选/多选,enum: Todo/Doing/SubDone/Done/Block/Idea/cancel)
   status:
     field_name: 执行状态
-    # OB 信号映射
+    # journal 模式(老接口)inline char → 飞书 enum 4 态
     map:
       "[ ]": Todo
       "[/]": Doing
       "[x]": Done
       "[-]": Block
+    # v0.3.5(2026-05-27):task md 模式 frontmatter.status → 飞书 enum 7 态直接对齐
+    # 优先用此 map(parse_task_md_for_push 带出 fm_status);journal 模式无 fm_status 走 map 老接口
+    task_md_map:
+      todo: Todo
+      doing: Doing
+      subdone: SubDone
+      done: Done
+      block: Block
+      cancel: cancel       # 飞书侧手建是小写,保留(避免 SDK 大小写敏感不匹配)
+      idea: Idea
 
   # 完成时间(datetime,从 Tasks 插件 ✅ YYYY-MM-DD emoji 抽)
   done_date:
@@ -191,6 +201,10 @@ task_md_fields:
     link_table_id: tblXXXXXXXXXX          # 关联表 table_id(从 feishu-cli bitable table list 拿)
     link_table_name_field: 产品项目名      # 关联表里项目名字段
     link_table_parent_field: 父产品        # 关联表里"父产品"字段名(用于二级菜单查子 record;无需二级则不用此字段)
+    # v0.3.5 加:关联表里 checkbox 字段名,标识项目当前是否活跃
+    # Cmd+P 快记任务弹大类/小类菜单时只显示活跃项目(归档项目自动隐藏)
+    # 留空 '' 或注释掉 → 不过滤,所有项目都显示(向后兼容 v0.3.4 及之前)
+    link_table_active_field: 当前是否活跃
     strip_prefix_regex: '^\d+\s+'         # OB 端项目名前缀正则(去 "00 " "01 " 等;留空字符串 '' 禁用)
 
     # v0.2.4 加:override_map — OB 项目名 → 飞书 record 名直接映射
@@ -228,6 +242,7 @@ reverse:
       Done: "x"
       Todo: " "
       Doing: "/"
+      SubDone: "/"        # v0.3.5(2026-05-27):inline 视觉同 doing,frontmatter 端保留 subdone 语义
       Block: "-"
       Idea: " "
       cancel: "-"

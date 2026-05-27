@@ -20,16 +20,21 @@ estimate_hours:                    # 数字,如 0.5 / 1 / 2
 efficiency:                        # 高 / 中 / 低(完成后回填)
 
 # === 关联 ===
-parent_project:                    # "[[<大项目>]]"(2026-05-26 v0.2.2 加,Cmd+P 创建时自动填)
-parent_subproject:                 # "[[<子项目>]]"(可空,后续手敲)
+parent_project:                    # "[[<最终归属项目>]]" — 选了小类用小类名,否则用大类名
+                                   # 飞书「产品项目」link 字段(只有 1 个,指向最精细 record 才能按二级看板筛选)
+                                   # v0.2.2 加 / v0.3.5 澄清语义:从「大项目」改为「最终归属」
+parent_subproject:                 # "[[<小类名>]]"(OB 侧 metadata,sync 不推飞书;v0.3.5 起 Cmd+P 自动填)
 parent_inspiration:                # "[[<灵感>]]"(从灵感孵化时填)
 日志: "[[journals/2026-05-26]]"
 
 # === 同步自动回填(sync 时写入,人不手动改)===
 feishu_record:                     # CREATE 后回填 recXXX
 feishu_url:                        # CREATE 后回填 base 长链
-iteration_week:                    # 同步时根据 done_date 或 created 自动算
-iteration_month:                   # 同步时根据 done_date 或 created 自动算
+# v0.3.5: iteration_week / iteration_month 改为多选 list(飞书侧字段也升级为多选)
+# Cmd+P「📝 快记任务」时主动选(默认 = created 当周/当月);跨季 task 可选多个
+# 旧 task 单值仍兼容(单值 = 单元素 list)
+iteration_week:                    # YAML inline list,如 [26W22(5月25日-5月31日), 26W23(6月1日-6月7日)]
+iteration_month:                   # YAML inline list,如 [26 年 5 月, 26 年 6 月]
 completion_month:                  # 完成时根据 done_date 自动算
 
 tags:

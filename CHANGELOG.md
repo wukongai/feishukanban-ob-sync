@@ -2,6 +2,199 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.3.5] - 2026-05-27 — status 7 态对齐 + Cmd+P 快记任务 9 步流程升级
+
+> **2 块 patch 合并**(v0.3.4 模式):
+> - **Part 1**:status 7 态对齐飞书看板(加 SubDone + Idea)— OB CC 跨边界例外修
+> - **Part 2**:Cmd+P 快记任务升级 9 步交互 + sync.py `--quickadd-options` batch 接口 — 让飞书看板能按 ADHD优先级 / 大类小类 / 周月 / DDL 维度直接筛选
+
+---
+
+## Part 1:status 7 态对齐飞书看板(加 SubDone + Idea)
+
+> **背景**:用户飞书项目看板「执行状态」字段加了 SubDone 选项(Orange Lighter),用于"主任务下挂的子任务已完成,主任务本身还没收尾"的场景。截图反馈"看板上有 subdone,可能 task 的属性中没有同步到"。OB CC 走完 systematic-debugging 诊断发现 OB 端 schema 只 5 态,sync.py 4 处映射逻辑都缺 subdone/idea。
+>
+> **决策**:OB 端持有 subdone/idea,完全对齐飞书看板 7 态。inline checkbox 4 字符**不变**(`[ ]/[/]/[x]/[-]`),subdone 视觉同 doing,idea 视觉同 todo,**frontmatter.status 是真相源**。
+
+### 🐛 修复 4 处映射 bug
+
+| # | 位置 | 旧行为 | 新行为 |
+|---|------|--------|--------|
+| 1 | `sync.py` `_create_task_md_from_feishu_record` (line 2791) | `SubDone→doing` / `Idea→todo`(降级)| `SubDone→subdone` / `Idea→idea` / 补 `cancel→cancel`(保留 7 态语义)|
+| 2 | `sync.py` `parse_task_md_for_push` status_map (line 985) | 缺 subdone/idea | 加 `subdone→/` + `idea→ `(inline 兼容层) + return dict 带 `fm_status` 原值 |
+| 3 | `sync.py` `build_fields_payload` (line 1791) + `config.yaml` `fields.status` | 仅 4 字符 inline char → 飞书 enum | 优先 `task_md_map` 7 态直接映射,fallback 老 inline char 映射(journal 模式) |
+| 4 | `config.yaml` `reverse.status_map` | 缺 SubDone | 加 `SubDone→/`(pull 写 journal inline 用)|
+
+### 7 状态对齐表(契约真相源)
+
+| OB frontmatter status | 飞书「执行状态」 | inline 兼容字符 |
+|---|---|---|
+| `todo` | `Todo` | `[ ]` |
+| `doing` | `Doing` | `[/]` |
+| `subdone` | `SubDone` | `[/]`(视觉同 doing)|
+| `done` | `Done` | `[x]` |
+| `block` | `Block` | `[-]` |
+| `cancel` | `cancel` | `[-]` |
+| `idea` | `Idea` | `[ ]`(视觉同 todo)|
+
+⚠️ 飞书侧 `cancel` 是**小写**(其他 6 个 PascalCase)— 飞书后台手建时没大写,保留现状避免触发 SDK 大小写敏感不匹配。
+
+### 🔗 OB 端配套(handoff 同步)
+
+- task 模板 frontmatter `status` 注释扩展为 7 态
+- journal 模板 dataview 从 TASK → LIST + 7 status emoji 渲染
+- rules 3 处更新(base-and-frontmatter / feishu-project-sync / task-and-habits)
+
+详见 `docs/handoff/OB对接/2026-05-27-status-subdone-idea-handoff.md` + 反向回执。
+
+### 📝 改动文件
+
+- `sync.py`(3 处:line 985 `parse_task_md_for_push` / line 1791 `build_fields_payload` / line 2791 `_create_task_md_from_feishu_record`)
+- `config.example.yaml`(2 处:`fields.status.task_md_map` 新加 + `reverse.status_map` 补 SubDone)
+- `config.yaml`(用户私域同步,本仓库不 commit)
+- `docs/ARCHITECTURE.md`(status 数据模型一行扩展为 7 态)
+
+### ⚠️ 注意
+
+- inline checkbox 4 字符**不变**,Tasks 插件 + Cmd+P「完成 task」UserScript 行为不受影响
+- journal 模式(inline task)继续走老 4 字符映射,**没有引入 frontmatter.status 概念**
+- 用户测试前需手动把 `config.yaml` 的 `fields.status.task_md_map` + `reverse.status_map.SubDone` 同步到位
+
+---
+
+## Part 2:Cmd+P 快记任务 9 步流程升级 + sync.py `--quickadd-options` batch 接口
+
+> **核心动机**:ADHD 友好工作流 = 飞书看板按维度筛选(优先级 / ADHD 优先级 / 大类小类 / 周月 / DDL)。
+> v0.3.4 之前 Cmd+P 只填 5 个字段,task 同步飞书后还要去看板**二次手填**剩下 5 个 → 决策疲劳。
+> Part 2 把所有看板筛选字段一次性弹完,飞书侧从此直接按维度切片,不用回头补数据。
+
+### 🎯 新 9 步流程(原 5 步 → 9 步,但都带「跳过」选项)
+
+| # | 字段 | 选项来源 | 默认 |
+|---|---|---|---|
+| 1 | 优先级 | 写死 P0/P1/P2/P3 | 必填 |
+| 2 | **ADHD 优先级** 🆕 | 写死 待抢救 / 有 DDL / 自由待办 | 可跳过 |
+| 3 | **大类**(parent_project) 🆕 | 飞书产品项目表 `活跃=true AND 父产品=空` | 可跳过 |
+| 4 | **小类**(parent_subproject) 🆕 | 飞书产品项目表 `活跃=true AND 父产品=选中大类` | 可跳过 |
+| 5 | **截止日期 DDL** 🆕 | preset:今天/明天/本周末/下周末/本月底/手输 | 可跳过 |
+| 6 | **执行月**(多选)🆕 | 飞书最近 5 个 enum + ⏭ 默认(=created 当月) | 默认 |
+| 7 | **执行周**(多选)🆕 | 飞书最近 5 个 enum + ⏭ 默认(=created 当周) | 默认 |
+| 8 | 是否今日 | 写死 需求池/今日 | 必填 |
+| 9 | 标题 | inputPrompt | 必填 |
+
+### 🔌 sync.py `--quickadd-options` batch 接口
+
+避免 Cmd+P 启动多次 python3 进程(每次 ~1s)。一次性 JSON 返回 4 类数据:
+
+```bash
+python3 sync.py --vault <vault> --quickadd-options
+# 输出:
+{
+  "active_top_level": [{"name":"布丁","record_id":"rec..."}, ...],
+  "subprojects_by_parent": {"rec...":[{"name":"布丁开发","record_id":"..."}],...},
+  "recent_months": ["26 年 6 月","26 年 5 月", ...],
+  "recent_weeks":  ["26W23（6月1日-6月7日）","26W22（5月25日-5月31日）", ...]
+}
+```
+
+#### 关键实现细节
+
+- **关联表读取**:`_extract_link_table_records()` 扫飞书产品项目表 record list(`--limit 200`,cli 上限),返回 enrich 后的 `[{name, record_id, active, parent_ids}, ...]`,过滤逻辑(活跃 / 父=空 / 父=指定)在 Python 侧做。
+- **iteration 最近 5 个**:`get_recent_iteration_options()` 用 `default_view_id` 过滤拉主表(避免拉到老 record 漏新 iteration 值 — cli 不传 view_id 时是按创建时间 ASC 拉,前 200 条都是老 record),distinct + 正则前缀匹配 + DESC 排序 + top 5。
+- **正则前缀匹配**:`^(\d{2})W(\d{1,2})` / `^(\d{2})\s*年\s*(\d{1,2})\s*月` — 容忍飞书侧 option name 加尾部说明(如 `26W22(5月25日-5月31日)`)。
+- **active 字段可选**:`link_table_active_field` 未配 → 默认 `active=True`(向后兼容)。
+
+### 🔧 sync.py 配套改造:`parse_task_md` + `build_fields_payload`
+
+#### parse_task_md 新增字段
+- `iteration_month: list[str]` — frontmatter list / 单 str / 空,都规范化为 list
+- `iteration_week: list[str]`
+- `parent_subproject: str` — 小类 wikilink 抽出
+
+#### build_fields_payload 改逻辑(iteration_* 写飞书优先级)
+1. frontmatter 显式 list 非空 → 直接写(多选 list,支持跨季)
+2. 否则 done_date 非空 → 老 derive 算法(完成 task 补录历史,沿用 v0.3.4 行为)
+3. 都没 → 跳过
+
+#### parent_project 语义澄清(沿用 v0.2.4 行为,补充文档)
+- userscript 选了小类 → `parent_project = 小类名` → 飞书 link 指向最精细 record(按二级看板筛选)
+- 只选大类 → `parent_project = 大类名`
+- `parent_subproject` 是 OB 侧 metadata(可空),sync 不推飞书
+
+### 📝 task md frontmatter schema 变化
+
+```yaml
+# 旧 v0.3.4
+iteration_week:           # 单值,sync 时根据 done_date 自动算
+iteration_month:          # 同上
+
+# 新 v0.3.5 Part 2(向后兼容)
+iteration_week: [26W22(5月25日-5月31日), 26W23(6月1日-6月7日)]   # list
+iteration_month: [26 年 5 月, 26 年 6 月]                       # list
+```
+
+旧单值字符串仍兼容(`_ensure_list` 包成 1-elem list)。
+
+### 📦 改动文件(Part 2)
+
+- `sync.py` +~210 行
+  - 新 fn:`_extract_link_table_records` / `_iter_week_sort_key` / `_iter_month_sort_key` / `get_recent_iteration_options` / `cmd_quickadd_options`
+  - `parse_task_md` 加 `iteration_month / iteration_week / parent_subproject` + `_ensure_list` helper
+  - `build_fields_payload` iteration_* 改优先用 frontmatter
+  - argparse 加 `--quickadd-options` flag
+- `obsidian-assets/userscripts/quickadd-快记任务-v2-task-md.js` 整体重写(376 → ~420 行)
+  - `getDateContext()` / `isoWeek()` / `selectMultiOrDefault()` 3 个 helper
+  - Step 0 batch options + Step 1-9 交互
+  - 保留 v0.3.1 跨日 / v0.3.3 TZ 注入 / v0.3.4 `__SYNC_PY_ABS_PATH__` 占位符
+- `obsidian-assets/templates/task-template.md`:parent_project 注释扩展;iteration_* 注释 单值 → list
+- `config.example.yaml` +3 行:`task_md_fields.parent_project.link_table_active_field`
+
+### ⚠️ Part 2 用户侧需要做的事
+
+#### ✅ 必做 1:`config.yaml` 加一行
+
+找到 `task_md_fields.parent_project:` 块,在 `link_table_parent_field` 下面加:
+
+```yaml
+  parent_project:
+    field_name: 产品项目
+    link_table_id: tblZ5Zu8v6m5AUx0
+    link_table_name_field: 产品项目名
+    link_table_parent_field: 父产品
+    link_table_active_field: 当前是否活跃     # ← v0.3.5 加这一行
+    strip_prefix_regex: '^\d+\s+'
+```
+
+不加这行 → Cmd+P 大类菜单会显示**所有 11 个项目**(含归档,不过滤活跃)。
+
+#### ✅ 必做 2:重装 userscripts
+
+```bash
+bash /Users/aim5/Documents/CodingProject/feishukanban-ob-sync/install.sh --apply --force
+```
+
+v0.3.4 起 userscripts 是 `cp + sed` 不是 symlink,**必须重跑 install**!然后 `Cmd+Q` 重启 Obsidian。
+
+### 🧪 Part 2 验证 4 场景
+
+1. **完整流程**:9 步全填(不选跳过)→ task md 8 个字段都对
+2. **全跳过流程**:大类/小类/ADHD/DDL 全跳过 → 只有 priority + isToday + 标题 + 默认 month/week
+3. **跨多月项目**:Step 6 多选 26 年 5 月 + 6 月 → frontmatter `iteration_month: [26 年 5 月, 26 年 6 月]`
+4. **ADHD="有 DDL" + DDL 跳过**:弹警告 Notice + 允许继续
+
+### ⚖️ Part 2 8 条原则自评
+
+| # | 原则 | 表现 |
+|---|---|---|
+| 1 | 解耦 | ⭐⭐⭐⭐⭐ 大类/小类 数据源完全飞书侧,加项目只改飞书不改代码 |
+| 2 | 可扩展 | ⭐⭐⭐⭐⭐ `--quickadd-options` 接口可加新选项(如 estimate_hours preset)不动 userscript 主流程 |
+| 3 | 灵活修改 | ⭐⭐⭐⭐ 9 步顺序在 userscript 一处控制 |
+| 4 | 渐进披露 | ⭐⭐⭐ 9 步偏多但每步都有「跳过」,实际可降到 6 步内 |
+| 5 | 鲁棒性 | ⭐⭐⭐⭐⭐ Step 0 batch 失败 → 降级菜单跳过 / iteration 字段未配 → 跳过 / 飞书空 → 用本地 derive 默认 |
+| 6 | 人可读 + 可教学 | ⭐⭐⭐⭐ JSDoc + 注释保留 v0.3.1/v0.3.3/v0.3.4 历史 |
+| 7 | 高复用 + 易移植 | ⭐⭐⭐⭐ `link_table_active_field` 配置项让别人 clone 仓库后选用 |
+| 8 | 工程化清晰 | ⭐⭐⭐⭐ Python ast + node --check 双语法校验 + 真飞书 cli smoke test |
+
 ## [v0.3.4] - 2026-05-27 — 修 __filename + dataview 跨天 两个 bug
 
 > **2 个独立 bug fix 合并到同一版本号**(v0.3.2 / v0.3.3 修补)。

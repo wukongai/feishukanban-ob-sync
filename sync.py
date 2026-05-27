@@ -982,8 +982,13 @@ def parse_task_md(md_path: Path, config: dict) -> Optional[dict]:
         title = m_prefix.group(1) if m_prefix else stem
 
     # status enum → OB checkbox char(供 build_fields_payload 的 status_cfg.map 使用)
+    # v0.3.5(2026-05-27):加 subdone/idea — inline checkbox 4 字符表达不出 7 态,
+    # subdone 视觉同 doing,idea 视觉同 todo,frontmatter.status 才是真相源
+    # (build_fields_payload 通过 fm_status 直接 7 态映射,这里只服务 inline 兼容层)
     status_map = {
-        "todo": " ", "doing": "/", "done": "x", "block": "-", "cancel": "-",
+        "todo": " ", "doing": "/", "subdone": "/",
+        "done": "x", "block": "-", "cancel": "-",
+        "idea": " ",
     }
     status_str = fm.get("status") or "todo"
     status_char = status_map.get(status_str, " ")
@@ -1029,6 +1034,20 @@ def parse_task_md(md_path: Path, config: dict) -> Optional[dict]:
         m = re.match(r'^\[\[([^\]|]+)(?:\|[^\]]*)?\]\]$', s)
         return m.group(1).strip() if m else s
 
+    def _ensure_list(v):
+        """frontmatter list 字段值 → list[str]
+        - YAML 解析的 list → 直接转 str list
+        - 单 str → 包成 1-elem list
+        - None / '' → 空 list
+        v0.3.5 加,用于 iteration_month / iteration_week 多选支持
+        """
+        if v is None or v == "":
+            return []
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if x is not None and str(x).strip()]
+        s = str(v).strip()
+        return [s] if s else []
+
     done_date = _date_str(fm.get("done_date"))
     created_date = _date_str(fm.get("created"))
 
@@ -1059,6 +1078,8 @@ def parse_task_md(md_path: Path, config: dict) -> Optional[dict]:
         "line_idx": 0,
         "raw_line": "",
         "status_char": status_char,
+        # v0.3.5(2026-05-27):带出 frontmatter.status 原值,build_fields_payload 优先用此 7 态直接映射
+        "fm_status": status_str,
         "title": title,
         "url": fm.get("feishu_url"),
         "record_id": feishu_record if feishu_record else None,
@@ -1090,6 +1111,12 @@ def parse_task_md(md_path: Path, config: dict) -> Optional[dict]:
         # parent_project: 2026-05-26 v0.2.2 加 — task 关联到具体大项目
         # frontmatter 形如 `parent_project: "[[<项目名>]]"` → 抽出项目名(去掉 [[]])
         "parent_project": _strip_wikilink(fm.get("parent_project")),
+        # parent_subproject: v0.3.5 加,小类(配合 Cmd+P 快记任务新菜单)
+        "parent_subproject": _strip_wikilink(fm.get("parent_subproject")),
+        # iteration_*: v0.3.5 加,允许在 CREATE 时主动写(而非只在完成时 derive)
+        # YAML inline list 或单 str 都兼容;build_fields_payload 优先用此值
+        "iteration_month": _ensure_list(fm.get("iteration_month")),
+        "iteration_week": _ensure_list(fm.get("iteration_week")),
         # today_flag: 2026-05-26 v0.2.4 加 — 是否今日
         # YAML 已解析为 bool;但用户手写 "true"/"false" 字符串也兼容
         "today_flag": _coerce_bool(fm.get("today")),
@@ -1453,6 +1480,232 @@ def resolve_project_for_userscript(ob_name: str, config: dict) -> dict:
     return result
 
 
+# ============================================================
+# v0.3.5: quickadd-options batch 接口
+# ============================================================
+# Cmd+P「📝 快记任务」启动一次 Python 进程 ~1s,要拉 大类 / 小类 / 月 / 周 共 4 类信息,
+# 各自起一个进程 4 × 1s 太慢 → 一次性 batch 拉完,userscript 单进程获取 JSON
+
+def _extract_link_table_records(
+    link_table_id: str,
+    name_field: str,
+    parent_field: str,
+    active_field: Optional[str],
+    config: dict,
+) -> list[dict]:
+    """拉关联表(产品项目表)全部 record,返回 enrich 后的 list
+
+    Returns: [{"name": "布丁", "record_id": "rec...", "active": True, "parent_ids": ["rec..."]}, ...]
+        - active: 若 active_field 未配 → 默认 True(不过滤)
+        - parent_ids: 父字段 link list 解析的 record_id list,空 list 表示是顶层
+    """
+    try:
+        # limit=200 是飞书 cli 单次上限,产品项目表通常 <100 条够用
+        result = run_cli([
+            "bitable", "record", "list",
+            "--base-token", config["feishu"]["base_token"],
+            "--table-id", link_table_id,
+            "--limit", "200",
+        ])
+    except Exception as e:
+        print(f"⚠️  关联表 record list 失败: {e}", file=sys.stderr)
+        return []
+
+    fields = result.get("fields", [])
+    rows = result.get("data", [])
+    ids = result.get("record_id_list", [])
+
+    if name_field not in fields:
+        return []
+
+    name_idx = fields.index(name_field)
+    parent_idx = fields.index(parent_field) if parent_field in fields else -1
+    active_idx = fields.index(active_field) if (active_field and active_field in fields) else -1
+
+    records: list[dict] = []
+    for i, row in enumerate(rows):
+        if i >= len(ids):
+            break
+        name_val = row[name_idx] if name_idx < len(row) else None
+        if not isinstance(name_val, str) or not name_val.strip():
+            continue
+
+        # 父字段:link 字段格式 list of {"id":"rec..."},空/None 表示顶层
+        parent_ids: list[str] = []
+        if parent_idx >= 0 and parent_idx < len(row):
+            parent_val = row[parent_idx]
+            if isinstance(parent_val, list):
+                parent_ids = [p.get("id") for p in parent_val if isinstance(p, dict) and p.get("id")]
+
+        # active 字段:checkbox 格式 bool / "true" / 1 都算 truthy;未配 active_field → 默认 True
+        if active_idx >= 0:
+            active_val = row[active_idx] if active_idx < len(row) else None
+            active = bool(active_val) and str(active_val).lower() not in ("false", "0", "")
+        else:
+            active = True
+
+        records.append({
+            "name": name_val.strip(),
+            "record_id": ids[i],
+            "active": active,
+            "parent_ids": parent_ids,
+        })
+
+    return records
+
+
+# v0.3.5: 前缀匹配,允许飞书侧 option name 带额外尾部说明
+# 例:`26W22(5月25日-5月31日)` 匹配为 yy=26 ww=22
+# 例:`26 年 5 月(5月起)` 匹配为 yy=26 mm=5
+# 不带 `$` 的正则锁定 ISO 周编号 / 年月格式前缀;无关老格式如 `S1(25 年第 46 周)...` 不匹配
+_ITER_WEEK_RE = re.compile(r"^(\d{2})W(\d{1,2})")
+_ITER_MONTH_RE = re.compile(r"^(\d{2})\s*年\s*(\d{1,2})\s*月")
+
+
+def _iter_week_sort_key(s: str) -> int:
+    """26W22 → 26*53+22 = 1400(用于 DESC 排序;不匹配格式返回 -1)"""
+    m = _ITER_WEEK_RE.match(s.strip())
+    if not m:
+        return -1
+    yy, ww = int(m.group(1)), int(m.group(2))
+    return yy * 53 + ww
+
+
+def _iter_month_sort_key(s: str) -> int:
+    """26 年 5 月 → 26*12+5 = 317(用于 DESC 排序;不匹配格式返回 -1)"""
+    m = _ITER_MONTH_RE.match(s.strip())
+    if not m:
+        return -1
+    yy, mm = int(m.group(1)), int(m.group(2))
+    return yy * 12 + mm
+
+
+def get_recent_iteration_options(
+    table_id: str,
+    field_name: str,
+    sort_key_fn,
+    top_n: int,
+    config: dict,
+    view_id: Optional[str] = None,
+) -> list[str]:
+    """拉主表 record,扫指定 iteration 字段,distinct + sort_key_fn DESC + top N
+
+    Args:
+        view_id: 用 view 过滤(cli `--view-id`),通常用 default_view_id 拿"日常活跃"那批 record
+                 留空 None → 拉全表(按创建时间 ASC),可能拉到老 record 漏新 iteration 值
+
+    返回 [str, ...](飞书侧字符串值,直接可写 frontmatter)
+    """
+    cli_args = [
+        "bitable", "record", "list",
+        "--base-token", config["feishu"]["base_token"],
+        "--table-id", table_id,
+        "--limit", "200",
+    ]
+    if view_id:
+        cli_args += ["--view-id", view_id]
+    try:
+        result = run_cli(cli_args)
+    except Exception as e:
+        print(f"⚠️  主表 record list 失败({field_name}): {e}", file=sys.stderr)
+        return []
+
+    fields = result.get("fields", [])
+    rows = result.get("data", [])
+
+    if field_name not in fields:
+        return []
+    idx = fields.index(field_name)
+
+    seen: set[str] = set()
+    for row in rows:
+        if idx >= len(row):
+            continue
+        val = row[idx]
+        # 单选 enum:cli 返回 str;多选 enum:cli 返回 list[str];都正交处理
+        if isinstance(val, str) and val.strip():
+            seen.add(val.strip())
+        elif isinstance(val, list):
+            for v in val:
+                if isinstance(v, str) and v.strip():
+                    seen.add(v.strip())
+
+    valid = [s for s in seen if sort_key_fn(s) >= 0]
+    valid.sort(key=sort_key_fn, reverse=True)
+    return valid[:top_n]
+
+
+def cmd_quickadd_options(config: dict) -> dict:
+    """v0.3.5: Cmd+P 快记任务启动时一次性拉 大类 / 小类 / 月 / 周 所有选项
+
+    Returns JSON-serializable dict:
+        {
+          "active_top_level": [{"name":"布丁","record_id":"rec..."}, ...],
+          "subprojects_by_parent": {"rec...": [{"name":"布丁开发","record_id":"rec..."}], ...},
+          "recent_months": ["26 年 6 月","26 年 5 月",...],
+          "recent_weeks":  ["26W23","26W22",...]
+        }
+
+    任一子查询失败 → 对应字段返回空 list/dict(不阻断 userscript,鲁棒降级)
+    """
+    pp_cfg = config.get("task_md_fields", {}).get("parent_project", {})
+    link_table_id = pp_cfg.get("link_table_id")
+    name_field = pp_cfg.get("link_table_name_field", "产品项目名")
+    parent_field = pp_cfg.get("link_table_parent_field", "父产品")
+    active_field = pp_cfg.get("link_table_active_field")  # v0.3.5 新加,留空则不过滤
+
+    result: dict = {
+        "active_top_level": [],
+        "subprojects_by_parent": {},
+        "recent_months": [],
+        "recent_weeks": [],
+    }
+
+    # ---- 大类 / 小类(产品项目表)----
+    if link_table_id:
+        records = _extract_link_table_records(
+            link_table_id, name_field, parent_field, active_field, config
+        )
+        # 大类:活跃 + 父=空
+        result["active_top_level"] = [
+            {"name": r["name"], "record_id": r["record_id"]}
+            for r in records
+            if r["active"] and not r["parent_ids"]
+        ]
+        # 小类:活跃,按 parent_id groupby
+        sub_by_parent: dict[str, list[dict]] = {}
+        for r in records:
+            if not r["active"]:
+                continue
+            for pid in r["parent_ids"]:
+                sub_by_parent.setdefault(pid, []).append(
+                    {"name": r["name"], "record_id": r["record_id"]}
+                )
+        result["subprojects_by_parent"] = sub_by_parent
+
+    # ---- 最近 5 个执行月 / 周(主表 record 扫,distinct+sort+top 5)----
+    # 用 default_view_id 拉 — 飞书侧的"主视图"通常只含活跃 record,容易拿到最新 iteration 值
+    # 不传 view_id 会拉全表按创建时间 ASC,前 200 条多是老 record 漏新格式
+    fields_cfg = config.get("fields", {})
+    main_table_id = config["feishu"]["table_id"]
+    default_view_id = config["feishu"].get("default_view_id")
+    iter_month_cfg = fields_cfg.get("iteration_month", {})
+    iter_week_cfg = fields_cfg.get("iteration_week", {})
+
+    if iter_month_cfg.get("field_name"):
+        result["recent_months"] = get_recent_iteration_options(
+            main_table_id, iter_month_cfg["field_name"], _iter_month_sort_key, 5, config,
+            view_id=default_view_id,
+        )
+    if iter_week_cfg.get("field_name"):
+        result["recent_weeks"] = get_recent_iteration_options(
+            main_table_id, iter_week_cfg["field_name"], _iter_week_sort_key, 5, config,
+            view_id=default_view_id,
+        )
+
+    return result
+
+
 def feishu_search_by_short_link(short_link_or_title: str, config: dict) -> Optional[str]:
     """按 task 标题反查飞书 record_id (Phase 2.3 上线 2026-05-18)
 
@@ -1583,9 +1836,16 @@ def build_fields_payload(task: dict, config: dict, vault_root: Path, existing_de
     out[fields_cfg["title"]] = task["title"]
 
     # 执行状态(单选 wrapped in list,飞书多选字段要 array)
+    # v0.3.5(2026-05-27):task md 模式优先用 frontmatter.status 直接 7 态映射,
+    # 避免 inline 4 字符表达不出 subdone/idea;journal 模式无 fm_status,fallback 老 inline char 映射
     status_cfg = fields_cfg.get("status", {})
     if status_cfg:
-        mapped = status_cfg["map"].get(f"[{task['status_char']}]")
+        fm_status = task.get("fm_status")
+        mapped = None
+        if fm_status and "task_md_map" in status_cfg:
+            mapped = status_cfg["task_md_map"].get(fm_status)
+        if not mapped:
+            mapped = status_cfg["map"].get(f"[{task['status_char']}]")
         if mapped:
             out[status_cfg["field_name"]] = [mapped]
 
@@ -1594,27 +1854,38 @@ def build_fields_payload(task: dict, config: dict, vault_root: Path, existing_de
     if done_cfg and task["done_date"]:
         out[done_cfg["field_name"]] = date_to_ms(task["done_date"])
 
-    # 🆕 执行迭代周(单选 enum, 基于完成日 ✅ 反推 ISO 周 → cli best match → 未命中跳过)
-    # 2026-05-18 加 - 涉及周看板必填字段(用户截图反馈)
+    # 🆕 执行迭代周(多选 enum,飞书侧字段类型 MultiSelect)
+    # 2026-05-18 加(基于 done_date 反推 ISO 周);
+    # v0.3.5 升级:优先用 frontmatter `iteration_week` list(Cmd+P 创建时主动选);
+    #   frontmatter 空 + 有 done_date → fallback 走老 derive 算法(完成 task 补录历史)
     iter_week_cfg = fields_cfg.get("iteration_week", {})
-    if iter_week_cfg and iter_week_cfg.get("field_name") and task["done_date"]:
-        candidate = derive_iteration_week_candidate(
-            task["done_date"], iter_week_cfg["derive_template"]
-        )
-        matched = best_match_enum(iter_week_cfg["field_id"], candidate, config)
-        if matched:
-            out[iter_week_cfg["field_name"]] = [matched]
-        # 未命中: 静默跳过(behavior.auto_create_enum=false 同款)
+    if iter_week_cfg and iter_week_cfg.get("field_name"):
+        fm_weeks = task.get("iteration_week") or []
+        if fm_weeks:
+            # frontmatter 显式值 → 直接写(多选 list)
+            out[iter_week_cfg["field_name"]] = fm_weeks
+        elif task["done_date"]:
+            # fallback:用 done_date derive,走 cli best-match enum 选项
+            candidate = derive_iteration_week_candidate(
+                task["done_date"], iter_week_cfg["derive_template"]
+            )
+            matched = best_match_enum(iter_week_cfg["field_id"], candidate, config)
+            if matched:
+                out[iter_week_cfg["field_name"]] = [matched]
 
-    # 🆕 执行迭代月(同理, 基于完成日 → "{YY} 年 {M} 月" 候选词)
+    # 🆕 执行迭代月(同理多选 enum)
     iter_month_cfg = fields_cfg.get("iteration_month", {})
-    if iter_month_cfg and iter_month_cfg.get("field_name") and task["done_date"]:
-        candidate = derive_iteration_month_candidate(
-            task["done_date"], iter_month_cfg["derive_template"]
-        )
-        matched = best_match_enum(iter_month_cfg["field_id"], candidate, config)
-        if matched:
-            out[iter_month_cfg["field_name"]] = [matched]
+    if iter_month_cfg and iter_month_cfg.get("field_name"):
+        fm_months = task.get("iteration_month") or []
+        if fm_months:
+            out[iter_month_cfg["field_name"]] = fm_months
+        elif task["done_date"]:
+            candidate = derive_iteration_month_candidate(
+                task["done_date"], iter_month_cfg["derive_template"]
+            )
+            matched = best_match_enum(iter_month_cfg["field_id"], candidate, config)
+            if matched:
+                out[iter_month_cfg["field_name"]] = [matched]
 
     # 优先级(只在 field_name 显式配置时才写)
     prio_cfg = fields_cfg.get("priority", {})
@@ -2536,7 +2807,7 @@ def _create_task_md_from_feishu_record(rid, row, fields_meta, config, vault_root
     字段映射(飞书 → OB task md frontmatter):
     - 任务标题(text) → 标题 + 文件名
     - 价值优先级 → priority(P0-P3 默认 P3)
-    - 执行状态 → status(Todo→todo / Doing→doing / Done→done / Block→block / SubDone→doing)
+    - 执行状态 → status(Todo→todo / Doing→doing / SubDone→subdone / Done→done / Block→block / Idea→idea / cancel→cancel)
     - 大类 → category;小类(list) → subcategory
     - ADHD优先级 → adhd_priority
     - 创建时间(ms) → created(ISO 北京)
@@ -2582,9 +2853,11 @@ def _create_task_md_from_feishu_record(rid, row, fields_meta, config, vault_root
     title = _get("任务标题") or "(无标题)"
     priority = _list_first(_get("价值优先级")) or "P3"
     status_fs = _list_first(_get("执行状态")) or "Todo"
+    # v0.3.5(2026-05-27):7 态对齐飞书看板,SubDone/Idea 不再降级,补 cancel 映射
     status_map = {
         "Todo": "todo", "Doing": "doing", "Done": "done",
-        "Block": "block", "SubDone": "doing", "Idea": "todo"
+        "Block": "block", "SubDone": "subdone", "Idea": "idea",
+        "cancel": "cancel",
     }
     status = status_map.get(status_fs, "todo")
     category = _list_first(_get("大类")) or ""
@@ -2873,6 +3146,8 @@ def main():
     parser.add_argument("--task-md", help="task md 模式:单 task md 推送到飞书(CREATE/UPDATE)")
     parser.add_argument("--resolve-project",
                         help="给 userscript 用:解析 OB 项目名(如 '00 布丁')→ 输出 JSON(含 override 命中 / 一级 record_id / 二级子 records)")
+    parser.add_argument("--quickadd-options", action="store_true",
+                        help="v0.3.5 给 Cmd+P 快记任务用:一次性拉 大类/小类/最近5月/最近5周 → JSON")
     args = parser.parse_args()
 
     # --vault: 显式切到 vault 根目录,让所有相对路径(args.path / Path(".") / find_vault_root 的 cwd 起点)正确解析
@@ -2892,6 +3167,13 @@ def main():
         # 静默模式:只输出 JSON,不打任何 progress 信息(给 userscript 解析)
         config = load_config()
         result = resolve_project_for_userscript(args.resolve_project, config)
+        print(json.dumps(result, ensure_ascii=False))
+        return
+
+    if args.quickadd_options:
+        # v0.3.5 静默模式:输出 JSON 给 userscript 解析(大类 / 小类 / 月 / 周)
+        config = load_config()
+        result = cmd_quickadd_options(config)
         print(json.dumps(result, ensure_ascii=False))
         return
 

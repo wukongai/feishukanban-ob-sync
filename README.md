@@ -3,9 +3,18 @@
 > 📋 **Obsidian ↔ 飞书项目管理多维表 全闭环同步工具**。让你既享受 Obsidian 的 ADHD 友好「子弹笔记式任务流」,又拥有飞书的「项目看板可视化」,**两端永远一致**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.3.4-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.3.5-blue.svg)](CHANGELOG.md)
 
 ---
+
+## 🚀 v0.3.5 上线 — status 7 态对齐 + Cmd+P 快记任务 9 步流程升级(2026-05-27)
+
+**2 块 patch 合并**:
+
+- **Part 1**:飞书项目看板「执行状态」字段新增 **SubDone**(主任务挂的子任务已完成,主任务本身还没收尾)。OB 端 schema 升级为完整 7 态:`todo / doing / subdone / done / block / cancel / idea`,sync.py 4 处映射逻辑同步修。inline checkbox 4 字符**不变**(`[ ]/[/]/[x]/[-]`),**frontmatter.status 是真相源**。
+- **Part 2**:Cmd+P「📝 快记任务」从 5 步弹窗升级到 **9 步**,加 ADHD 优先级 / 大类 / 小类 / DDL / 执行月(多选) / 执行周(多选) — 全部从飞书侧动态拉取(`--quickadd-options` batch 接口),飞书侧加项目只改飞书不改代码。看板按维度筛选不用回头补数据。
+
+详见 [CHANGELOG v0.3.5](CHANGELOG.md#v035---2026-05-27)。
 
 ## 🚀 v0.3.4 上线 — 修 dataview 跨天完成"消失"bug(2026-05-27)
 
