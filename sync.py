@@ -55,9 +55,11 @@ except ImportError:
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = SCRIPT_DIR / "config.yaml"
 # vault 根目录(OB 项目根),用于 C 路径反向扫描笔记 frontmatter
-# 脚本路径: `OB/01 Project/00 进行中/06 小工具开发/CC命令/飞书项目同步/`
-# parents 从父目录开始数:[0]=CC命令, [1]=06 小工具开发, [2]=00 进行中, [3]=01 Project, [4]=OB
-VAULT_ROOT = SCRIPT_DIR.parents[4]
+# v0.3.2 修复:旧版用 `SCRIPT_DIR.parents[4]` 假设 sync.py 在固定深度的 vault 子目录,
+# 但 sync.py 通常是 symlink → Path(__file__).resolve() 跟符号链接跳到仓库真实位置,
+# parents[4] 不再是 vault 根而是 `/Users/<u>/` 之类,导致 line 797 backlinks 找错路径。
+# 新版:初始 = cwd,main() 处理 --vault 后会刷新为 vault_path(用 global 声明)
+VAULT_ROOT = Path.cwd()
 
 # 缓存配置,避免重复读
 _CONFIG = None
@@ -2879,6 +2881,9 @@ def main():
             print(f"❌ --vault {vault_path} 下未找到 .obsidian/ 目录,不像是 OB vault", file=sys.stderr)
             sys.exit(1)
         os.chdir(vault_path)
+        # v0.3.2: 同步刷新 VAULT_ROOT,让 build_fields_payload / C 路径 backlinks 用对的 vault 根
+        global VAULT_ROOT
+        VAULT_ROOT = vault_path
 
     if args.resolve_project:
         # 静默模式:只输出 JSON,不打任何 progress 信息(给 userscript 解析)

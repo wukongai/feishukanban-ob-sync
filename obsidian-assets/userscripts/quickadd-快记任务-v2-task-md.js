@@ -25,7 +25,7 @@
  *    详见 rules/feishu-project-sync.md「铁律 #1 飞书例外」section。
  *
  * 关联文件:
- *  - sync.py task md 模式:scripts/feishukanban-ob-sync/sync.py --task-md
+ *  - sync.py task md 模式:userscripts/ 上一级的 sync.py --task-md(v0.3.2 起 __filename 自适应)
  *  - task 模板:03 Resources/素材库/模版/task 模版.md
  *  - base 视图:04 Inbox/task/_task.base
  */
@@ -106,9 +106,11 @@ module.exports = async function (params) {
       // 提前准备 exec(同 Step 7 用一份,避免重复)
       const { exec: execEarly } = require("child_process");
       const utilEarly = require("util");
+      const pathEarly = require("path");
       const execAsyncEarly = utilEarly.promisify(execEarly);
       const vaultRootEarly = app.vault.adapter.basePath || app.vault.adapter.getBasePath();
-      const syncScriptEarly = `${vaultRootEarly}/scripts/feishukanban-ob-sync/sync.py`;
+      // v0.3.2: __filename 自适应,不依赖 install.sh 装在 vault 哪里
+      const syncScriptEarly = pathEarly.resolve(pathEarly.dirname(__filename), "..", "sync.py");
       const userPathsEarly = [
         `${process.env.HOME}/.local/bin`,
         "/usr/local/bin",
@@ -296,10 +298,12 @@ tags:
     // 铁律 #1 例外:单条 CREATE 自动 apply,无覆盖风险
     const { exec } = require("child_process");
     const util = require("util");
+    const path = require("path");
     const execAsync = util.promisify(exec);
 
     const vaultRoot = app.vault.adapter.basePath || app.vault.adapter.getBasePath();
-    const syncScript = `${vaultRoot}/scripts/feishukanban-ob-sync/sync.py`;
+    // v0.3.2: __filename 自适应,不依赖 install.sh 装在 vault 哪里
+    const syncScript = path.resolve(path.dirname(__filename), "..", "sync.py");
     // shell-escape 路径
     const escapedTaskPath = `${vaultRoot}/${taskPath}`.replace(/"/g, '\\"');
     // v0.3.1: 用 --vault 替代 `cd && python3`,命令开头是 python3,Claude Code allowlist 友好

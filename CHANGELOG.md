@@ -2,7 +2,123 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
-## [v0.3.1] - 2026-05-26 — `--vault` 参数 + 完成段裸链转 link + today_history 残留清理 + 快记任务跨日支持
+## [v0.3.2] - 2026-05-26 — symlink 路径自适应 + install.sh `--scripts-dir` + sync.py VAULT_ROOT bug 修复
+
+> 三块 patch:userscript `__filename` 自适应、install.sh `--scripts-dir` flag、sync.py `VAULT_ROOT` 跟错位置修复。配 OB 端 handoff 在 vault 内迁移 symlink 到「统一外部工具」位置,解决用户"vault 整洁"诉求。
+
+### 🎯 块 ① — userscript 路径自适应(`__filename` 推导)
+
+#### 问题
+
+3 个调 `sync.py` 的 userscript 都硬编码 `${vaultRoot}/scripts/feishukanban-ob-sync/sync.py`,把"装在 vault 哪"和"代码"耦合。用户想把 symlink 搬到别处统一管理 → userscript 必须跟着改 → 等于每次路径迁移都是 breaking。
+
+#### 修复
+
+把硬编码替换为 `path.resolve(path.dirname(__filename), '..', 'sync.py')`,用 Node.js `__filename` 推导 sync.py 真实位置。
+
+**约定**:install.sh 必须把 sync.py 装在 userscripts/ 的**上一级**(同 `SCRIPTS_TARGET` 父目录),这是 install.sh 既有行为,无破坏。
+
+#### 涉及文件
+
+- `obsidian-assets/userscripts/quickadd-拉今日todo.js`(1 处)
+- `obsidian-assets/userscripts/quickadd-完成task.js`(1 处)
+- `obsidian-assets/userscripts/quickadd-快记任务-v2-task-md.js`(2 处:resolveCmd + syncCmd)
+- 不动 `quickadd-同步飞书项目.js`(它走 Claudian skill,不调 sync.py)
+
+#### 收益
+
+**以后再迁移 symlink 路径,userscript 一行不用改**。彻底消除 vault 内位置 ↔ userscript 代码 的耦合。
+
+---
+
+### 🛠 块 ② — install.sh 加 `--scripts-dir <vault-rel-path>` flag
+
+#### 问题
+
+`install.sh` 把 `SCRIPTS_TARGET="$VAULT/scripts/feishukanban-ob-sync"` 写死,用户私域结构(如 `01 Project/00 进行中/06 小工具开发/...`)装不进去,只能装到 vault 根的 `scripts/` 目录。
+
+#### 修复
+
+加 `--scripts-dir <vault-relative-path>` flag,默认值 `scripts/feishukanban-ob-sync`(开源友好,不改默认就是 v0.3.1 行为)。Step 3 / Step 4 / Step 6 QuickAdd choices JSON / Step 7 config.yaml 提示路径**全部跟随 `--scripts-dir`**。
+
+```bash
+# 开源默认(老用户拉新版无感)
+./install.sh --apply
+
+# 装到 vault 私域位置(用户自定义)
+./install.sh --apply --scripts-dir "01 Project/00 进行中/06 小工具开发/feishukanban-ob-sync"
+```
+
+输入清洗:去掉前后多余的 `/`,接受 `foo/bar` / `/foo/bar` / `foo/bar/` 等格式。
+
+#### 配套
+
+`.quickadd-choices.json`(install.sh 输出)的 4 个 `path` 字段自动跟随新 `SCRIPTS_DIR`,用户复制到 `data.json` 就是对的。
+
+---
+
+### 🐛 块 ③ — sync.py `VAULT_ROOT` bug 修复
+
+#### 问题(隐藏 bug,实际跑了很久)
+
+sync.py 第 60 行(原):
+```python
+VAULT_ROOT = SCRIPT_DIR.parents[4]
+```
+
+假设 sync.py 在 `OB/01 Project/00 进行中/06 小工具开发/CC命令/飞书项目同步/sync.py`(parents[4] = OB)。
+
+**实际情况**(v0.2.x 起):sync.py 是 symlink → 仓库,`Path(__file__).resolve()` 跟符号链接跳到 `/Users/aim5/Documents/CodingProject/feishukanban-ob-sync/sync.py`,`parents[4]` = `/Users/aim5/`(完全错的 vault 根)。
+
+**为什么没爆**:userscripts 都通过 `--vault` 显式传 vault 路径,sync.py 主流程用 `os.chdir(vault_path)` + 相对路径,绕开了这个全局变量。但 line 797 / 1814 / 1960 三处 `build_fields_payload` 调用链用的还是错的 `VAULT_ROOT`——**C 路径 backlinks** 拼绝对路径时会找错位置(用户未碰到,但属于潜在数据 bug)。
+
+#### 修复
+
+```python
+# 新:初始 = cwd,main() 处理 --vault 后刷新
+VAULT_ROOT = Path.cwd()
+
+# main() 里 chdir 之后:
+global VAULT_ROOT
+VAULT_ROOT = vault_path
+```
+
+dry-run 跑 `--pull-today` 验证无回归(扫了 34 个 task md,7 条今日全对齐)。
+
+---
+
+### 🔧 升级路径
+
+**代码层(老用户拉 v0.3.2)**:
+1. `git pull`
+2. **不需要**重新跑 install.sh(userscript 自适应化,旧 symlink 位置照样工作)
+3. 重启 Obsidian(QuickAdd 重新加载 userscripts)
+
+**vault 整洁(可选,用户要求"统一外部工具")**:
+1. 等 OB CC 执行 `docs/handoff/OB对接/2026-05-26-symlink路径自适应-handoff.md`
+2. OB CC 选定新路径,跑 `install.sh --scripts-dir <新路径> --apply --force`
+3. 删旧 `scripts/feishukanban-ob-sync/` 目录(install.sh 不自动删,手动 `rm -rf`)
+4. 改 `.obsidian/plugins/quickadd/data.json` 4 个 choice path 字段(install.sh 输出的 snippet 已经是新值)
+5. 重启 Obsidian,测 4 个 Cmd+P 命令
+
+---
+
+### ⚖️ 8 条原则自评
+
+| # | 原则 | 本次表现 |
+|---|---|---|
+| 1 | 解耦 | ⭐⭐⭐⭐⭐ userscript 不再依赖 install.sh 装在哪;install.sh 不再依赖 userscript 路径硬编码 |
+| 2 | 可扩展 | ⭐⭐⭐⭐⭐ `--scripts-dir` 留出扩展点,装到 vault 任意位置都行 |
+| 3 | 灵活修改 | ⭐⭐⭐⭐⭐ 路径迁移成本从"改 6 个文件"降到"跑一次 install.sh + 手改 data.json" |
+| 4 | 渐进披露 | ⭐⭐⭐⭐ 开源用户默认值无感;高级用户用 flag |
+| 5 | 鲁棒性 | ⭐⭐⭐⭐ `__filename` 即使返回 symlink 真实路径(仓库内位置)也能跑通——sync.py 在仓库就在 userscripts 上一级,功能不破 |
+| 6 | 人可读 + 可教学 | ⭐⭐⭐⭐ 注释解释了"为什么 __filename 自适应能避免硬编码";handoff 文档全流程清晰 |
+| 7 | 高复用 + 易移植 | ⭐⭐⭐ Node 标准 + bash 标准,跨平台无障碍 |
+| 8 | 工程化清晰 | ⭐⭐⭐⭐ install.sh dry-run 验证 + sync.py CLI 验证,handoff 文档约定回执流程 |
+
+---
+
+
 
 > 四块 patch 合并:`--vault` CLI 参数、`inject_completion_link`、`pull-today` today_history 残留清理、`快记任务` 跨日 dateContext(OB handoff 移交)。
 

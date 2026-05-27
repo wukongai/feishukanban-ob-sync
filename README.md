@@ -3,9 +3,17 @@
 > 📋 **Obsidian ↔ 飞书项目管理多维表 全闭环同步工具**。让你既享受 Obsidian 的 ADHD 友好「子弹笔记式任务流」,又拥有飞书的「项目看板可视化」,**两端永远一致**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.3.1-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.3.2-blue.svg)](CHANGELOG.md)
 
 ---
+
+## 🚀 v0.3.2 上线 — symlink 路径自适应 + install.sh `--scripts-dir` flag(2026-05-26)
+
+- **userscript 路径自适应**:4 个 UserScript 改用 `path.resolve(path.dirname(__filename), '..', 'sync.py')` 推导 sync.py 路径,**不管 install.sh 装在 vault 哪里都能找到**——以后路径再迁移,userscript 不用动一行。
+- **install.sh 加 `--scripts-dir <vault-rel-path>` flag**:开源用户用默认 `scripts/feishukanban-ob-sync/`;高级用户可装到 vault 任意位置(如 `01 Project/.../工具/`),保 vault 文件树整洁。QuickAdd choices snippet 的 path 字段自动跟随。
+- **顺手修 sync.py `VAULT_ROOT` bug**:旧版 `SCRIPT_DIR.parents[4]` 假设固定 vault 子目录深度,因 sync.py 是 symlink 而 `.resolve()` 跳到仓库真实位置,parents[4] 算到了 `/Users/<u>/`。改成 `Path.cwd()` 初始 + `main()` 处理 `--vault` 后刷新。修复 C 路径 backlinks 潜在错位。
+
+100% 向后兼容。详见 [CHANGELOG.md](CHANGELOG.md#v032---2026-05-26)。
 
 ## 🚀 v0.3.1 上线 — `--vault` 参数 + 跨日 dateContext + 完成段链 + today_history 清理(2026-05-26)
 

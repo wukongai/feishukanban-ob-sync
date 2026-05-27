@@ -2,18 +2,20 @@
 # install.sh — 把 feishukanban-ob-sync 部署到你的 Obsidian vault
 #
 # 用法:
-#   ./install.sh                          # dry-run(预览改什么,不真做)
-#   ./install.sh --apply                  # 真执行
-#   ./install.sh --vault-path <path>      # 指定 vault 路径(默认询问)
-#   ./install.sh --apply --force          # 覆盖已存在的文件(慎用)
+#   ./install.sh                                    # dry-run(预览改什么,不真做)
+#   ./install.sh --apply                            # 真执行
+#   ./install.sh --vault-path <path>                # 指定 vault 路径(默认询问)
+#   ./install.sh --scripts-dir <vault-rel-path>     # 自定义装到 vault 哪个相对位置
+#                                                   # 默认 scripts/feishukanban-ob-sync
+#   ./install.sh --apply --force                    # 覆盖已存在的文件(慎用)
 #
-# 行为(简化版,2026-05-26 v0.3.0):
+# 行为(简化版,2026-05-26 v0.3.2):
 #   1. 检查依赖(python3 / feishu-cli / Obsidian)
 #   2. 询问/解析 vault 路径
-#   3. symlink scripts(sync.py / auto_collect_today.py)到 vault
-#   4. symlink userscripts 到 vault
+#   3. symlink scripts(sync.py / auto_collect_today.py)到 vault/$SCRIPTS_DIR
+#   4. symlink userscripts 到 vault/$SCRIPTS_DIR/userscripts
 #   5. 复制 templates / base / rules(检查 mtime,默认不覆盖)
-#   6. 输出 QuickAdd choices JSON snippet 让用户粘贴
+#   6. 输出 QuickAdd choices JSON snippet 让用户粘贴(path 字段自动跟 --scripts-dir)
 #   7. 提示后续手动步骤(飞书表字段 + config.yaml)
 
 set -euo pipefail
@@ -25,6 +27,11 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APPLY=0
 FORCE=0
 VAULT=""
+# v0.3.2: SCRIPTS_DIR 是 vault 相对路径(从 vault 根算起,不含前导/尾随 /)
+# 默认开源友好值;用户可用 --scripts-dir 覆盖装到 vault 任意位置
+# 自适应原理:userscripts/*.js 用 __filename 推导 sync.py 路径,
+# install.sh 只要保证 sync.py 在 userscripts/ 上一级,就 100% 工作
+SCRIPTS_DIR="scripts/feishukanban-ob-sync"
 
 # ============================================================
 # 参数解析
@@ -34,6 +41,10 @@ while [[ $# -gt 0 ]]; do
     --apply) APPLY=1; shift ;;
     --force) FORCE=1; shift ;;
     --vault-path) VAULT="$2"; shift 2 ;;
+    --scripts-dir)
+      # 去掉前后多余的 /,接受 "foo/bar" / "/foo/bar" / "foo/bar/" 等格式
+      SCRIPTS_DIR="${2#/}"; SCRIPTS_DIR="${SCRIPTS_DIR%/}"
+      shift 2 ;;
     --help|-h)
       head -22 "${BASH_SOURCE[0]}" | tail -20
       exit 0 ;;
@@ -62,9 +73,10 @@ run_or_dry() {
 # ============================================================
 log ""
 log "============================================================"
-log "📦 feishukanban-ob-sync v0.3.0 install"
+log "📦 feishukanban-ob-sync v0.3.2 install"
 log "============================================================"
 [[ $APPLY -eq 0 ]] && log "📌 模式: dry-run(--apply 才真执行)" || log "🚀 模式: --apply(真执行)"
+log "📂 装到 vault 相对路径: $SCRIPTS_DIR(用 --scripts-dir 改)"
 log ""
 
 log "Step 1: 依赖检查"
@@ -114,7 +126,7 @@ log ""
 # Step 3: symlink scripts
 # ============================================================
 log "Step 3: symlink scripts(sync.py + auto_collect_today.py)"
-SCRIPTS_TARGET="$VAULT/scripts/feishukanban-ob-sync"
+SCRIPTS_TARGET="$VAULT/$SCRIPTS_DIR"
 run_or_dry mkdir -p "$SCRIPTS_TARGET"
 
 # sync.py
@@ -140,7 +152,7 @@ log ""
 # Step 4: symlink QuickAdd UserScripts
 # ============================================================
 log "Step 4: symlink QuickAdd UserScripts(4 个)"
-US_TARGET="$VAULT/scripts/feishukanban-ob-sync/userscripts"
+US_TARGET="$SCRIPTS_TARGET/userscripts"
 run_or_dry mkdir -p "$US_TARGET"
 
 for js in "$REPO_DIR/obsidian-assets/userscripts/"*.js; do
@@ -213,7 +225,7 @@ cat > "$SNIPPET_FILE" <<EOF
         "name": "📝 快记任务 v2(task md 化)",
         "type": "UserScript",
         "id": "quick-task-v2-userscript-cmd",
-        "path": "scripts/feishukanban-ob-sync/userscripts/quickadd-快记任务-v2-task-md.js",
+        "path": "$SCRIPTS_DIR/userscripts/quickadd-快记任务-v2-task-md.js",
         "settings": {}
       }],
       "runOnStartup": false
@@ -232,7 +244,7 @@ cat > "$SNIPPET_FILE" <<EOF
         "name": "拉飞书侧今日 todo 到 OB",
         "type": "UserScript",
         "id": "pull-today-userscript-cmd",
-        "path": "scripts/feishukanban-ob-sync/userscripts/quickadd-拉今日todo.js",
+        "path": "$SCRIPTS_DIR/userscripts/quickadd-拉今日todo.js",
         "settings": {}
       }],
       "runOnStartup": false
@@ -251,7 +263,7 @@ cat > "$SNIPPET_FILE" <<EOF
         "name": "改 frontmatter + sync 飞书 UPDATE",
         "type": "UserScript",
         "id": "complete-task-userscript-cmd",
-        "path": "scripts/feishukanban-ob-sync/userscripts/quickadd-完成task.js",
+        "path": "$SCRIPTS_DIR/userscripts/quickadd-完成task.js",
         "settings": {}
       }],
       "runOnStartup": false
@@ -270,7 +282,7 @@ cat > "$SNIPPET_FILE" <<EOF
         "name": "调起 Claudian + 发送 /飞书项目同步",
         "type": "UserScript",
         "id": "feishu-task-sync-userscript-cmd",
-        "path": "scripts/feishukanban-ob-sync/userscripts/quickadd-同步飞书项目.js",
+        "path": "$SCRIPTS_DIR/userscripts/quickadd-同步飞书项目.js",
         "settings": {}
       }],
       "runOnStartup": false
@@ -297,7 +309,7 @@ log "  1. 在飞书新建多维表 + 加 22 个字段"
 log "     → 参考 $REPO_DIR/docs/feishu-schema.md(含 feishu-cli 一键命令)"
 log ""
 log "  2. 复制 config.example.yaml → vault config:"
-log "     cp $REPO_DIR/config.example.yaml $VAULT/scripts/feishukanban-ob-sync/config.yaml"
+log "     cp $REPO_DIR/config.example.yaml $SCRIPTS_TARGET/config.yaml"
 log "     编辑 base_token / table_id / tenant_domain"
 log ""
 log "  3. feishu-cli auth login(如未登录)"
@@ -313,6 +325,6 @@ if [[ $APPLY -eq 0 ]]; then
   log "============================================================"
 else
   log "============================================================"
-  ok "feishukanban-ob-sync v0.3.0 部署完成!"
+  ok "feishukanban-ob-sync v0.3.2 部署完成!"
   log "============================================================"
 fi

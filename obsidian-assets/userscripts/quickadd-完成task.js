@@ -130,11 +130,14 @@ module.exports = async function (params) {
     // ============ Step 7: 调 sync.py --task-md --apply ============
     const { exec } = require("child_process");
     const util = require("util");
+    const path = require("path");
     const execAsync = util.promisify(exec);
 
     const vaultRoot =
       app.vault.adapter.basePath || app.vault.adapter.getBasePath();
-    const syncScript = `${vaultRoot}/scripts/feishukanban-ob-sync/sync.py`;
+    // v0.3.2: __filename 自适应,不管 install.sh 装在 vault 哪里都能找到 sync.py
+    // 约定:install.sh 把 sync.py 装在 userscripts/ 的上一级(同 SCRIPTS_TARGET 父目录)
+    const syncScript = path.resolve(path.dirname(__filename), "..", "sync.py");
     const escapedTaskPath = `${vaultRoot}/${activeFile.path}`.replace(/"/g, '\\"');
     // v0.3.1: 用 --vault 替代 `cd && python3`,命令开头是 python3,Claude Code allowlist 友好
     const syncCmd = `python3 "${syncScript.replace(/"/g, '\\"')}" --vault "${vaultRoot.replace(/"/g, '\\"')}" --task-md "${escapedTaskPath}" --apply`;
