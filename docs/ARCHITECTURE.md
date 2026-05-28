@@ -129,6 +129,7 @@ Claudian:
 | `priority` (P0/P1/P2/P3) | 价值优先级 | select |
 | `status` (todo/doing/subdone/done/block/cancel/idea) | 执行状态 | select |
 | `today` (true/false) | 是否今日 | checkbox |
+| `today_source` (planned/unplanned/空) | (OB 私域,不映射飞书) | — |
 | `created` (ISO 8601) | (不映射,OB 私域) | — |
 | `done_date` (YYYY-MM-DD) | 完成时间 | datetime |
 | `due` (YYYY-MM-DD) | 截止日期 | datetime |

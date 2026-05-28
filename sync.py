@@ -519,8 +519,13 @@ def update_md_frontmatter(md_path: Path, updates: dict) -> bool:
 
     # 逐个 update 字段:替换已有 / 追加新增
     for key, value in updates.items():
-        value_str = _format_yaml_value(value)
-        new_line = f"{key}: {value_str}"
+        # v0.3.6: 空字符串特例 → 写 `key:`(纯空,无引号无值)
+        # 否则 _format_yaml_value("") 返回 `''`,dataview 把 `''` 当 truthy 漏过滤
+        if value == "":
+            new_line = f"{key}:"
+        else:
+            value_str = _format_yaml_value(value)
+            new_line = f"{key}: {value_str}"
         # 已有 key 的行(行首,可能含缩进 0;不允许 nested 如 `  feishu_doc_token:`)
         key_re = re.compile(rf"^{re.escape(key)}:[^\n]*$", re.MULTILINE)
         if key_re.search(body):
@@ -2906,6 +2911,7 @@ priority: {priority}
 status: {status}
 today: true
 today_history: [{today_date}]
+today_source: planned
 created: {created_line}
 due: {due}
 done_date: {done_date}
@@ -3077,9 +3083,15 @@ def pull_today_from_feishu(apply: bool = False) -> None:
             history = []
         if today_date_iso not in history:
             history.append(today_date_iso)
-        # 一次性 update 两个字段(today + today_history)
-        if update_md_frontmatter(p, {"today": True, "today_history": history}):
-            print(f"  ✅ {p.name}: today → true (+ today_history += {today_date_iso})")
+        # v0.3.6: today_source 区分计划/非计划(ADHD 自觉察)
+        # pull-today 触发 set today=true = 早晨规划好的拉来 → planned
+        # 一次性 update 3 个字段(today + today_history + today_source)
+        if update_md_frontmatter(p, {
+            "today": True,
+            "today_history": history,
+            "today_source": "planned",
+        }):
+            print(f"  ✅ {p.name}: today → true (+ today_history += {today_date_iso}, today_source = planned)")
             success_count += 1
         else:
             print(f"  ❌ {p.name}: 更新失败")
@@ -3102,6 +3114,8 @@ def pull_today_from_feishu(apply: bool = False) -> None:
         updates = {"today": False}
         if history_changed:
             updates["today_history"] = new_history
+        # v0.3.6: 对称清 today_source(不在今日 = 无来源标记)
+        updates["today_source"] = ""
         if update_md_frontmatter(p, updates):
             suffix = f" (+ today_history -= {today_date_iso})" if history_changed else ""
             print(f"  ✅ {p.name}: today → false{suffix}")

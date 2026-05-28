@@ -1,10 +1,15 @@
 ---
 # === 必填字段 ===
-priority: P3                       # P0/P1/P2/P3 — 决定「🎯今日计划」(P0-P2) vs「🐿️今日非计划」(P3)
-status: todo                       # todo / doing / done / block / cancel
+priority: P3                       # P0/P1/P2/P3 — 任务价值/紧急度(不再表达"计划/非计划",见 today_source)
+status: todo                       # todo / doing / subdone / done / block / cancel / idea(v0.3.5 7 态)
 today: false                       # 是否今日 todo(对应飞书「是否今日」字段)
                                    # 早上 sync.py --pull-today 时根据飞书侧勾选自动同步
-created: 2026-05-26T17:44:52               # ISO 8601,北京时间,无引号
+# v0.3.6: today_source 区分"计划/非计划"(ADHD 自觉察)
+# - planned:早晨 pull-today 拉来的(前一晚 / 早晨已规划)
+# - unplanned:当天 Cmd+P 快记任务 + today=true 临时插入
+# - 空:不在今日 / 历史 task / 手改 today=true(dataview 默认归"计划"段)
+today_source:                      # planned / unplanned / 空
+created: 2026-05-26T17:44:52       # ISO 8601,北京时间,无引号
 
 # === 时间字段 ===
 done_date:                         # YYYY-MM-DD,完成时回填(对应 Tasks ✅)

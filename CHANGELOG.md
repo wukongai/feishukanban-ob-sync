@@ -2,6 +2,56 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.3.6] - 2026-05-28 — `today_source` 字段:ADHD 自觉察「计划 vs 非计划」
+
+> **背景**:ADHD 友好的「今日聚焦」需要区分两种 today task — **计划好的**(早晨 pull-today 拉来的)vs **临时插入的**(当天 Cmd+P 快记任务建的)。 v0.3.5 之前两者都是 `today: true`,看不出哪些是规划好的、哪些是中途冒出来分心的,自觉察缺一个抓手。
+>
+> v0.3.6 加 `today_source` frontmatter 字段(`planned` / `unplanned` / 空)+ sync.py / userscript / template 三处联动写入,OB dataview 可以按来源切片渲染。
+
+### 🆕 today_source 字段语义
+
+| 值 | 含义 | 写入触发 |
+|---|---|---|
+| `planned` | 前一晚 / 早晨已规划 | `sync.py --pull-today` 设 today=true 时(plan_set_true / `_create_task_md_from_feishu_record`) |
+| `unplanned` | 当天临时插入 | Cmd+P 「📝 快记任务」 + 「是否今日」=是 时 |
+| 空 | 不在今日 / 历史 task / 手改 today | pull-today 设 today=false 时清空(对称) |
+
+### 🛠 改动点
+
+| 文件 | 改动 |
+|---|---|
+| `sync.py` `update_md_frontmatter` (line 519) | 空字符串特例:`value == ""` 时写 `key:`(纯空),避免 `_format_yaml_value("")` 返回 `''` 被 dataview 当 truthy 漏过滤 |
+| `sync.py` `_create_task_md_from_feishu_record` (line 2911) | 模板加 `today_source: planned`(pull-today 自动建的 = 早晨规划) |
+| `sync.py` `pull_today_from_feishu` plan_set_true (line 3083) | update 三字段:`today` + `today_history` + `today_source: planned` |
+| `sync.py` `pull_today_from_feishu` plan_set_false (line 3117) | 对称清空 `today_source: ""`(取消今日 = 无来源标记) |
+| `obsidian-assets/userscripts/quickadd-快记任务-v2-task-md.js` (line 355) | Cmd+P 临时建 task:today=true 时 `today_source: unplanned`,否则空 |
+| `obsidian-assets/templates/task-template.md` | 加 `today_source` 字段定义 + 注释;priority 注释澄清"不再表达计划/非计划";status 注释扩展到 7 态(v0.3.5 补) |
+
+### ⚠️ 用户侧需要做的事
+
+- ☐ `install.sh --apply --force` 重装(让 sync.py 新逻辑 + userscript today_source 注入 + task-template 注释生效)
+- ☐ 老 task md(v0.3.6 之前建的)`today_source` 字段缺失 → dataview 视为空 → 默认归"计划"段(可接受,语义保守)
+- ☐ OB 端 journal 模板 dataview 如需按 today_source 切片渲染 → OB 侧自己改 query(本仓库不动 OB 模板)
+
+### ⚖️ 8 条原则自评
+
+| # | 原则 | 评分 | 备注 |
+|---|---|---|---|
+| 1 | 解耦 | ⭐⭐⭐⭐ | today_source 写入 3 处(pull-today / Cmd+P / 反向建),都独立 |
+| 2 | 可扩展 | ⭐⭐⭐⭐⭐ | 加新 source 类型(如 `inherited` / `recurring`)只需补一行,代码零改动 |
+| 3 | 灵活修改 | ⭐⭐⭐⭐⭐ | OB dataview 决定如何渲染,sync.py 只负责写值 |
+| 4 | 渐进披露 | ⭐⭐⭐⭐ | 字段语义清楚,新 task 自动填,老 task 空值兜底 |
+| 5 | 鲁棒性 | ⭐⭐⭐⭐⭐ | `update_md_frontmatter` 空字符串特例修了 dataview truthy 误判 bug |
+| 6 | 人可读 | ⭐⭐⭐⭐ | planned / unplanned / 空 三态语义清楚 |
+| 7 | 高复用 | ⭐⭐⭐⭐ | today_source 通用于任何"按来源分类"场景 |
+| 8 | 工程化清晰 | ⭐⭐⭐⭐ | sync.py / userscript / template 三处一致改 |
+
+### 🔮 下一步候选(v0.3.7)
+
+handoff 反向回执已记的 follow-up:`pull-today` 对**现存** task md 反向 sync status / priority / iteration_*(目前只同步 today 字段,飞书改 status 后 OB 不响应)。
+
+---
+
 ## [v0.3.5] - 2026-05-27 — status 7 态对齐 + Cmd+P 快记任务 9 步流程升级
 
 > **2 块 patch 合并**(v0.3.4 模式):

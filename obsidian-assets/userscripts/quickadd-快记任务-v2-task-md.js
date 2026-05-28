@@ -352,12 +352,18 @@ module.exports = async function (params) {
       : `iteration_week:`;
     // today_history 事件流:today=true 时立即 init 为 [dateContext];今日 journal 才能查到
     const todayHistoryInit = isToday ? `[${dateContext}]` : `[]`;
+    // v0.3.6: today_source 区分"计划/非计划"(ADHD 自觉察用)
+    // 此 userscript 触发 = 当天 Cmd+P 临时建 → unplanned
+    // pull-today 流程 (sync.py) 设 today=true 时 → planned(早晨规划好拉的)
+    // today=false 时 today_source 留空(不在今日)
+    const todaySourceLine = isToday ? `today_source: unplanned` : `today_source:`;
 
     const content = `---
 priority: ${priorityChoice}
 status: todo
 today: ${isToday}
 today_history: ${todayHistoryInit}
+${todaySourceLine}
 created: ${createdISO}
 ${dueLine}
 done_date:

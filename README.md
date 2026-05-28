@@ -3,9 +3,13 @@
 > 📋 **Obsidian ↔ 飞书项目管理多维表 全闭环同步工具**。让你既享受 Obsidian 的 ADHD 友好「子弹笔记式任务流」,又拥有飞书的「项目看板可视化」,**两端永远一致**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.3.5-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.3.6-blue.svg)](CHANGELOG.md)
 
 ---
+
+## 🚀 v0.3.6 上线 — `today_source` 字段:ADHD 自觉察「计划 vs 非计划」(2026-05-28)
+
+today task 区分两种来源:`planned`(早晨 pull-today 拉来的 = 前一晚/早晨已规划) vs `unplanned`(当天 Cmd+P 临时插入 = 中途冒出来的)。 ADHD 友好 — OB dataview 可按来源切片渲染,自觉察"今天有多少是计划好的 / 多少是被打断的"。 sync.py / userscript / task-template 三处联动写入。详见 [CHANGELOG v0.3.6](CHANGELOG.md#v036---2026-05-28--today_source-字段adhd-自觉察计划-vs-非计划)。
 
 ## 🚀 v0.3.5 上线 — status 7 态对齐 + Cmd+P 快记任务 9 步流程升级(2026-05-27)
 
