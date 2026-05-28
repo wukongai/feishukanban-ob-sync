@@ -1108,6 +1108,9 @@ def parse_task_md(md_path: Path, config: dict) -> Optional[dict]:
         "priority_str": fm.get("priority"),
         "category": fm.get("category"),
         "subcategory": fm.get("subcategory"),
+        # v0.3.8: project_minor(项目小类,task 表 multi-select)— 任务内容细分类型
+        # frontmatter 写 list,sync.py 推飞书「项目小类」字段;Cmd+P 快记任务弹最近 5 条
+        "project_minor": _ensure_list(fm.get("project_minor")),
         "adhd_priority": fm.get("adhd_priority"),
         "estimate_hours": fm.get("estimate_hours"),
         "efficiency": fm.get("efficiency"),
@@ -1597,11 +1600,15 @@ def get_recent_iteration_options(
     config: dict,
     view_id: Optional[str] = None,
 ) -> list[str]:
-    """拉主表 record,扫指定 iteration 字段,distinct + sort_key_fn DESC + top N
+    """拉主表 record,扫指定 enum/多选字段,distinct + sort_key_fn DESC + top N
+
+    v0.3.8: 函数虽叫 iteration,实际是通用 "scan field distinct values + sort + top N"
+    - sort_key_fn=None → 不排序,按 distinct 顺序(set 遍历)取前 N(适合无自然排序的 enum,如 project_minor)
+    - sort_key_fn=fn → 按 fn DESC 取前 N(适合 iteration_week / iteration_month)
 
     Args:
         view_id: 用 view 过滤(cli `--view-id`),通常用 default_view_id 拿"日常活跃"那批 record
-                 留空 None → 拉全表(按创建时间 ASC),可能拉到老 record 漏新 iteration 值
+                 留空 None → 拉全表(按创建时间 ASC),可能拉到老 record 漏新 enum 值
 
     返回 [str, ...](飞书侧字符串值,直接可写 frontmatter)
     """
@@ -1639,6 +1646,9 @@ def get_recent_iteration_options(
                 if isinstance(v, str) and v.strip():
                     seen.add(v.strip())
 
+    # v0.3.8: sort_key_fn=None → 不排序不过滤,按 set 遍历顺序取 top N
+    if sort_key_fn is None:
+        return list(seen)[:top_n]
     valid = [s for s in seen if sort_key_fn(s) >= 0]
     valid.sort(key=sort_key_fn, reverse=True)
     return valid[:top_n]
@@ -1668,6 +1678,7 @@ def cmd_quickadd_options(config: dict) -> dict:
         "subprojects_by_parent": {},
         "recent_months": [],
         "recent_weeks": [],
+        "recent_project_minor": [],   # v0.3.8 加,任务内容细分类型最近 5 条 distinct
     }
 
     # ---- 大类 / 小类(产品项目表)----
@@ -1709,6 +1720,15 @@ def cmd_quickadd_options(config: dict) -> dict:
     if iter_week_cfg.get("field_name"):
         result["recent_weeks"] = get_recent_iteration_options(
             main_table_id, iter_week_cfg["field_name"], _iter_week_sort_key, 5, config,
+            view_id=default_view_id,
+        )
+
+    # v0.3.8: project_minor(项目小类)— 无自然排序,sort_key_fn=None 按 set 顺序取前 5
+    task_md_cfg = config.get("task_md_fields", {})
+    project_minor_cfg = task_md_cfg.get("project_minor", {})
+    if project_minor_cfg.get("field_name"):
+        result["recent_project_minor"] = get_recent_iteration_options(
+            main_table_id, project_minor_cfg["field_name"], None, 5, config,
             view_id=default_view_id,
         )
 
@@ -1944,8 +1964,8 @@ def build_fields_payload(task: dict, config: dict, vault_root: Path, existing_de
             value = task.get(ob_key)
             if value is None or value == "":
                 continue
-            # select(多)字段需要 list 包裹
-            if ob_key == "subcategory":
+            # select(多)字段需要 list 包裹(v0.3.8: project_minor 走同分支)
+            if ob_key in ("subcategory", "project_minor"):
                 out[field_name] = value if isinstance(value, list) else [value]
             # number 字段
             elif ob_key == "estimate_hours":

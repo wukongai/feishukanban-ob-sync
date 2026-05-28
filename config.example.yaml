@@ -158,7 +158,14 @@ task_md_fields:
   category:
     field_name: 大类               # select(单)
   subcategory:
-    field_name: 小类               # select(多)
+    field_name: 小类               # select(多)— v0.3.8 起淡化使用,新 task 推荐用 project_minor
+  # v0.3.8 加:项目小类(task 表 multi-select enum)
+  # 用于「任务内容细分类型」三级分类(项目 > 子级 > 项目小类),如:
+  #   布丁内容(子级) → 干货 / 训练营 / 课程产品 (项目小类)
+  #   装备配置(子级) → Codex / claudecode / 软硬件 (项目小类)
+  # 跟「小类」(field [3])平级但语义更精细;Cmd+P 快记任务弹最近 5 个 distinct 用过
+  project_minor:
+    field_name: 项目小类           # select(多)— v0.3.8 加
   adhd_priority:
     field_name: ADHD优先级         # select(单)
   estimate_hours:

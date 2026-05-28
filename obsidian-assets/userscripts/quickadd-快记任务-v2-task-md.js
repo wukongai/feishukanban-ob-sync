@@ -3,12 +3,13 @@
  *
  * 触发方式: Cmd+P → 搜「快记任务」 → 回车
  *
- * 行为(v0.3.5 - 2026-05-27 飞书看板筛选友好升级):
- * 0. Step 0:batch 调 sync.py --quickadd-options 拿活跃项目 / 最近 5 月 / 最近 5 周(一次性,~1s)
+ * 行为(v0.3.8 - 2026-05-28 加项目小类 三级分类):
+ * 0. Step 0:batch 调 sync.py --quickadd-options 拿活跃项目 / 最近 5 月 / 最近 5 周 / 最近 5 项目小类(一次性,~1s)
  * 1. 优先级(🔺 P0 / ⏫ P1 / 🔼 P2 / 🔽 P3)
  * 2. ADHD 优先级(🚨 待抢救 / ⏰ 有 DDL / 🌱 自由待办 / ❌ 跳过)
  * 3. 大类(飞书产品项目表「活跃=true 且 父产品=空」)
  * 4. 小类(飞书产品项目表「活跃=true 且 父产品=选中大类」)
+ * 4.5. 项目小类(飞书 task 表「项目小类」字段最近 5 条 distinct,多选循环,v0.3.8 加)
  * 5. 截止日期 DDL(preset:今天/明天/本周末/下周末/本月底/手输/跳过)
  * 6. 执行月(飞书最近 5 个 enum,多选循环 / 默认=created 当月)
  * 7. 执行周(飞书最近 5 个 enum,多选循环 / 默认=created 当周)
@@ -53,32 +54,40 @@ function isoWeek(date) {
   return { year: d.getUTCFullYear(), week: weekNum };
 }
 
-// 多选循环 helper(执行月/周复用)
-// recentList 空 → 直接返回 [defaultValue](不弹窗)
-// 用户选「⏭ 用默认」→ 返回 [defaultValue]
+// 多选循环 helper(执行月/周/项目小类 复用)
+// recentList 空 → 直接返回 [defaultValue](不弹窗;若 defaultValue=null → 返回 [])
+// defaultValue=null → 首项显示「❌ 跳过 / 不填」(可选字段语义,如 project_minor)
+// defaultValue=<具体值> → 首项显示「⏭ 用默认(<值>)」(有默认值语义,如 iteration_*)
+// 用户选第一项 → 返回 [defaultValue] / []
 // 用户选具体值后弹「✓ 完成 / 加更多」→ 返回 [...selected]
 // 用户 Esc → 返回 null(调用方处理)
 async function selectMultiOrDefault(quickAddApi, recentList, defaultValue, label, emoji) {
   if (!recentList || recentList.length === 0) {
-    return [defaultValue];
+    return defaultValue === null ? [] : [defaultValue];
   }
   let selected = [];
   while (true) {
     const remaining = recentList.filter(x => !selected.includes(x));
     if (remaining.length === 0) break;
-    const firstOption = selected.length === 0
-      ? `⏭ 用默认(${defaultValue})`
-      : `✓ 完成,已选 [${selected.join(", ")}]`;
+    let firstOption;
+    if (selected.length === 0) {
+      firstOption = defaultValue === null
+        ? `❌ 跳过 / 不填(${label})`
+        : `⏭ 用默认(${defaultValue})`;
+    } else {
+      firstOption = `✓ 完成,已选 [${selected.join(", ")}]`;
+    }
     const firstValue = selected.length === 0 ? "__DEFAULT__" : "__DONE__";
     const options = [firstOption, ...remaining.map(x => `${emoji} ${x}`)];
     const values = [firstValue, ...remaining];
     const pick = await quickAddApi.suggester(options, values);
     if (pick === undefined) return null;
-    if (pick === "__DEFAULT__") return [defaultValue];
+    if (pick === "__DEFAULT__") return defaultValue === null ? [] : [defaultValue];
     if (pick === "__DONE__") break;
     selected.push(pick);
   }
-  return selected.length > 0 ? selected : [defaultValue];
+  if (selected.length > 0) return selected;
+  return defaultValue === null ? [] : [defaultValue];
 }
 
 module.exports = async function (params) {
@@ -113,6 +122,7 @@ module.exports = async function (params) {
       subprojects_by_parent: {},
       recent_months: [],
       recent_weeks: [],
+      recent_project_minor: [],   // v0.3.8 加
     };
     try {
       const optsCmd = `python3 "${syncScript.replace(/"/g, '\\"')}" --vault "${vaultRoot.replace(/"/g, '\\"')}" --quickadd-options`;
@@ -126,6 +136,7 @@ module.exports = async function (params) {
         sub_parents: Object.keys(qopts.subprojects_by_parent || {}).length,
         months: qopts.recent_months,
         weeks: qopts.recent_weeks,
+        project_minor: qopts.recent_project_minor,
       });
     } catch (e) {
       console.warn("[快记任务 v2] quickadd-options 失败,降级:", e);
@@ -216,6 +227,27 @@ module.exports = async function (params) {
       titlePrefix = `【${chosenParentName}】`;
     }
     console.log("[快记任务 v2] subproject:", chosenSubName, "/ titlePrefix:", titlePrefix);
+
+    // ============ Step 4.5: 项目小类(v0.3.8 加)============
+    // task 表 multi-select 字段「项目小类」— 三级分类的最精细一层
+    // 例:布丁内容(子级) → 干货 / 训练营 / 课程产品 (项目小类)
+    //     装备配置(子级) → Codex / claudecode / 软硬件 (项目小类)
+    // 数据源:飞书 task 表 default_view_id 拉最近 5 条 distinct 用过的值
+    // UX:同执行月/周的多选循环 helper
+    const selectedProjectMinor = await selectMultiOrDefault(
+      quickAddApi,
+      qopts.recent_project_minor,
+      null,  // 默认值 null = "无项目小类"(空,跳过)
+      "项目小类",
+      "🏷"
+    );
+    if (selectedProjectMinor === null) {
+      new Notice("❌ 已取消", 3000);
+      return;
+    }
+    // helper 在 defaultValue=null 时返回 [](跳过)或 [...选中],无需 filter
+    const finalProjectMinor = selectedProjectMinor;
+    console.log("[快记任务 v2] project_minor:", finalProjectMinor);
 
     // ============ Step 5: 截止日期 DDL ============
     // preset:今天/明天/本周末/下周末/本月底/手输 + 跳过
@@ -350,6 +382,10 @@ module.exports = async function (params) {
     const weeksLine = selectedWeeks.length > 0
       ? `iteration_week: [${selectedWeeks.join(", ")}]`
       : `iteration_week:`;
+    // v0.3.8: project_minor(项目小类)— 多选 list
+    const projectMinorLine = finalProjectMinor.length > 0
+      ? `project_minor: [${finalProjectMinor.join(", ")}]`
+      : `project_minor:`;
     // today_history 事件流:today=true 时立即 init 为 [dateContext];今日 journal 才能查到
     const todayHistoryInit = isToday ? `[${dateContext}]` : `[]`;
     // v0.3.6: today_source 区分"计划/非计划"(ADHD 自觉察用)
@@ -369,6 +405,7 @@ ${dueLine}
 done_date:
 category:
 subcategory:
+${projectMinorLine}
 ${adhdLine}
 estimate_hours:
 efficiency:

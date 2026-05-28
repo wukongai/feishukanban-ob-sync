@@ -2,6 +2,102 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.3.8] - 2026-05-28 — Cmd+P 快记任务加 Step 4.5「项目小类」三级分类
+
+> **背景**:用户在飞书项目看板新加了「项目小类」task 表 multi-select 字段(field #29),用于**三级分类**的最精细层 — 任务**内容细分类型**。
+> 例:布丁内容(子级) → 干货 / 训练营 / 课程产品(项目小类);装备配置(子级) → Codex / claudecode / 软硬件(项目小类)。
+> v0.3.5 Cmd+P 已经支持大类(L1)/ 小类(L2),v0.3.8 加 Step 4.5 让用户在创建 task 时一次性把 L3 也填好,飞书看板可按三级精细切片。
+
+### 🎯 流程升级:Cmd+P 在小类(Step 4)和 DDL(Step 5)之间插 Step 4.5
+
+| Step | 内容 | 现状 |
+|---|---|---|
+| 1 | 优先级 | v0.3.5 |
+| 2 | ADHD 优先级 | v0.3.5 |
+| 3 | 大类 parent_project(飞书产品项目表父=空) | v0.3.5 |
+| 4 | 小类 parent_subproject(产品项目表父=L1) | v0.3.5 |
+| **4.5** | **🆕 项目小类**(task 表 multi-select,飞书最近 5 条 distinct,多选循环 / 跳过) | **v0.3.8** |
+| 5 | DDL | v0.3.5 |
+| 6 | 执行月 | v0.3.5 |
+| 7 | 执行周 | v0.3.5 |
+| 8 | 是否今日 | v0.3.5 |
+| 9 | 标题 | v0.3.5 |
+
+### 🛠 改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `sync.py` | `parse_task_md` 加 `project_minor: list[str]` 抽取(用 `_ensure_list`);`build_fields_payload` 让 `project_minor` 走 `subcategory` 同 multi-select 分支;`cmd_quickadd_options` 加 `recent_project_minor` 字段;`get_recent_iteration_options` 让 `sort_key_fn` 可选(`None` 时不排序按 set 顺序取 top N,适合无自然排序的 enum) |
+| `obsidian-assets/userscripts/quickadd-快记任务-v2-task-md.js` | Step 4.5 插入 project_minor 多选循环(复用 `selectMultiOrDefault` helper);helper 加 `defaultValue=null` 分支显示「❌ 跳过 / 不填」而非「⏭ 用默认(null)」;frontmatter 输出加 `project_minor: [...]` 行 |
+| `obsidian-assets/templates/task-template.md` | 加 `project_minor:` 字段定义 + 注释;`subcategory` 注释标注「v0.3.8 起淡化使用」 |
+| `config.example.yaml` | 加 `task_md_fields.project_minor.field_name: 项目小类` |
+
+### 🔌 sync.py `--quickadd-options` JSON 输出新增字段
+
+```json
+{
+  "active_top_level": [...],
+  "subprojects_by_parent": {...},
+  "recent_months": [...],
+  "recent_weeks": [...],
+  "recent_project_minor": ["训练营", "干货", "claudecode", "Codex", "软硬件"]   // 🆕 v0.3.8
+}
+```
+
+数据源:飞书主表 `default_view_id` 拉最近 200 条 record,扫「项目小类」字段 distinct 值,无自然排序按 set 顺序取前 5(用户视角 = "最近用过的几个,不一定最新")。
+
+### ⚠️ 用户侧需要做的事
+
+#### ✅ 必做 1:在你的 `config.yaml` 加 4 行
+
+找到 `task_md_fields:` 段下面的 `subcategory:` 块,后面紧接着加:
+
+```yaml
+  # v0.3.8 加:项目小类(task 表 multi-select enum)
+  project_minor:
+    field_name: 项目小类           # select(多)
+```
+
+#### ✅ 必做 2:重装 userscripts
+
+```bash
+bash /Users/aim5/Documents/CodingProject/feishukanban-ob-sync/install.sh \
+  --apply --force \
+  --scripts-dir "01 Project/00 进行中/06 小工具开发/feishukanban-ob-sync"
+```
+
+(注意你的 `--scripts-dir` 自定义路径必须显式传)
+
+#### ✅ 必做 3:`Cmd+Q` 重启 Obsidian → `Cmd+P` 测试
+
+应该看到 Step 4 小类之后弹「项目小类」(`🏷 训练营 / 🏷 干货 / 🏷 claudecode / 🏷 Codex / 🏷 软硬件`),可多选循环。
+
+### ⚠️ 与 `subcategory`(老「小类」字段)的关系
+
+- **老字段「小类」**(飞书 field [3]):保留,**不在 Cmd+P 弹**,跟 task md `subcategory` 对应
+- **新字段「项目小类」**(飞书 field [29]):Cmd+P Step 4.5 主动选,跟 task md `project_minor` 对应
+
+两个字段语义相近但用法不同:
+- `subcategory`:历史字段,新 task 推荐不填
+- `project_minor`:新主推,**三级分类的最精细层**
+
+未来如果完全废弃 subcategory,改 task-template 把这行删除即可。
+
+### ⚖️ 8 条原则自评
+
+| # | 原则 | 评分 | 备注 |
+|---|---|---|---|
+| 1 | 解耦 | ⭐⭐⭐⭐⭐ | parent_project / parent_subproject / project_minor 三级分明,各自独立字段 |
+| 2 | 可扩展 | ⭐⭐⭐⭐⭐ | 加新维度(如「task 难度」)只需 config + Step + helper 复用,代码零改 |
+| 3 | 灵活修改 | ⭐⭐⭐⭐ | Step 4.5 插入位置在 userscript 一处控制 |
+| 4 | 渐进披露 | ⭐⭐⭐⭐ | 跳过选项让 ADHD-friendly 流程仍能秒速跑 |
+| 5 | 鲁棒性 | ⭐⭐⭐⭐⭐ | config 未配 project_minor.field_name → cmd_quickadd_options 跳过 / recent_project_minor 为空 → userscript 跳过 Step 4.5 |
+| 6 | 人可读 | ⭐⭐⭐⭐ | project_minor 命名清晰,跟飞书侧字段名「项目小类」直接对应 |
+| 7 | 高复用 | ⭐⭐⭐⭐⭐ | `get_recent_iteration_options` 通用化,以后任何 multi-select enum 字段都能复用 |
+| 8 | 工程化清晰 | ⭐⭐⭐⭐ | Python ast + node --check 双语法校验 + smoke test recent_project_minor |
+
+---
+
 ## [v0.3.7] - 2026-05-28 — pull-today 反向字段 diff sync(飞书改 status 后 OB 实时同步)
 
 > **背景**:v0.3.6 之前 `pull-today` 设计上**只同步 `today` 字段**,对**现存** task md(已有 feishu_record 关联的)走 `plan_skip` / `plan_set_true` / `plan_set_false` 分支时,**完全不动 status / priority / 其他字段**。

@@ -3,9 +3,13 @@
 > 📋 **Obsidian ↔ 飞书项目管理多维表 全闭环同步工具**。让你既享受 Obsidian 的 ADHD 友好「子弹笔记式任务流」,又拥有飞书的「项目看板可视化」,**两端永远一致**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.3.7-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.3.8-blue.svg)](CHANGELOG.md)
 
 ---
+
+## 🚀 v0.3.8 上线 — Cmd+P 快记任务加 Step 4.5「项目小类」三级分类(2026-05-28)
+
+飞书项目看板加了「项目小类」task 表 multi-select 字段 — **三级分类的最精细层**(项目 > 子级 > 项目小类)。例:布丁内容(子级)→ 干货/训练营/课程产品(项目小类);装备配置(子级)→ Codex/claudecode/软硬件(项目小类)。 Cmd+P 快记任务在小类(Step 4)和 DDL(Step 5)之间新插 Step 4.5,数据源 = 飞书 task 表最近 5 条 distinct,多选循环。 sync.py `parse_task_md` / `build_fields_payload` / `--quickadd-options` 同步加 `project_minor` 字段处理。详见 [CHANGELOG v0.3.8](CHANGELOG.md#v038---2026-05-28)。
 
 ## 🚀 v0.3.7 上线 — pull-today 反向字段 diff sync(飞书改 status 后 OB 实时同步)(2026-05-28)
 
