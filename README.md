@@ -3,9 +3,13 @@
 > 📋 **Obsidian ↔ 飞书项目管理多维表 全闭环同步工具**。让你既享受 Obsidian 的 ADHD 友好「子弹笔记式任务流」,又拥有飞书的「项目看板可视化」,**两端永远一致**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.3.6-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.3.7-blue.svg)](CHANGELOG.md)
 
 ---
+
+## 🚀 v0.3.7 上线 — pull-today 反向字段 diff sync(飞书改 status 后 OB 实时同步)(2026-05-28)
+
+v0.3.6 之前 `pull-today` 只同步 today 字段,**飞书 app 改 status / priority / 其他字段后 OB 完全不响应** —— 用户在飞书把 task 标 Done,OB 还显示 todo。 v0.3.7 把 `pull-today` 升级为"今日 + 字段 diff sync",**飞书覆盖 OB**(飞书是 ADHD 实时操作端),白名单 8 字段(status / priority / category / subcategory / adhd_priority / estimate_hours / due / done_date),自带"飞书空 → 保留 OB"防误清逻辑。dry-run 必显示 `field: ob → fs` 形式 diff,看清楚再 apply。详见 [CHANGELOG v0.3.7](CHANGELOG.md#v037---2026-05-28--pull-today-反向字段-diff-sync飞书改-status-后-ob-实时同步)。
 
 ## 🚀 v0.3.6 上线 — `today_source` 字段:ADHD 自觉察「计划 vs 非计划」(2026-05-28)
 

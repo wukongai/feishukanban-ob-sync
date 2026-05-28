@@ -482,6 +482,10 @@ def _format_yaml_value(value) -> str:
     # 纯字母数字 + 常见安全字符
     if re.match(r"^[a-zA-Z0-9_\-./]+$", value):
         return value
+    # v0.3.7: Obsidian wikilink 形态(`[[xxx]]`)用双引号包裹,跟 OB 端约定一致
+    # (parent_project / 日志 等字段都走这条路径)
+    if value.startswith("[[") and value.endswith("]]"):
+        return f'"{value}"'
     # 其他:加单引号(转义内部单引号)
     escaped = value.replace("'", "''")
     return f"'{escaped}'"
@@ -2806,26 +2810,27 @@ def _scan_ob_task_md_by_feishu_record(task_dir: Path) -> dict:
     return index
 
 
-def _create_task_md_from_feishu_record(rid, row, fields_meta, config, vault_root):
-    """从飞书 record 反向建 OB task md(2026-05-26 v0.2.5 加)
+def _extract_fields_from_feishu_row(row, fields_meta, config) -> dict:
+    """v0.3.7: 从飞书 row 抽出 OB frontmatter 同步字段 dict
 
-    字段映射(飞书 → OB task md frontmatter):
-    - 任务标题(text) → 标题 + 文件名
-    - 价值优先级 → priority(P0-P3 默认 P3)
-    - 执行状态 → status(Todo→todo / Doing→doing / SubDone→subdone / Done→done / Block→block / Idea→idea / cancel→cancel)
-    - 大类 → category;小类(list) → subcategory
-    - ADHD优先级 → adhd_priority
-    - 创建时间(ms) → created(ISO 北京)
-    - 完成时间(ms) → done_date(YYYY-MM-DD 北京)
-    - 截止日期(ms) → due(YYYY-MM-DD)
-    - 项目 → parent_project(若无飞书"项目"字段值且标题以【布丁】起始 → 默认"00 布丁")
-    - record_id → feishu_record;拼装 → feishu_url
-    - today: true(因为是被 filter 出 today=true 的 candidates)
+    与 _create_task_md_from_feishu_record(plan_missing 反向建)+ pull-today 反向 diff sync 共享。
+    不含 today / today_history / today_source(today 逻辑独立)
+    不含 feishu_record / feishu_url / created / 日志(不应反向覆盖)
+    不含正文段(acceptance / thinking / resources / retrospective / execution_summary)
 
-    Returns: 创建的 Path(成功) or None(已存在 / 跳过)
+    Returns dict:
+        title: str
+        priority: str (P0-P3,默认 P3)
+        status: str (OB 7 态:todo/doing/subdone/done/block/cancel/idea)
+        category: str (空字符串 if 飞书侧无)
+        subcategory: list[str]
+        adhd_priority: str
+        estimate_hours: str | "" (number 直接 stringify)
+        due: str (YYYY-MM-DD or "")
+        done_date: str (YYYY-MM-DD or "")
+        parent_project: str (裸名字,如 "00 布丁";无 wikilink 包裹)
+        created_iso: str | None (反向建模板用,diff sync 不用)
     """
-    from datetime import datetime, timezone, timedelta
-
     def _idx(field):
         return fields_meta.index(field) if field in fields_meta else -1
 
@@ -2854,11 +2859,10 @@ def _create_task_md_from_feishu_record(rid, row, fields_meta, config, vault_root
         except Exception:
             return None
 
-    # 字段抽取
     title = _get("任务标题") or "(无标题)"
     priority = _list_first(_get("价值优先级")) or "P3"
     status_fs = _list_first(_get("执行状态")) or "Todo"
-    # v0.3.5(2026-05-27):7 态对齐飞书看板,SubDone/Idea 不再降级,补 cancel 映射
+    # v0.3.5: 7 态对齐飞书看板,SubDone/Idea 不再降级,补 cancel 映射
     status_map = {
         "Todo": "todo", "Doing": "doing", "Done": "done",
         "Block": "block", "SubDone": "subdone", "Idea": "idea",
@@ -2867,8 +2871,11 @@ def _create_task_md_from_feishu_record(rid, row, fields_meta, config, vault_root
     status = status_map.get(status_fs, "todo")
     category = _list_first(_get("大类")) or ""
     subcategory = _get("小类") or []
+    if not isinstance(subcategory, list):
+        subcategory = [subcategory] if subcategory else []
     adhd_priority = _list_first(_get("ADHD优先级")) or ""
-    estimate_hours = _get("估时") or ""
+    estimate_hours_raw = _get("估时")
+    estimate_hours = str(estimate_hours_raw) if estimate_hours_raw not in (None, "") else ""
     created_iso = _ms_to_iso(_get("创建时间"))
     due = _ms_to_date(_get("截止日期"))
     done_date = _ms_to_date(_get("完成时间"))
@@ -2878,6 +2885,136 @@ def _create_task_md_from_feishu_record(rid, row, fields_meta, config, vault_root
     parent_project = project_val or ""
     if not parent_project and title.startswith("【布丁"):
         parent_project = "00 布丁"
+
+    return {
+        "title": title,
+        "priority": priority,
+        "status": status,
+        "category": category,
+        "subcategory": subcategory,
+        "adhd_priority": adhd_priority,
+        "estimate_hours": estimate_hours,
+        "due": due,
+        "done_date": done_date,
+        "parent_project": parent_project,
+        "created_iso": created_iso,
+    }
+
+
+# v0.3.7 反向 diff sync 的字段白名单(从飞书覆盖 OB frontmatter 时只动这些)
+# 不含 title(标题改了会改文件名,风险大)/ created / feishu_record / feishu_url / today*
+# 不含 iteration_week / iteration_month(多选 list + 飞书侧字段复杂,v0.3.8 候选)
+# 不含 parent_project — v0.2.5 helper 读写死的"项目"字段名,实际是"产品项目" link 字段
+# 需要解析 link record → 名字,留 v0.3.8 修
+_REVERSE_SYNC_FIELD_WHITELIST = [
+    "priority", "status", "category", "subcategory",
+    "adhd_priority", "estimate_hours", "due", "done_date",
+]
+
+
+def _strip_wikilink(v) -> str:
+    """剥 OB wikilink 形态 → 裸名字。
+    "[[00 布丁]]" → "00 布丁"
+    "[[00 布丁|别名]]" → "00 布丁"
+    "00 布丁" → "00 布丁"
+    None / "" → ""
+    """
+    if v is None:
+        return ""
+    s = str(v).strip()
+    m = re.match(r'^\[\[([^\]|]+)(?:\|[^\]]*)?\]\]$', s)
+    return m.group(1).strip() if m else s
+
+
+def _diff_frontmatter_with_feishu(p, fs_fields: dict) -> tuple[dict, list]:
+    """v0.3.7: 读 OB task md frontmatter,与飞书侧字段对比,返回需要 update 的 dict + diff 摘要
+
+    冲突策略:飞书覆盖 OB(飞书是 ADHD 实时操作端,OB 是文档端)
+
+    Args:
+        p: OB task md Path
+        fs_fields: _extract_fields_from_feishu_row 返回的 dict
+
+    Returns:
+        (updates_dict, diff_summary)
+        updates_dict: 仅含 OB ≠ 飞书的字段,可直接传 update_md_frontmatter
+        diff_summary: list[(field_name, ob_val, fs_val)] 用于 dry-run print
+    """
+    try:
+        fm, _, _ = parse_frontmatter(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}, []
+    if fm is None:
+        return {}, []
+
+    updates = {}
+    diff_summary = []
+
+    def _norm_str(v) -> str:
+        """规整化为 string,None / 空 list / 空 dict → 空字符串"""
+        if v is None:
+            return ""
+        if isinstance(v, list):
+            return ""  # list 走专门分支
+        return str(v).strip()
+
+    # v0.3.7 防御性策略:**飞书侧空 → 保留 OB**(避免误清 OB 端有效数据,如手填的 due)
+    # 仅 status / priority 例外:它们必有值,空值是异常,飞书侧空也覆盖 OB(理论上不会触发)
+    PRESERVE_OB_IF_FS_EMPTY = {
+        "category", "subcategory", "adhd_priority",
+        "estimate_hours", "due", "done_date",
+    }
+
+    for field in _REVERSE_SYNC_FIELD_WHITELIST:
+        fs_val = fs_fields.get(field, "")
+        ob_raw = fm.get(field)
+
+        # 飞书侧空 → 大部分字段保留 OB(防御误清)
+        fs_is_empty = (fs_val == "" or fs_val == [] or fs_val is None)
+        if fs_is_empty and field in PRESERVE_OB_IF_FS_EMPTY:
+            continue
+
+        if field == "subcategory":
+            # list deep equal(顺序敏感)
+            ob_list = ob_raw if isinstance(ob_raw, list) else (
+                [] if not ob_raw else [str(ob_raw)]
+            )
+            fs_list = fs_val if isinstance(fs_val, list) else []
+            if ob_list != fs_list:
+                updates[field] = fs_list
+                diff_summary.append((field, ob_list, fs_list))
+        else:
+            # 普通字段:string 规整化后比较
+            ob_str = _norm_str(ob_raw)
+            fs_str = _norm_str(fs_val)
+            if ob_str != fs_str:
+                updates[field] = fs_str
+                diff_summary.append((field, ob_str or "(空)", fs_str or "(空)"))
+
+    return updates, diff_summary
+
+
+def _create_task_md_from_feishu_record(rid, row, fields_meta, config, vault_root):
+    """从飞书 record 反向建 OB task md(v0.2.5 加,v0.3.7 重构调 helper)
+
+    字段映射 → 见 _extract_fields_from_feishu_row docstring
+
+    Returns: 创建的 Path(成功) or None(已存在 / 跳过)
+    """
+    from datetime import datetime, timezone, timedelta
+
+    fs = _extract_fields_from_feishu_row(row, fields_meta, config)
+    title = fs["title"]
+    priority = fs["priority"]
+    status = fs["status"]
+    category = fs["category"]
+    subcategory = fs["subcategory"]
+    adhd_priority = fs["adhd_priority"]
+    estimate_hours = fs["estimate_hours"]
+    due = fs["due"]
+    done_date = fs["done_date"]
+    parent_project = fs["parent_project"]
+    created_iso = fs["created_iso"]
 
     # 文件名安全
     safe_title = re.sub(r'[/\\*?"<>|]', "_", title)
@@ -2951,29 +3088,27 @@ tags:
 
 
 def pull_today_from_feishu(apply: bool = False) -> None:
-    """拉飞书「是否今日」=true 的 record,同步更新 OB task md frontmatter today 字段。
+    """拉飞书「是否今日」=true 的 record,同步 OB task md today 字段 + v0.3.7 反向字段 diff sync。
 
     范围(双向对齐):
     - 飞书 today=true,OB task md today=false → 改 OB today=true(plan_set_true)
     - 飞书 today=false,OB task md today=true → 改 OB today=false(plan_set_false)
-    - 飞书 today=true,OB 无对应 task md → 报告(不自动建,提示用户手动建)
-    - 飞书 today=true,OB 已 today=true → 跳过(无操作)
+    - 飞书 today=true,OB 无对应 task md → 自动建(plan_missing,v0.2.5+)
+    - 飞书 today=true,OB 已 today=true → 字段 diff sync(plan_skip,v0.3.7+ 不再"真跳")
 
-    设计决策:
-    - 不自动建 task md(避免反向映射 priority/category 等多字段易出错)
-    - 用户工作流:飞书 app 勾「是否今日」=true → 跑此命令 → OB today 同步
-    - "飞书有 OB 无"场景:用户可在 OB 端 Cmd+P「📝 快记任务」手动建,或不管
-
-    跨日清理策略(rules/feishu-project-sync.md「今日 todo」section):
-    - 每日早上**手动**在飞书 app 清掉昨天的「是否今日」标记 + 重新挑(ADHD friendly)
-    - 跑此命令时,OB today=true 但飞书 false 的会自动 set false
+    v0.3.7 反向字段 diff sync:
+    - 三分支(plan_set_true / plan_skip / plan_set_false)都对 OB frontmatter 做飞书字段 diff
+    - 同步字段白名单:_REVERSE_SYNC_FIELD_WHITELIST(priority / status / category / subcategory /
+      adhd_priority / estimate_hours / due / done_date / parent_project)
+    - 冲突策略:飞书覆盖 OB(飞书是 ADHD 实时操作端,OB 是文档端)
+    - dry-run 必显示每个字段 before → after,user 看清楚再 apply
     """
     config = load_config()
     vault_root = find_vault_root()
     task_dir = vault_root / "04 Inbox" / "task"
 
     print(f"\n{'='*60}")
-    print(f"📥 pull-today: 飞书「是否今日」=true → OB task md today=true")
+    print(f"📥 pull-today: 飞书 today=true → OB today=true + 字段 diff sync(v0.3.7)")
     print(f"{'='*60}\n")
 
     if not task_dir.exists():
@@ -2984,6 +3119,8 @@ def pull_today_from_feishu(apply: bool = False) -> None:
     print("⏳ 拉飞书全表 record...")
     all_records, all_ids, fields_meta = _fetch_all_records_from_feishu(config)
     print(f"✅ 飞书共 {len(all_records)} 条 record\n")
+    # v0.3.7: record_id → row 映射,用于 plan_set_false 也能拿到 row 做字段 diff
+    rid_to_row = dict(zip(all_ids, all_records))
 
     # Step 2: 筛「是否今日」=true 的 candidates
     today_candidates = filter_today_tasks(all_records, all_ids, fields_meta, config)
@@ -3026,12 +3163,43 @@ def pull_today_from_feishu(apply: bool = False) -> None:
         if entry["today"] or history_has_today:
             plan_set_false.append((rid, entry["path"]))
 
+    # v0.3.7 Step 4.5: 反向字段 diff sync 预计算
+    # 对 plan_set_true / plan_skip / plan_set_false 三类全部计算飞书 → OB 字段 diff
+    # field_diffs[rid] = {"path": Path, "updates": {field: new_val}, "summary": [(field, ob, fs)]}
+    field_diffs: dict = {}
+    field_diff_count = 0  # 有字段差异的 task md 数
+
+    def _compute_field_diff(rid_, p_):
+        row_ = rid_to_row.get(rid_)
+        if row_ is None:
+            return None
+        fs_fields = _extract_fields_from_feishu_row(row_, fields_meta, config)
+        updates_, summary_ = _diff_frontmatter_with_feishu(p_, fs_fields)
+        return {"path": p_, "updates": updates_, "summary": summary_} if updates_ else None
+
+    for rid, _t, p in plan_set_true:
+        d = _compute_field_diff(rid, p)
+        if d:
+            field_diffs[rid] = d
+            field_diff_count += 1
+    for rid, _t, p in plan_skip:
+        d = _compute_field_diff(rid, p)
+        if d:
+            field_diffs[rid] = d
+            field_diff_count += 1
+    for rid, p in plan_set_false:
+        d = _compute_field_diff(rid, p)
+        if d:
+            field_diffs[rid] = d
+            field_diff_count += 1
+
     # Step 5: 打印计划摘要
     print(f"📋 计划摘要:")
     print(f"  ➡️  设 today=true:    {len(plan_set_true)} 条")
     print(f"  ⬅️  设 today=false:   {len(plan_set_false)} 条")
-    print(f"  ⏭️  已是 today,跳过: {len(plan_skip)} 条")
+    print(f"  ⏭️  已是 today:       {len(plan_skip)} 条")
     print(f"  ⚠️  飞书有 OB 无:    {len(plan_missing)} 条")
+    print(f"  🔄 字段同步(v0.3.7): {field_diff_count} 条 task md 有飞书侧字段改动")
 
     if plan_set_true:
         print(f"\n--- 设 today=true({len(plan_set_true)} 条)---")
@@ -3044,9 +3212,10 @@ def pull_today_from_feishu(apply: bool = False) -> None:
             print(f"  ⬜ {p.name[:55]}")
 
     if plan_skip:
-        print(f"\n--- 已是 today,跳过({len(plan_skip)} 条)---")
+        print(f"\n--- 已是 today,只字段同步({len(plan_skip)} 条)---")
         for rid, title, p in plan_skip[:5]:
-            print(f"  ⏭  {p.name[:55]}")
+            mark = "🔄" if rid in field_diffs else "⏭ "
+            print(f"  {mark} {p.name[:55]}")
         if len(plan_skip) > 5:
             print(f"  ... 还有 {len(plan_skip) - 5} 条")
 
@@ -3057,12 +3226,24 @@ def pull_today_from_feishu(apply: bool = False) -> None:
         if len(plan_missing) > 10:
             print(f"  ... 还有 {len(plan_missing) - 10} 条")
 
-    if not (plan_set_true or plan_set_false or plan_missing):
-        print(f"\n✅ OB ↔ 飞书 today 状态已对齐,无需更新")
+    # v0.3.7: 字段 diff 详情(dry-run 必显示,apply 也显示让用户复核)
+    if field_diffs:
+        print(f"\n--- 🔄 字段同步详情(飞书 → OB,共 {field_diff_count} 条 task md)---")
+        for rid, d in field_diffs.items():
+            print(f"  📝 {d['path'].name[:55]}")
+            for field, ob_val, fs_val in d["summary"]:
+                # 截断长 list / string 显示
+                def _short(v):
+                    s = str(v)
+                    return s if len(s) <= 35 else s[:32] + "..."
+                print(f"     • {field}: {_short(ob_val)} → {_short(fs_val)}")
+
+    if not (plan_set_true or plan_set_false or plan_missing or field_diffs):
+        print(f"\n✅ OB ↔ 飞书 today 状态 + 字段已对齐,无需更新")
         return
 
     if not apply:
-        print(f"\n📌 dry-run 完成。--apply 真写 frontmatter + 自动建 task md")
+        print(f"\n📌 dry-run 完成。--apply 真写 frontmatter + 自动建 task md + 字段同步")
         return
 
     # Step 6: apply
@@ -3070,8 +3251,18 @@ def pull_today_from_feishu(apply: bool = False) -> None:
     success_count = 0
     fail_count = 0
     created_count = 0
+    field_sync_count = 0  # v0.3.7: 真改了字段的 task md 数
     # v0.3.0:append today_history 事件流(历史保真,见 rules/feishu-project-sync.md「今日 todo 历史保真」)
     today_date_iso = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+
+    def _merge_with_field_diff(rid_, base_updates: dict) -> dict:
+        """v0.3.7: base updates(today/history/source)+ 飞书字段 diff updates 合并"""
+        merged = dict(base_updates)
+        if rid_ in field_diffs:
+            for k, v in field_diffs[rid_]["updates"].items():
+                merged[k] = v
+        return merged
+
     for rid, title, p in plan_set_true:
         # 读现有 today_history,append 当日(去重)
         try:
@@ -3085,16 +3276,35 @@ def pull_today_from_feishu(apply: bool = False) -> None:
             history.append(today_date_iso)
         # v0.3.6: today_source 区分计划/非计划(ADHD 自觉察)
         # pull-today 触发 set today=true = 早晨规划好的拉来 → planned
-        # 一次性 update 3 个字段(today + today_history + today_source)
-        if update_md_frontmatter(p, {
+        base = {
             "today": True,
             "today_history": history,
             "today_source": "planned",
-        }):
-            print(f"  ✅ {p.name}: today → true (+ today_history += {today_date_iso}, today_source = planned)")
+        }
+        # v0.3.7: 合并飞书字段 diff
+        final = _merge_with_field_diff(rid, base)
+        field_changed = rid in field_diffs
+        if update_md_frontmatter(p, final):
+            extra = f" + {len(field_diffs[rid]['summary'])} 字段 sync" if field_changed else ""
+            print(f"  ✅ {p.name}: today → true (+ today_history += {today_date_iso}){extra}")
             success_count += 1
+            if field_changed:
+                field_sync_count += 1
         else:
             print(f"  ❌ {p.name}: 更新失败")
+            fail_count += 1
+
+    # v0.3.7: plan_skip 不再"真跳",对有字段 diff 的 task md 做字段 sync
+    for rid, title, p in plan_skip:
+        if rid not in field_diffs:
+            continue  # 真跳:today + 字段都对齐
+        updates = field_diffs[rid]["updates"]
+        if update_md_frontmatter(p, updates):
+            print(f"  🔄 {p.name}: {len(field_diffs[rid]['summary'])} 字段 sync(today 已对齐)")
+            success_count += 1
+            field_sync_count += 1
+        else:
+            print(f"  ❌ {p.name}: 字段 sync 失败")
             fail_count += 1
 
     for rid, p in plan_set_false:
@@ -3111,15 +3321,21 @@ def pull_today_from_feishu(apply: bool = False) -> None:
             history = []
         new_history = [d for d in history if str(d) != today_date_iso]
         history_changed = len(new_history) != len(history)
-        updates = {"today": False}
+        base = {"today": False}
         if history_changed:
-            updates["today_history"] = new_history
+            base["today_history"] = new_history
         # v0.3.6: 对称清 today_source(不在今日 = 无来源标记)
-        updates["today_source"] = ""
-        if update_md_frontmatter(p, updates):
+        base["today_source"] = ""
+        # v0.3.7: 合并飞书字段 diff
+        final = _merge_with_field_diff(rid, base)
+        field_changed = rid in field_diffs
+        if update_md_frontmatter(p, final):
             suffix = f" (+ today_history -= {today_date_iso})" if history_changed else ""
-            print(f"  ✅ {p.name}: today → false{suffix}")
+            extra = f" + {len(field_diffs[rid]['summary'])} 字段 sync" if field_changed else ""
+            print(f"  ✅ {p.name}: today → false{suffix}{extra}")
             success_count += 1
+            if field_changed:
+                field_sync_count += 1
         else:
             print(f"  ❌ {p.name}: 更新失败")
             fail_count += 1
@@ -3135,7 +3351,7 @@ def pull_today_from_feishu(apply: bool = False) -> None:
             else:
                 print(f"  ⚠️ 跳过: {title[:55]}(可能已存在)")
 
-    print(f"\n✅ pull-today 完成({success_count} 设 today / {created_count} 建新 task md / {fail_count} 失败)")
+    print(f"\n✅ pull-today 完成({success_count} 设 today / {created_count} 建新 task md / {field_sync_count} 字段 sync / {fail_count} 失败)")
 
 
 # ============================================================

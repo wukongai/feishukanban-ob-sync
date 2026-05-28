@@ -2,6 +2,81 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.3.7] - 2026-05-28 — pull-today 反向字段 diff sync(飞书改 status 后 OB 实时同步)
+
+> **背景**:v0.3.6 之前 `pull-today` 设计上**只同步 `today` 字段**,对**现存** task md(已有 feishu_record 关联的)走 `plan_skip` / `plan_set_true` / `plan_set_false` 分支时,**完全不动 status / priority / 其他字段**。
+>
+> 用户实测痛点(2026-05-28):"5 月 28 日 AI 日报已经是 done,但依然显示的是 todo,改成 subdone 也不行,问题在于看板是实时修改状态,需要在修改后拉回新的状态"。 ADHD 友好的"飞书是真相源"体验完全破坏 — 每次飞书 app 改 status / priority 都要回 OB 手改 frontmatter。
+>
+> v0.3.7 把 `pull-today` 从"今日 sync"升级为"今日 + 字段 diff sync",**飞书覆盖 OB**(飞书是 ADHD 实时操作端,OB 是文档端)。dry-run 必显示每个字段 before → after,user 可看清楚再 apply。
+
+### 🆕 反向 diff sync 字段白名单
+
+8 个字段:`priority` / `status` / `category` / `subcategory` / `adhd_priority` / `estimate_hours` / `due` / `done_date`
+
+不含:
+- `title`(改文件名风险大)
+- `created` / `feishu_record` / `feishu_url`(不应反向覆盖)
+- `today` / `today_history` / `today_source`(已有专门逻辑)
+- `iteration_week` / `iteration_month`(多选 list + 飞书字段复杂,v0.3.8 候选)
+- `parent_project`(v0.2.5 helper 读写死的"项目"字段名,实际是"产品项目" link 字段,需解析 link record → 名字,v0.3.8 修)
+
+### 🛡️ 防误清防御:**飞书空 → 保留 OB**
+
+`category` / `subcategory` / `adhd_priority` / `estimate_hours` / `due` / `done_date` 6 个字段:**飞书侧空 + OB 有值 → 不动 OB**(避免误清用户手填数据)。
+
+`status` / `priority` 例外:它们必有值(飞书侧默认 Todo/P3),空是异常,不需要 preserve 逻辑。
+
+### 🔧 实现
+
+3 个新 helper:
+- `_extract_fields_from_feishu_row(row, fields_meta, config) → dict`:从飞书 row 抽 OB frontmatter 同步字段(v0.2.5 `_create_task_md_from_feishu_record` 的字段抽取逻辑拆出,DRY)
+- `_strip_wikilink(v) → str`:OB wikilink 形态 → 裸名字
+- `_diff_frontmatter_with_feishu(p, fs_fields) → (updates, summary)`:读 OB frontmatter + 飞书字段 diff + 防误清
+
+`pull_today_from_feishu` 新增 Step 4.5 预计算 diff,三分支(plan_set_true / plan_skip / plan_set_false)apply 时合并 `today_*` updates + 字段 diff updates,一次 `update_md_frontmatter` 调用。
+
+`_format_yaml_value` 加 **wikilink 双引号特例**:`[[xxx]]` 形态写回时用双引号包裹(`"[[xxx]]"`),与 OB 端约定一致。
+
+### 📝 改动文件
+
+- `sync.py`:
+  - `_format_yaml_value`(line ~485):加 wikilink 双引号特例
+  - 新加 `_extract_fields_from_feishu_row`(line ~2814)
+  - 新加 `_REVERSE_SYNC_FIELD_WHITELIST` 常量
+  - 新加 `_strip_wikilink` helper
+  - 新加 `_diff_frontmatter_with_feishu` helper(line ~2940)
+  - 重构 `_create_task_md_from_feishu_record` 调 helper(DRY,保持 v0.3.6 行为)
+  - 重构 `pull_today_from_feishu`:Step 4.5 预计算 diff,三分支合并 sync
+- `CHANGELOG.md` / `README.md` / `docs/ARCHITECTURE.md` / `install.sh`:文档 + 版本号同步
+
+### ✅ 用户实测(2026-05-28)
+
+用户报告"5月28日AI日报 / 上传pdfAI教育报告 / 案例文章付费看 / JWT的token过期方案 / 日常习惯打卡"5 条 task md 都成功反向同步:
+- `status: todo → done / doing / subdone` 4 case 全覆盖
+- `priority: P1 → P2` 2 case
+- 0 false positive(due / parent_project 都没误改)
+
+### ⚖️ 8 条原则自评
+
+| # | 原则 | 评分 | 备注 |
+|---|---|---|---|
+| 1 | 解耦 | ⭐⭐⭐⭐⭐ | 3 个 helper 独立,可单独测;diff 计算与 apply 分离 |
+| 2 | 可扩展 | ⭐⭐⭐⭐⭐ | 加新同步字段 → 加白名单一行;特殊字段(iteration_*)在 helper 加 elif 分支 |
+| 3 | 灵活修改 | ⭐⭐⭐⭐ | PRESERVE_OB_IF_FS_EMPTY 集合可调,白名单可加减 |
+| 4 | 渐进披露 | ⭐⭐⭐⭐ | dry-run 必显示 before → after,user 看清楚再 apply |
+| 5 | 鲁棒性 | ⭐⭐⭐⭐⭐ | 飞书空保留 OB(防误清),parent_project 暂禁(避免 v0.2.5 bug 放大) |
+| 6 | 人可读 | ⭐⭐⭐⭐⭐ | helper docstring 详细,diff 输出格式直观 |
+| 7 | 高复用 | ⭐⭐⭐⭐ | `_extract_fields_from_feishu_row` 同时服务反向建 + diff sync |
+| 8 | 工程化 | ⭐⭐⭐⭐⭐ | dry-run 验证 → false positive 修 → apply → commit + push 完整链 |
+
+### 🔮 v0.3.8 候选
+
+- parent_project 反向 sync:正确读"产品项目" link 字段,解析 link record → 名字
+- iteration_week / iteration_month 反向 sync:多选 list,需要 enum 反查
+
+---
+
 ## [v0.3.6] - 2026-05-28 — `today_source` 字段:ADHD 自觉察「计划 vs 非计划」
 
 > **背景**:ADHD 友好的「今日聚焦」需要区分两种 today task — **计划好的**(早晨 pull-today 拉来的)vs **临时插入的**(当天 Cmd+P 快记任务建的)。 v0.3.5 之前两者都是 `today: true`,看不出哪些是规划好的、哪些是中途冒出来分心的,自觉察缺一个抓手。
