@@ -17,7 +17,10 @@ due:                               # YYYY-MM-DD,截止日期(对应 Tasks 📅)
 
 # === 飞书分类(可选,有就同步)===
 category:                          # 产品项目 / 杂务 / 技能工具 / 领域学习
-subcategory:                       # YAML list,飞书「小类」字段(v0.3.8 起淡化,改用 project_minor)
+                                   # v0.4.1 起 Cmd+P「📝 快记任务」Step 3 必选(ADHD 看板分流)
+subcategory:                       # YAML list,飞书「小类」字段
+                                   # v0.4.1 起:非产品项目分支(杂务/技能工具/领域学习)的二级分类,手输
+                                   # 产品项目分支用 project_minor 替代(三级精细分类)
 # v0.3.8 加:项目小类 — task 表 multi-select,任务内容细分类型(三级分类的最细一层)
 # 例:布丁内容(子级) → 干货 / 训练营 / 课程产品 (project_minor)
 #     装备配置(子级) → Codex / claudecode / 软硬件 (project_minor)

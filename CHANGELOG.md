@@ -2,6 +2,66 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.4.1] - 2026-05-28 — Cmd+P「快记任务」加业务大类 + 执行状态选择
+
+> **背景**:用户作为 ADHD 用户反馈 — Cmd+P 流程现状只能记产品项目相关 task,生活财务杂务 / 技能学习 / 领域学习 这类「非产品项目」事项一旦不进飞书看板就会被忘记。同时执行状态(`status`)是创建 task 时最重要的元数据之一,旧版写死 `todo` 没给选择步骤。
+>
+> 用户原话:"添加任务的流程中现在缺乏执行状态,而执行状态是创建时最重要的"+"生活财务的杂务,这个也需要进入看板,否则作为 ADHD 总是忘记"。
+
+### 🎯 主要改动
+
+| 改动 | 位置 | 说明 |
+|---|---|---|
+| **新增 Step 3「业务大类」** | userscript Step 3 | 4 选 1:📦 产品项目 / 🪣 杂务 / 🔧 技能工具 / 📚 领域学习。写入 `category` frontmatter,sync 推飞书「大类」select 字段(已有映射,sync.py 无需改) |
+| **分支:产品项目走 3a/3b/3c** | Step 3a→3c | 原 Step 3(产品项目一级)/ Step 4(子级)/ Step 4.5(项目小类)→ 重命名为 3a/3b/3c,仅产品项目分支执行 |
+| **分支:非产品项目走 3d** | Step 3d | 杂务/技能工具/领域学习 → 手输 subcategory(逗号分隔,可选);写入 `subcategory: [财务, 家务]` list,sync 推飞书「小类」multi-select 字段。titlePrefix = 【大类/小类】或【大类】 |
+| **新增 Step 8「执行状态」** | userscript Step 8(标题前) | 7 态全量:Todo / Doing / SubDone / Done / Block / cancel / Idea(默认 Todo)。替换原写死 `status: todo`。映射对齐 `config.task_md_map` 7 态 |
+| **task md 模板注释更新** | `obsidian-assets/templates/task-template.md` | `subcategory` 注释从「v0.3.8 淡化」改回「v0.4.1 非产品项目分支用」;`category` 注释加「Cmd+P Step 3 必选」 |
+
+### 🔬 流程对比
+
+**旧(v0.4.0)9 步**:
+```
+1 优先级 → 2 ADHD → 3 产品项目一级 → 4 子级 → 4.5 项目小类 →
+5 DDL → 6 月 → 7 周 → 8 今日 → 9 标题(status 写死 todo)
+```
+
+**新(v0.4.1)**:
+```
+1 优先级 → 2 ADHD →
+🆕3 业务大类(category)
+   ├ 产品项目 → 3a 一级 → 3b 子级 → 3c 项目小类
+   └ 其他三类 → 3d subcategory 手输
+→ 4 DDL → 5 月 → 6 周 → 7 今日 → 🆕8 执行状态 → 9 标题
+```
+
+### 🛠 改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `obsidian-assets/userscripts/quickadd-快记任务-v2-task-md.js` | 顶部注释(`v0.3.8` → `v0.4.1`)+ Step 3 业务大类 suggester + 产品项目分支 if/else 包裹 + Step 3d 手输 + Step 8 状态 suggester + 生成 content 时改 `status: ${statusChoice}` / 加 `categoryLine` / `subcategoryLine` |
+| `obsidian-assets/templates/task-template.md` | category / subcategory 注释更新 |
+
+### ⚠️ 用户侧需要做的事
+
+#### ✅ 必做:飞书表「大类」字段确认 4 个 enum
+
+如果飞书 task 表「大类」字段已建,确认 4 个 enum 选项都有:
+- 产品项目 / 杂务 / 技能工具 / 领域学习
+
+如缺少,用 `feishu-cli bitable field` 或飞书后台 UI 补全 — sync 时飞书侧若没对应 enum 会 silently skip 该字段,task 不会被归类。
+
+#### ✅ 推荐:飞书后台建「按大类分组」看板视图
+
+视图分组 by 「大类」字段,4 个泳道(产品项目 / 杂务 / 技能工具 / 领域学习)— 这样 ADHD 看板上 4 个泳道并存,杂务也能被看见(用户原始动机)。
+
+### 🚫 不影响
+
+- **sync.py 无任何改动** — category / subcategory 的 forward push 在 v0.3.x 就已支持(`parse_task_md` line 1112-1113 + `build_fields_payload` line 2038-2040 通用 select 分发 case),只是 userscript 一直没填值
+- **老 task 不受影响** — 已存在的 task md `category:` / `status: todo` 维持原值
+
+---
+
 ## [v0.3.8] - 2026-05-28 — Cmd+P 快记任务加 Step 4.5「项目小类」三级分类
 
 > **背景**:用户在飞书项目看板新加了「项目小类」task 表 multi-select 字段(field #29),用于**三级分类**的最精细层 — 任务**内容细分类型**。

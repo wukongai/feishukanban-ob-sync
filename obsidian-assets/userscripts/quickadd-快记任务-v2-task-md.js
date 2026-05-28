@@ -3,17 +3,21 @@
  *
  * 触发方式: Cmd+P → 搜「快记任务」 → 回车
  *
- * 行为(v0.3.8 - 2026-05-28 加项目小类 三级分类):
+ * 行为(v0.4.1 - 2026-05-28 加「业务大类」+「执行状态」两步):
  * 0. Step 0:batch 调 sync.py --quickadd-options 拿活跃项目 / 最近 5 月 / 最近 5 周 / 最近 5 项目小类(一次性,~1s)
  * 1. 优先级(🔺 P0 / ⏫ P1 / 🔼 P2 / 🔽 P3)
  * 2. ADHD 优先级(🚨 待抢救 / ⏰ 有 DDL / 🌱 自由待办 / ❌ 跳过)
- * 3. 大类(飞书产品项目表「活跃=true 且 父产品=空」)
- * 4. 小类(飞书产品项目表「活跃=true 且 父产品=选中大类」)
- * 4.5. 项目小类(飞书 task 表「项目小类」字段最近 5 条 distinct,多选循环,v0.3.8 加)
- * 5. 截止日期 DDL(preset:今天/明天/本周末/下周末/本月底/手输/跳过)
- * 6. 执行月(飞书最近 5 个 enum,多选循环 / 默认=created 当月)
- * 7. 执行周(飞书最近 5 个 enum,多选循环 / 默认=created 当周)
- * 8. 是否今日(📥 需求池 / ⭐ 今日)
+ * 3. 业务大类(📦 产品项目 / 🪣 杂务 / 🔧 技能工具 / 📚 领域学习)— v0.4.1 加
+ *    └ 选「产品项目」走 3a/3b/3c;选其他三类走 3d(subcategory 手输)
+ * 3a. 产品项目一级(飞书产品项目表「活跃=true 且 父产品=空」)— 仅产品项目分支
+ * 3b. 产品项目子级(飞书产品项目表「活跃=true 且 父产品=选中一级」)— 仅产品项目分支
+ * 3c. 项目小类(飞书 task 表「项目小类」字段最近 5 条 distinct,v0.3.8 加)— 仅产品项目分支
+ * 3d. 小类手输(可选,逗号分隔,如「财务, 家务」)— 仅非产品项目分支,v0.4.1 加
+ * 4. 截止日期 DDL(preset:今天/明天/本周末/下周末/本月底/手输/跳过)
+ * 5. 执行月(飞书最近 5 个 enum,多选循环 / 默认=created 当月)
+ * 6. 执行周(飞书最近 5 个 enum,多选循环 / 默认=created 当周)
+ * 7. 是否今日(📥 需求池 / ⭐ 今日)
+ * 8. 执行状态(默认 Todo / Doing / SubDone / Done / Block / cancel / Idea)— v0.4.1 加
  * 9. 标题输入
  * 10. 创建 task md + 调 sync.py --task-md --apply 同步飞书
  *
@@ -34,13 +38,15 @@
  *  - base 视图:04 Inbox/task/_task.base
  */
 
-// 算 dateContext:优先用当前打开 journal 日期(跨日工作友好),fallback 北京时间
+// v0.3.9: 始终用北京时间(回退 v0.3.1 块 ④)
+// 历史:v0.3.1 块 ④ 加了"优先用 active journal 日期"机制 — 给 mac 系统 TZ=PDT 跨日场景用
+//        (北京 5-27 早 9 点 mac 显示 PDT 5-26 晚 18 点,user 视角还在 5-26 → 用 5-28 journal 命中)
+// 现状:user 已把 mac 系统 TZ 改回 Asia/Shanghai,bjDate 永远 = 真实北京日期
+//        "journal 优先" 机制反成 bug 源(在 5-28 journal 编辑跨过 0 点后建 task,task 归到 5-28 而非 5-29)
+// 决策:删除 journal 分支,始终用 bjDate
+// 跨日场景:user 在前一天 journal 工作时建 task → 默认进今天 journal;
+//          如确实想归昨天 → 手动改 task md 文件名 / created / 日志 wikilink(罕见 case)
 function getDateContext(app) {
-  const active = app.workspace.getActiveFile();
-  if (active && active.path.startsWith("journals/")
-      && /^\d{4}-\d{2}-\d{2}\.md$/.test(active.name)) {
-    return active.name.slice(0, 10);
-  }
   return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
 }
 
@@ -167,87 +173,132 @@ module.exports = async function (params) {
     }
     console.log("[快记任务 v2] adhd:", adhdChoice);
 
-    // ============ Step 3: 大类(parent_project)============
-    // 数据源:飞书产品项目表 where 活跃=true AND 父产品=空(v0.3.5)
-    // 数据空 → 跳过此步,不弹窗
-    let chosenParentName = null;
-    let chosenParentRecordId = null;
-    let titlePrefix = "";
-
-    if (qopts.active_top_level && qopts.active_top_level.length > 0) {
-      const topNames = qopts.active_top_level.map(p => p.name);
-      const topOptions = [
-        "❌ 跳过 / 不归类(临时小事)",
-        ...topNames.map(n => `📁 ${n}`),
-      ];
-      const topValues = ["__SKIP__", ...topNames];
-      const topPick = await quickAddApi.suggester(topOptions, topValues);
-      if (topPick === undefined) {
-        new Notice("❌ 已取消", 3000);
-        return;
-      }
-      if (topPick !== "__SKIP__") {
-        chosenParentName = topPick;
-        const found = qopts.active_top_level.find(p => p.name === topPick);
-        chosenParentRecordId = found?.record_id || null;
-      }
-      console.log("[快记任务 v2] parent:", chosenParentName, "(", chosenParentRecordId, ")");
-    } else {
-      console.log("[快记任务 v2] active_top_level 空,跳过大类菜单");
-    }
-
-    // ============ Step 4: 小类(parent_subproject)============
-    // 数据源:qopts.subprojects_by_parent[选中大类 record_id]
-    // 大类没选 / 该大类无活跃小类 → 跳过此步
-    let chosenSubName = null;
-    if (chosenParentRecordId && qopts.subprojects_by_parent) {
-      const subs = qopts.subprojects_by_parent[chosenParentRecordId] || [];
-      if (subs.length > 0) {
-        const subNames = subs.map(s => s.name);
-        const subOptions = [
-          `❌ 跳过(只填大类「${chosenParentName}」)`,
-          ...subNames.map(n => `📂 ${n}`),
-        ];
-        const subValues = ["__SKIP__", ...subNames];
-        const subPick = await quickAddApi.suggester(subOptions, subValues);
-        if (subPick === undefined) {
-          new Notice("❌ 已取消", 3000);
-          return;
-        }
-        if (subPick !== "__SKIP__") {
-          chosenSubName = subPick;
-          titlePrefix = `【${subPick}】`;
-        } else {
-          titlePrefix = `【${chosenParentName}】`;
-        }
-      } else {
-        titlePrefix = `【${chosenParentName}】`;
-      }
-    } else if (chosenParentName) {
-      titlePrefix = `【${chosenParentName}】`;
-    }
-    console.log("[快记任务 v2] subproject:", chosenSubName, "/ titlePrefix:", titlePrefix);
-
-    // ============ Step 4.5: 项目小类(v0.3.8 加)============
-    // task 表 multi-select 字段「项目小类」— 三级分类的最精细一层
-    // 例:布丁内容(子级) → 干货 / 训练营 / 课程产品 (项目小类)
-    //     装备配置(子级) → Codex / claudecode / 软硬件 (项目小类)
-    // 数据源:飞书 task 表 default_view_id 拉最近 5 条 distinct 用过的值
-    // UX:同执行月/周的多选循环 helper
-    const selectedProjectMinor = await selectMultiOrDefault(
-      quickAddApi,
-      qopts.recent_project_minor,
-      null,  // 默认值 null = "无项目小类"(空,跳过)
-      "项目小类",
-      "🏷"
+    // ============ Step 3: 业务大类(category)============ v0.4.1
+    // 飞书 task 表「大类」select 字段,4 个固定 enum:
+    //   📦 产品项目 / 🪣 杂务 / 🔧 技能工具 / 📚 领域学习
+    // ADHD 自觉察:把生活财务杂务 / 技能学习也纳入看板,避免被产品项目挤占丢失
+    //
+    // 分支:
+    //   - 产品项目 → 走 Step 3a / 3b / 3c(产品项目一级 / 子级 / 项目小类)
+    //   - 其他三类 → 跳过产品项目相关 3 步,走 Step 3d(subcategory 手输)
+    const categoryChoice = await quickAddApi.suggester(
+      ["📦 产品项目", "🪣 杂务", "🔧 技能工具", "📚 领域学习"],
+      ["产品项目", "杂务", "技能工具", "领域学习"]
     );
-    if (selectedProjectMinor === null) {
+    if (!categoryChoice) {
       new Notice("❌ 已取消", 3000);
       return;
     }
-    // helper 在 defaultValue=null 时返回 [](跳过)或 [...选中],无需 filter
-    const finalProjectMinor = selectedProjectMinor;
-    console.log("[快记任务 v2] project_minor:", finalProjectMinor);
+    console.log("[快记任务 v2] category:", categoryChoice);
+
+    // 状态变量(横跨 3a/3b/3c/3d 用)
+    let chosenParentName = null;
+    let chosenParentRecordId = null;
+    let chosenSubName = null;
+    let finalProjectMinor = [];
+    let subcategoryList = [];          // v0.4.1:仅非产品项目分支用
+    let titlePrefix = "";
+
+    if (categoryChoice === "产品项目") {
+      // ============ Step 3a: 产品项目一级(parent_project)============
+      // 数据源:飞书产品项目表 where 活跃=true AND 父产品=空(v0.3.5)
+      // 数据空 → 跳过此步,不弹窗
+      if (qopts.active_top_level && qopts.active_top_level.length > 0) {
+        const topNames = qopts.active_top_level.map(p => p.name);
+        const topOptions = [
+          "❌ 跳过 / 不归类(临时小事)",
+          ...topNames.map(n => `📁 ${n}`),
+        ];
+        const topValues = ["__SKIP__", ...topNames];
+        const topPick = await quickAddApi.suggester(topOptions, topValues);
+        if (topPick === undefined) {
+          new Notice("❌ 已取消", 3000);
+          return;
+        }
+        if (topPick !== "__SKIP__") {
+          chosenParentName = topPick;
+          const found = qopts.active_top_level.find(p => p.name === topPick);
+          chosenParentRecordId = found?.record_id || null;
+        }
+        console.log("[快记任务 v2] parent:", chosenParentName, "(", chosenParentRecordId, ")");
+      } else {
+        console.log("[快记任务 v2] active_top_level 空,跳过产品项目一级菜单");
+      }
+
+      // ============ Step 3b: 产品项目子级(parent_subproject)============
+      // 数据源:qopts.subprojects_by_parent[选中一级 record_id]
+      // 一级没选 / 该一级无活跃子级 → 跳过此步
+      if (chosenParentRecordId && qopts.subprojects_by_parent) {
+        const subs = qopts.subprojects_by_parent[chosenParentRecordId] || [];
+        if (subs.length > 0) {
+          const subNames = subs.map(s => s.name);
+          const subOptions = [
+            `❌ 跳过(只填一级「${chosenParentName}」)`,
+            ...subNames.map(n => `📂 ${n}`),
+          ];
+          const subValues = ["__SKIP__", ...subNames];
+          const subPick = await quickAddApi.suggester(subOptions, subValues);
+          if (subPick === undefined) {
+            new Notice("❌ 已取消", 3000);
+            return;
+          }
+          if (subPick !== "__SKIP__") {
+            chosenSubName = subPick;
+            titlePrefix = `【${subPick}】`;
+          } else {
+            titlePrefix = `【${chosenParentName}】`;
+          }
+        } else {
+          titlePrefix = `【${chosenParentName}】`;
+        }
+      } else if (chosenParentName) {
+        titlePrefix = `【${chosenParentName}】`;
+      }
+      console.log("[快记任务 v2] subproject:", chosenSubName, "/ titlePrefix:", titlePrefix);
+
+      // ============ Step 3c: 项目小类(v0.3.8 加 / v0.3.9 改单选)============
+      // task 表 single-select 字段「项目小类」— 三级分类的最精细一层
+      // 例:布丁内容(子级) → 干货 / 训练营 / 课程产品
+      //     装备配置(子级) → Codex / claudecode / 软硬件
+      // 数据源:飞书 task 表 default_view_id 拉最近 5 条 distinct 用过的值
+      // v0.3.9 实证:飞书侧字段是 single-select(API 拒绝 2 个 enum 值),改为单选 UX
+      // frontmatter 仍写 list 格式(`project_minor: [训练营]`),保持 schema 一致性
+      if (qopts.recent_project_minor && qopts.recent_project_minor.length > 0) {
+        const pmOpts = ["❌ 跳过 / 不填(项目小类)", ...qopts.recent_project_minor.map(x => `🏷 ${x}`)];
+        const pmVals = ["__SKIP__", ...qopts.recent_project_minor];
+        const pmPick = await quickAddApi.suggester(pmOpts, pmVals);
+        if (pmPick === undefined) {
+          new Notice("❌ 已取消", 3000);
+          return;
+        }
+        if (pmPick !== "__SKIP__") {
+          finalProjectMinor.push(pmPick);
+        }
+      }
+      console.log("[快记任务 v2] project_minor:", finalProjectMinor);
+    } else {
+      // ============ Step 3d: 非产品项目分支 → subcategory 手输 ============ v0.4.1
+      // 杂务 / 技能工具 / 领域学习 → 弹手输框,逗号分隔,允许留空
+      // 写入 frontmatter `subcategory: [财务, 家务]`,推飞书「小类」multi-select 字段
+      // titlePrefix:有 subcategory → 【大类/小类】,无 → 【大类】
+      const subInput = await quickAddApi.inputPrompt(
+        `「${categoryChoice}」小类(可选,逗号分隔,如:财务, 家务;留空跳过)`,
+        "",
+        ""
+      );
+      if (subInput && subInput.trim()) {
+        subcategoryList = subInput
+          .split(/[,，]/)             // 中英文逗号都吃
+          .map(s => s.trim())
+          .filter(Boolean);
+      }
+      if (subcategoryList.length > 0) {
+        titlePrefix = `【${categoryChoice}/${subcategoryList.join("/")}】`;
+      } else {
+        titlePrefix = `【${categoryChoice}】`;
+      }
+      console.log("[快记任务 v2] subcategory:", subcategoryList, "/ titlePrefix:", titlePrefix);
+    }
 
     // ============ Step 5: 截止日期 DDL ============
     // preset:今天/明天/本周末/下周末/本月底/手输 + 跳过
@@ -331,7 +382,7 @@ module.exports = async function (params) {
     }
     console.log("[快记任务 v2] weeks:", selectedWeeks);
 
-    // ============ Step 8: 是否今日 ============
+    // ============ Step 7: 是否今日 ============
     const isToday = await quickAddApi.suggester(
       ["📥 进需求池(默认,后续在飞书勾今日)", "⭐ 今日(立即排进今日 journal)"],
       [false, true]
@@ -340,6 +391,28 @@ module.exports = async function (params) {
       new Notice("❌ 已取消", 3000);
       return;
     }
+
+    // ============ Step 8: 执行状态(v0.4.1 加)============
+    // 飞书 task 表「执行状态」select 字段 + sync.py task_md_map 7 态全量
+    // 默认 Todo;常见非 Todo 场景:已经在做的事补建 task → Doing;暂未启动但 idea → Idea
+    // 显示按"创建时常用度"排序,Todo / Doing / Idea / Block 在前;Done / SubDone / cancel 兜底
+    const statusChoice = await quickAddApi.suggester(
+      [
+        "📋 Todo(默认 — 待办)",
+        "🔄 Doing(进行中)",
+        "💡 Idea(想法 / 草稿)",
+        "🚧 Block(受阻)",
+        "⏸ SubDone(子任务完成,主任务未完)",
+        "✅ Done(已完成 — 补录历史)",
+        "❌ cancel(取消)",
+      ],
+      ["todo", "doing", "idea", "block", "subdone", "done", "cancel"]
+    );
+    if (!statusChoice) {
+      new Notice("❌ 已取消", 3000);
+      return;
+    }
+    console.log("[快记任务 v2] status:", statusChoice);
 
     // ============ Step 9: 标题 ============
     const title = await quickAddApi.inputPrompt("任务标题(简短;后续可加详情)");
@@ -386,6 +459,12 @@ module.exports = async function (params) {
     const projectMinorLine = finalProjectMinor.length > 0
       ? `project_minor: [${finalProjectMinor.join(", ")}]`
       : `project_minor:`;
+    // v0.4.1: category(业务大类)— select 单选,4 选 1 必填(走到这一步必有值)
+    const categoryLine = `category: ${categoryChoice}`;
+    // v0.4.1: subcategory(小类)— 非产品项目分支手输 list;产品项目分支留空
+    const subcategoryLine = subcategoryList.length > 0
+      ? `subcategory: [${subcategoryList.join(", ")}]`
+      : `subcategory:`;
     // today_history 事件流:today=true 时立即 init 为 [dateContext];今日 journal 才能查到
     const todayHistoryInit = isToday ? `[${dateContext}]` : `[]`;
     // v0.3.6: today_source 区分"计划/非计划"(ADHD 自觉察用)
@@ -396,25 +475,28 @@ module.exports = async function (params) {
 
     const content = `---
 priority: ${priorityChoice}
-status: todo
+status: ${statusChoice}
 today: ${isToday}
 today_history: ${todayHistoryInit}
 ${todaySourceLine}
 created: ${createdISO}
 ${dueLine}
 done_date:
-category:
-subcategory:
+${categoryLine}
+${subcategoryLine}
 ${projectMinorLine}
 ${adhdLine}
 estimate_hours:
+actual_hours:
 efficiency:
+quality:
 acceptance:
 thinking:
 resources:
 retrospective:
 ${parentProjectLine}
 ${parentSubLine}
+parent_task:
 parent_inspiration:
 日志: "[[${journalPath}]]"
 feishu_record:
@@ -429,6 +511,14 @@ tags:
 # ${titleTrimmed}
 
 ## 📝 执行概述
+
+
+## 📦 交付
+<!-- ⭐ 最重要字段。同步到飞书「交付」字段。完成后填:做出来什么?产出 / 文件 / 链接 / 截图 / 部署位置 等 -->
+
+
+## 👥 用户故事
+<!-- 同步到飞书「用户故事」字段。"作为 X,我希望 Y,以便 Z"句式。可选,产品类 task 用 -->
 
 
 ## ✅ 验收条件
