@@ -1,6 +1,8 @@
 ---
 created: 2026-05-27T20:00:00
-status: handoff-pending
+status: done
+completed_at: 2026-05-28T08:00:00
+receipt: docs/handoff/OB对接/2026-05-27-status-subdone-idea-反向回执.md
 from_project: OB(Claudian)
 to_project: feishukanban-ob-sync(Claude Code in VS Code)
 to_repo: /Users/aim5/Documents/CodingProject/feishukanban-ob-sync/
@@ -8,6 +10,7 @@ spec: null
 plan: null
 priority: P1
 estimated_effort: 1
+actual_effort: 0.5
 tags:
   - handoff
   - status
