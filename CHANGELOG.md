@@ -2,6 +2,55 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.4.2] - 2026-05-28 — Cmd+P「快记任务」加「⬅ 回上一步」(state machine 重构)
+
+> **背景**:v0.4.1 把 Cmd+P 流程从 9 步扩到 11 步后,用户反馈"一旦设置错误,要有退回上一步的操作"。原版只有 Esc=整体取消,中途选错只能整个重来 — 11 步太长,UX 摩擦明显。
+>
+> 解决:把整个 wizard 重构为 **state machine + while loop + sentinel 返回值**,每个 suggester 顶部加「⬅ 回上一步」选项,inputPrompt 类(标题 / DDL 手输 / subcategory 手输)用单字符 `^` 表示后退。
+
+### 🎯 主要改动
+
+| 改动 | 说明 |
+|---|---|
+| **state machine 框架** | 新增 `STEPS` 数组(扁平 13 项)+ `state` 对象 + `isStepActive()` 分支判断 + `findPrevActive()` 跳过非激活 step 的后退 + `runWizard()` while loop 调度 |
+| **BACK / CANCEL sentinel** | step fn 返回 `BACK` = 回上一步;返回 `CANCEL` = 整体取消;返回 `null` = 继续下一步 |
+| **`pickWithBack(qa, opts, vals, canBack)` helper** | 包装 suggester,canBack=true 时顶部加「⬅ 回上一步」选项 |
+| **`inputWithBack(qa, label, ...)` helper** | 包装 inputPrompt,label 末尾自动加「(输入 ^ 回上一步)」提示,检测用户输入 `^` → 返回 BACK |
+| **分支切换状态清理** | `stepCategory` 改大类时清空对侧分支 state(parentName/projectMinor 或 subcategoryList),避免后退再前进时脏数据 |
+| **DDL 手输局部 loop** | DDL 选「📝 手输」后,inputPrompt 输入 `^` → 回 DDL 选项菜单(局部,不是回上一 step);选「⬅ 回上一步」才是回 Step 3 |
+| **多选循环 back** | months / weeks selectMultiOrDefault:首次进入(未选任何值)顶部加「⬅ 回上一步」;选了 ≥1 个后不再支持后退(避免撤销栈复杂度) |
+
+### 🔬 设计要点
+
+#### 扁平 STEPS + 分支跳过
+
+不用嵌套 step tree,STEPS 是单一数组 13 项;`isStepActive()` 根据 `state.category` 判断 parentLevel1/2/projectMinor 还是 subcategoryManual 激活。while loop 遇到非激活 step 直接 `i++; continue;`,后退时 `findPrevActive(i, state)` 跳过非激活 step。
+
+#### Esc 语义不变
+
+QuickAdd 的 Esc 返回 `undefined`,在 step fn 里被映射为 CANCEL,顶层 runWizard 返回 null → 用户看到「❌ 已取消」Notice。**没有改 Esc 语义为"后退"** — 老用户的 Esc 习惯保持。
+
+#### Step 1(priority)不加「⬅ 回上一步」
+
+`findPrevActive(0, state)` 返回 -1,canBack=false → suggester 顶部不显示该选项。用户视角:第一步没有上一步,菜单干净。
+
+### 🛠 改动文件
+
+| 文件 | 改动量 |
+|---|---|
+| `obsidian-assets/userscripts/quickadd-快记任务-v2-task-md.js` | 完全重构(~510 行 → ~565 行;原 module.exports 内联流程 → 13 个独立 stepFn + STEP_DISPATCH 表 + runWizard) |
+
+### 🚫 不影响
+
+- **sync.py / 模板 / 飞书表结构 / config 全部不动** — 纯 userscript 内部重构
+- **老 task 不受影响** — 用户已建的 task md 不动
+
+### ⚠️ 用户侧需要做的事
+
+无 — 重启 Obsidian 让 QuickAdd 重新 require userscript 即可。
+
+---
+
 ## [v0.4.1] - 2026-05-28 — Cmd+P「快记任务」加业务大类 + 执行状态选择
 
 > **背景**:用户作为 ADHD 用户反馈 — Cmd+P 流程现状只能记产品项目相关 task,生活财务杂务 / 技能学习 / 领域学习 这类「非产品项目」事项一旦不进飞书看板就会被忘记。同时执行状态(`status`)是创建 task 时最重要的元数据之一,旧版写死 `todo` 没给选择步骤。

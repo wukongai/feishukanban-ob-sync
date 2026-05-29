@@ -3,23 +3,29 @@
  *
  * 触发方式: Cmd+P → 搜「快记任务」 → 回车
  *
- * 行为(v0.4.1 - 2026-05-28 加「业务大类」+「执行状态」两步):
- * 0. Step 0:batch 调 sync.py --quickadd-options 拿活跃项目 / 最近 5 月 / 最近 5 周 / 最近 5 项目小类(一次性,~1s)
+ * 行为(v0.4.2 - 2026-05-28 重构 state machine 支持「⬅ 回上一步」):
+ * 0. Step 0:batch 调 sync.py --quickadd-options 拿活跃项目 / 最近 5 月 / 最近 5 周 / 最近 5 项目小类
  * 1. 优先级(🔺 P0 / ⏫ P1 / 🔼 P2 / 🔽 P3)
  * 2. ADHD 优先级(🚨 待抢救 / ⏰ 有 DDL / 🌱 自由待办 / ❌ 跳过)
- * 3. 业务大类(📦 产品项目 / 🪣 杂务 / 🔧 技能工具 / 📚 领域学习)— v0.4.1 加
- *    └ 选「产品项目」走 3a/3b/3c;选其他三类走 3d(subcategory 手输)
+ * 3. 业务大类(📦 产品项目 / 🪣 杂务 / 🔧 技能工具 / 📚 领域学习)
+ *    └ 选「产品项目」走 3a/3b/3c;选其他三类走 3d
  * 3a. 产品项目一级(飞书产品项目表「活跃=true 且 父产品=空」)— 仅产品项目分支
  * 3b. 产品项目子级(飞书产品项目表「活跃=true 且 父产品=选中一级」)— 仅产品项目分支
- * 3c. 项目小类(飞书 task 表「项目小类」字段最近 5 条 distinct,v0.3.8 加)— 仅产品项目分支
- * 3d. 小类手输(可选,逗号分隔,如「财务, 家务」)— 仅非产品项目分支,v0.4.1 加
+ * 3c. 项目小类(飞书 task 表「项目小类」字段最近 5 条 distinct)— 仅产品项目分支
+ * 3d. 小类手输(可选,逗号分隔,如「财务, 家务」)— 仅非产品项目分支
  * 4. 截止日期 DDL(preset:今天/明天/本周末/下周末/本月底/手输/跳过)
  * 5. 执行月(飞书最近 5 个 enum,多选循环 / 默认=created 当月)
  * 6. 执行周(飞书最近 5 个 enum,多选循环 / 默认=created 当周)
  * 7. 是否今日(📥 需求池 / ⭐ 今日)
- * 8. 执行状态(默认 Todo / Doing / SubDone / Done / Block / cancel / Idea)— v0.4.1 加
+ * 8. 执行状态(默认 Todo / Doing / SubDone / Done / Block / cancel / Idea)
  * 9. 标题输入
  * 10. 创建 task md + 调 sync.py --task-md --apply 同步飞书
+ *
+ * v0.4.2 新增「⬅ 回上一步」机制:
+ *  - 每个 suggester 步骤顶部加「⬅ 回上一步」选项 → 跳回上一步重选(Step 1 没有,因为没有上一步)
+ *  - inputPrompt 类(标题 / DDL 手输 / subcategory 手输)输入单字符 `^` 表示回上一步
+ *  - Esc 仍是「整体取消」语义(保持原行为)
+ *  - 多选循环(月/周)只在首次进入(还没选任何值)时支持后退;选了 ≥1 个后只能 Esc(避免撤销栈复杂度)
  *
  * 日期上下文(v0.3.1 跨日支持):
  *    - 当前打开 journal(`journals/YYYY-MM-DD.md`)→ 用 journal 日期作为文件名前缀 / today_history / 日志字段
@@ -39,13 +45,6 @@
  */
 
 // v0.3.9: 始终用北京时间(回退 v0.3.1 块 ④)
-// 历史:v0.3.1 块 ④ 加了"优先用 active journal 日期"机制 — 给 mac 系统 TZ=PDT 跨日场景用
-//        (北京 5-27 早 9 点 mac 显示 PDT 5-26 晚 18 点,user 视角还在 5-26 → 用 5-28 journal 命中)
-// 现状:user 已把 mac 系统 TZ 改回 Asia/Shanghai,bjDate 永远 = 真实北京日期
-//        "journal 优先" 机制反成 bug 源(在 5-28 journal 编辑跨过 0 点后建 task,task 归到 5-28 而非 5-29)
-// 决策:删除 journal 分支,始终用 bjDate
-// 跨日场景:user 在前一天 journal 工作时建 task → 默认进今天 journal;
-//          如确实想归昨天 → 手动改 task md 文件名 / created / 日志 wikilink(罕见 case)
 function getDateContext(app) {
   return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
 }
@@ -60,13 +59,38 @@ function isoWeek(date) {
   return { year: d.getUTCFullYear(), week: weekNum };
 }
 
-// 多选循环 helper(执行月/周/项目小类 复用)
+// v0.4.2 state machine sentinels
+const BACK = "__BACK__";       // step fn 返回此值 = 回上一步
+const CANCEL = "__CANCEL__";   // step fn 返回此值 = 整体取消(Esc / 标题空)
+
+// suggester 包装:第一项可选加「⬅ 回上一步」
+// canBack=false → 不加(用于 Step 1 priority,没有上一步)
+async function pickWithBack(quickAddApi, options, values, canBack) {
+  const opts = canBack ? ["⬅ 回上一步", ...options] : options;
+  const vals = canBack ? [BACK, ...values] : values;
+  const pick = await quickAddApi.suggester(opts, vals);
+  if (pick === undefined) return CANCEL;
+  return pick;   // 可能是 BACK,也可能是具体值
+}
+
+// inputPrompt 包装:输入单字符 `^` 表示回上一步
+async function inputWithBack(quickAddApi, label, placeholder, defaultValue) {
+  const tail = "(输入 ^ 回上一步)";
+  const fullLabel = label.endsWith(tail) ? label : `${label} ${tail}`;
+  const raw = await quickAddApi.inputPrompt(fullLabel, placeholder || "", defaultValue || "");
+  if (raw === undefined || raw === null) return CANCEL;
+  if (raw.trim() === "^") return BACK;
+  return raw;
+}
+
+// 多选循环 helper(执行月/周 复用),v0.4.2 加 back 支持
 // recentList 空 → 直接返回 [defaultValue](不弹窗;若 defaultValue=null → 返回 [])
-// defaultValue=null → 首项显示「❌ 跳过 / 不填」(可选字段语义,如 project_minor)
-// defaultValue=<具体值> → 首项显示「⏭ 用默认(<值>)」(有默认值语义,如 iteration_*)
-// 用户选第一项 → 返回 [defaultValue] / []
-// 用户选具体值后弹「✓ 完成 / 加更多」→ 返回 [...selected]
-// 用户 Esc → 返回 null(调用方处理)
+// defaultValue=null → 首项显示「❌ 跳过 / 不填」(可选字段语义)
+// defaultValue=<具体值> → 首项显示「⏭ 用默认(<值>)」(有默认值语义)
+//
+// v0.4.2 back 语义:
+//   - 首次进入(还没选任何值)→ 顶部加「⬅ 回上一步」,选了 → 返回 BACK
+//   - 选了 ≥1 个值后 → 不再支持后退(避免撤销栈复杂度)
 async function selectMultiOrDefault(quickAddApi, recentList, defaultValue, label, emoji) {
   if (!recentList || recentList.length === 0) {
     return defaultValue === null ? [] : [defaultValue];
@@ -75,6 +99,15 @@ async function selectMultiOrDefault(quickAddApi, recentList, defaultValue, label
   while (true) {
     const remaining = recentList.filter(x => !selected.includes(x));
     if (remaining.length === 0) break;
+
+    const opts = [];
+    const vals = [];
+    // 首次进入时加「⬅ 回上一步」
+    if (selected.length === 0) {
+      opts.push("⬅ 回上一步");
+      vals.push(BACK);
+    }
+    // 首项 / done 项
     let firstOption;
     if (selected.length === 0) {
       firstOption = defaultValue === null
@@ -83,11 +116,17 @@ async function selectMultiOrDefault(quickAddApi, recentList, defaultValue, label
     } else {
       firstOption = `✓ 完成,已选 [${selected.join(", ")}]`;
     }
-    const firstValue = selected.length === 0 ? "__DEFAULT__" : "__DONE__";
-    const options = [firstOption, ...remaining.map(x => `${emoji} ${x}`)];
-    const values = [firstValue, ...remaining];
-    const pick = await quickAddApi.suggester(options, values);
-    if (pick === undefined) return null;
+    opts.push(firstOption);
+    vals.push(selected.length === 0 ? "__DEFAULT__" : "__DONE__");
+    // 剩余 enum 选项
+    remaining.forEach(x => {
+      opts.push(`${emoji} ${x}`);
+      vals.push(x);
+    });
+
+    const pick = await quickAddApi.suggester(opts, vals);
+    if (pick === undefined) return CANCEL;
+    if (pick === BACK) return BACK;
     if (pick === "__DEFAULT__") return defaultValue === null ? [] : [defaultValue];
     if (pick === "__DONE__") break;
     selected.push(pick);
@@ -96,14 +135,376 @@ async function selectMultiOrDefault(quickAddApi, recentList, defaultValue, label
   return defaultValue === null ? [] : [defaultValue];
 }
 
+// ============================================================
+// State machine 主体
+// ============================================================
+
+// step 列表(扁平,分支用 isStepActive 跳过)
+const STEPS = [
+  "priority",          // 0
+  "adhd",              // 1
+  "category",          // 2
+  "parentLevel1",      // 3a 仅产品项目
+  "parentLevel2",      // 3b 仅产品项目
+  "projectMinor",      // 3c 仅产品项目
+  "subcategoryManual", // 3d 仅非产品项目
+  "due",               // 4
+  "months",            // 5
+  "weeks",             // 6
+  "isToday",           // 7
+  "status",            // 8
+  "title",             // 9
+];
+
+// 当前 state 下该 step 是否激活
+function isStepActive(stepName, state) {
+  if (["parentLevel1", "parentLevel2", "projectMinor"].includes(stepName)) {
+    return state.category === "产品项目";
+  }
+  if (stepName === "subcategoryManual") {
+    return state.category && state.category !== "产品项目";
+  }
+  return true;
+}
+
+// 给定 idx,找上一个 active step 的 idx;找不到返回 -1
+function findPrevActive(idx, state) {
+  let j = idx - 1;
+  while (j >= 0 && !isStepActive(STEPS[j], state)) j--;
+  return j;
+}
+
+// ============================================================
+// 各 step 实现(每个返回 BACK / CANCEL / null=继续,直接改 state)
+// ============================================================
+
+async function stepPriority(state, qa, ctx) {
+  const pick = await pickWithBack(qa,
+    ["🔺 P0  紧急重要", "⏫ P1  本周必做", "🔼 P2  有空就做", "🔽 P3  非计划"],
+    ["P0", "P1", "P2", "P3"],
+    ctx.canBack
+  );
+  if (pick === CANCEL || pick === BACK) return pick;
+  state.priority = pick;
+  return null;
+}
+
+async function stepAdhd(state, qa, ctx) {
+  const pick = await pickWithBack(qa,
+    ["🚨 待抢救", "⏰ 有 DDL", "🌱 自由待办", "❌ 跳过 / 不填"],
+    ["待抢救", "有 DDL", "自由待办", "__SKIP__"],
+    ctx.canBack
+  );
+  if (pick === CANCEL || pick === BACK) return pick;
+  state.adhd = pick === "__SKIP__" ? null : pick;
+  return null;
+}
+
+async function stepCategory(state, qa, ctx) {
+  const pick = await pickWithBack(qa,
+    ["📦 产品项目", "🪣 杂务", "🔧 技能工具", "📚 领域学习"],
+    ["产品项目", "杂务", "技能工具", "领域学习"],
+    ctx.canBack
+  );
+  if (pick === CANCEL || pick === BACK) return pick;
+  // 切换分支时清掉对侧 state(避免脏数据 — 用户回上一步改大类时)
+  if (state.category !== pick) {
+    state.parentName = null;
+    state.parentRecordId = null;
+    state.subName = null;
+    state.projectMinor = [];
+    state.subcategoryList = [];
+    state.titlePrefix = "";
+  }
+  state.category = pick;
+  return null;
+}
+
+async function stepParentLevel1(state, qa, ctx) {
+  if (!ctx.qopts.active_top_level || ctx.qopts.active_top_level.length === 0) {
+    state.parentName = null;
+    state.parentRecordId = null;
+    return null;
+  }
+  const topNames = ctx.qopts.active_top_level.map(p => p.name);
+  const pick = await pickWithBack(qa,
+    ["❌ 跳过 / 不归类(临时小事)", ...topNames.map(n => `📁 ${n}`)],
+    ["__SKIP__", ...topNames],
+    ctx.canBack
+  );
+  if (pick === CANCEL || pick === BACK) return pick;
+  if (pick === "__SKIP__") {
+    state.parentName = null;
+    state.parentRecordId = null;
+  } else {
+    state.parentName = pick;
+    const found = ctx.qopts.active_top_level.find(p => p.name === pick);
+    state.parentRecordId = found?.record_id || null;
+  }
+  return null;
+}
+
+async function stepParentLevel2(state, qa, ctx) {
+  if (!state.parentRecordId || !ctx.qopts.subprojects_by_parent) {
+    if (state.parentName) state.titlePrefix = `【${state.parentName}】`;
+    return null;
+  }
+  const subs = ctx.qopts.subprojects_by_parent[state.parentRecordId] || [];
+  if (subs.length === 0) {
+    state.titlePrefix = `【${state.parentName}】`;
+    return null;
+  }
+  const subNames = subs.map(s => s.name);
+  const pick = await pickWithBack(qa,
+    [`❌ 跳过(只填一级「${state.parentName}」)`, ...subNames.map(n => `📂 ${n}`)],
+    ["__SKIP__", ...subNames],
+    ctx.canBack
+  );
+  if (pick === CANCEL || pick === BACK) return pick;
+  if (pick === "__SKIP__") {
+    state.subName = null;
+    state.titlePrefix = `【${state.parentName}】`;
+  } else {
+    state.subName = pick;
+    state.titlePrefix = `【${pick}】`;
+  }
+  return null;
+}
+
+async function stepProjectMinor(state, qa, ctx) {
+  if (!ctx.qopts.recent_project_minor || ctx.qopts.recent_project_minor.length === 0) {
+    state.projectMinor = [];
+    return null;
+  }
+  const pick = await pickWithBack(qa,
+    ["❌ 跳过 / 不填(项目小类)", ...ctx.qopts.recent_project_minor.map(x => `🏷 ${x}`)],
+    ["__SKIP__", ...ctx.qopts.recent_project_minor],
+    ctx.canBack
+  );
+  if (pick === CANCEL || pick === BACK) return pick;
+  state.projectMinor = pick === "__SKIP__" ? [] : [pick];
+  return null;
+}
+
+async function stepSubcategoryManual(state, qa, ctx) {
+  // input 类 step,用 inputWithBack;canBack 永远 true(在 step 2 category 之后)
+  const raw = await inputWithBack(qa,
+    `「${state.category}」小类(可选,逗号分隔,如:财务, 家务;留空跳过)`,
+    "", ""
+  );
+  if (raw === CANCEL || raw === BACK) return raw;
+  if (raw && raw.trim()) {
+    state.subcategoryList = raw
+      .split(/[,，]/)
+      .map(s => s.trim())
+      .filter(Boolean);
+  } else {
+    state.subcategoryList = [];
+  }
+  if (state.subcategoryList.length > 0) {
+    state.titlePrefix = `【${state.category}/${state.subcategoryList.join("/")}】`;
+  } else {
+    state.titlePrefix = `【${state.category}】`;
+  }
+  return null;
+}
+
+async function stepDue(state, qa, ctx) {
+  const nowBJ = new Date(Date.now() + 8 * 3600 * 1000);
+  const toISODate = d => d.toISOString().slice(0, 10);
+  const addDays = (d, n) => {
+    const r = new Date(d);
+    r.setUTCDate(r.getUTCDate() + n);
+    return r;
+  };
+  const dayOfWeek = nowBJ.getUTCDay();
+  const daysToThisSun = (7 - dayOfWeek) % 7;
+  const thisWeekend = daysToThisSun === 0 ? nowBJ : addDays(nowBJ, daysToThisSun);
+  const nextWeekend = addDays(thisWeekend, 7);
+  const lastDayOfMonth = new Date(Date.UTC(nowBJ.getUTCFullYear(), nowBJ.getUTCMonth() + 1, 0));
+
+  // 内部 loop:手输 ^ 退回 DDL 选项菜单(局部);DDL 选 ⬅ 退到上一 step
+  while (true) {
+    const pick = await pickWithBack(qa,
+      [
+        "❌ 跳过 / 无 DDL",
+        `⏰ 今天(${toISODate(nowBJ)})`,
+        `📅 明天(${toISODate(addDays(nowBJ, 1))})`,
+        `🌅 本周末(${toISODate(thisWeekend)})`,
+        `🗓 下周末(${toISODate(nextWeekend)})`,
+        `🌙 本月底(${toISODate(lastDayOfMonth)})`,
+        "📝 手输 YYYY-MM-DD",
+      ],
+      [
+        "__SKIP__",
+        toISODate(nowBJ),
+        toISODate(addDays(nowBJ, 1)),
+        toISODate(thisWeekend),
+        toISODate(nextWeekend),
+        toISODate(lastDayOfMonth),
+        "__INPUT__",
+      ],
+      ctx.canBack
+    );
+    if (pick === CANCEL || pick === BACK) return pick;
+    if (pick === "__SKIP__") {
+      state.due = null;
+      break;
+    }
+    if (pick === "__INPUT__") {
+      const manual = await inputWithBack(qa,
+        "截止日期 (YYYY-MM-DD,输入 ^ 回 DDL 选项)",
+        "", toISODate(nowBJ)
+      );
+      if (manual === CANCEL) return CANCEL;
+      if (manual === BACK) continue;     // 回 DDL 选项菜单(局部 loop)
+      if (/^\d{4}-\d{2}-\d{2}$/.test(manual.trim())) {
+        state.due = manual.trim();
+        break;
+      }
+      new Notice("⚠️ 格式不对(需 YYYY-MM-DD),请重试 / 或选 preset", 4000);
+      continue;
+    }
+    state.due = pick;
+    break;
+  }
+  if (state.adhd === "有 DDL" && !state.due) {
+    new Notice("⚠️ 选了「有 DDL」却没设截止日期,继续创建", 4000);
+  }
+  return null;
+}
+
+async function stepMonths(state, qa, ctx) {
+  const nowBJ = new Date(Date.now() + 8 * 3600 * 1000);
+  const defaultMonth = `${nowBJ.getUTCFullYear() % 100} 年 ${nowBJ.getUTCMonth() + 1} 月`;
+  const sel = await selectMultiOrDefault(qa, ctx.qopts.recent_months, defaultMonth, "执行月", "📆");
+  if (sel === CANCEL || sel === BACK) return sel;
+  state.months = sel;
+  return null;
+}
+
+async function stepWeeks(state, qa, ctx) {
+  const nowBJ = new Date(Date.now() + 8 * 3600 * 1000);
+  const iso = isoWeek(nowBJ);
+  const defaultWeekPrefix = `${iso.year % 100}W${String(iso.week).padStart(2, "0")}`;
+  const matchedRecentWeek = (ctx.qopts.recent_weeks || []).find(w => w.startsWith(defaultWeekPrefix));
+  const defaultWeek = matchedRecentWeek || defaultWeekPrefix;
+  const sel = await selectMultiOrDefault(qa, ctx.qopts.recent_weeks, defaultWeek, "执行周", "📅");
+  if (sel === CANCEL || sel === BACK) return sel;
+  state.weeks = sel;
+  return null;
+}
+
+async function stepIsToday(state, qa, ctx) {
+  const pick = await pickWithBack(qa,
+    ["📥 进需求池(默认,后续在飞书勾今日)", "⭐ 今日(立即排进今日 journal)"],
+    ["false", "true"],
+    ctx.canBack
+  );
+  if (pick === CANCEL || pick === BACK) return pick;
+  state.isToday = pick === "true";
+  return null;
+}
+
+async function stepStatus(state, qa, ctx) {
+  const pick = await pickWithBack(qa,
+    [
+      "📋 Todo(默认 — 待办)",
+      "🔄 Doing(进行中)",
+      "💡 Idea(想法 / 草稿)",
+      "🚧 Block(受阻)",
+      "⏸ SubDone(子任务完成,主任务未完)",
+      "✅ Done(已完成 — 补录历史)",
+      "❌ cancel(取消)",
+    ],
+    ["todo", "doing", "idea", "block", "subdone", "done", "cancel"],
+    ctx.canBack
+  );
+  if (pick === CANCEL || pick === BACK) return pick;
+  state.status = pick;
+  return null;
+}
+
+async function stepTitle(state, qa, ctx) {
+  const raw = await inputWithBack(qa, "任务标题(简短;后续可加详情)", "", "");
+  if (raw === CANCEL || raw === BACK) return raw;
+  if (!raw || !raw.trim()) {
+    // 标题空 = 取消创建(顶层会 Notice)
+    return CANCEL;
+  }
+  state.title = raw.trim();
+  return null;
+}
+
+const STEP_DISPATCH = {
+  priority: stepPriority,
+  adhd: stepAdhd,
+  category: stepCategory,
+  parentLevel1: stepParentLevel1,
+  parentLevel2: stepParentLevel2,
+  projectMinor: stepProjectMinor,
+  subcategoryManual: stepSubcategoryManual,
+  due: stepDue,
+  months: stepMonths,
+  weeks: stepWeeks,
+  isToday: stepIsToday,
+  status: stepStatus,
+  title: stepTitle,
+};
+
+// 跑完整 wizard,返回 state(或 null 表示取消)
+async function runWizard(qaApi, qopts, Notice) {
+  const state = {
+    priority: null,
+    adhd: null,
+    category: null,
+    parentName: null,
+    parentRecordId: null,
+    subName: null,
+    projectMinor: [],
+    subcategoryList: [],
+    titlePrefix: "",
+    due: null,
+    months: [],
+    weeks: [],
+    isToday: false,
+    status: "todo",
+    title: null,
+  };
+
+  let i = 0;
+  while (i < STEPS.length) {
+    const stepName = STEPS[i];
+    if (!isStepActive(stepName, state)) { i++; continue; }
+    const canBack = findPrevActive(i, state) >= 0;
+    const result = await STEP_DISPATCH[stepName](state, qaApi, { canBack, qopts });
+    if (result === CANCEL) {
+      new Notice("❌ 已取消", 3000);
+      return null;
+    }
+    if (result === BACK) {
+      const prev = findPrevActive(i, state);
+      if (prev < 0) {
+        new Notice("⚠️ 已是第一步,无法后退(Esc 整体取消)", 3000);
+        continue;
+      }
+      i = prev;
+      continue;
+    }
+    i++;
+  }
+  return state;
+}
+
+// ============================================================
+// 入口
+// ============================================================
 module.exports = async function (params) {
   const { app, obsidian, quickAddApi } = params;
   const { Notice } = obsidian;
 
   try {
     // ============ Step 0: batch 拉飞书选项 ============
-    // v0.3.5: 一次 sync.py --quickadd-options 拿 大类 / 小类 / 月 / 周 4 类
-    // 失败降级:菜单仍能跑,但相关步骤显示「⚠️ 飞书查询失败」+ 跳过
     const { exec } = require("child_process");
     const util = require("util");
     const execAsync = util.promisify(exec);
@@ -119,7 +520,6 @@ module.exports = async function (params) {
     const execEnv = {
       ...process.env,
       PATH: `${userPaths.join(":")}:${process.env.PATH || ""}`,
-      // v0.3.3: 强制北京时区,sync.py 的 datetime.now() 不再受 shell TZ=PDT 影响
       TZ: "Asia/Shanghai",
     };
 
@@ -128,7 +528,7 @@ module.exports = async function (params) {
       subprojects_by_parent: {},
       recent_months: [],
       recent_weeks: [],
-      recent_project_minor: [],   // v0.3.8 加
+      recent_project_minor: [],
     };
     try {
       const optsCmd = `python3 "${syncScript.replace(/"/g, '\\"')}" --vault "${vaultRoot.replace(/"/g, '\\"')}" --quickadd-options`;
@@ -152,280 +552,17 @@ module.exports = async function (params) {
       );
     }
 
-    // ============ Step 1: 优先级 ============
-    const priorityChoice = await quickAddApi.suggester(
-      ["🔺 P0  紧急重要", "⏫ P1  本周必做", "🔼 P2  有空就做", "🔽 P3  非计划"],
-      ["P0", "P1", "P2", "P3"]
-    );
-    if (!priorityChoice) {
-      new Notice("❌ 已取消", 3000);
-      return;
-    }
+    // ============ 跑 state machine wizard ============
+    const state = await runWizard(quickAddApi, qopts, Notice);
+    if (!state) return;  // 用户 Esc 整体取消
 
-    // ============ Step 2: ADHD 优先级 ============
-    const adhdChoice = await quickAddApi.suggester(
-      ["🚨 待抢救", "⏰ 有 DDL", "🌱 自由待办", "❌ 跳过 / 不填"],
-      ["待抢救", "有 DDL", "自由待办", null]
-    );
-    if (adhdChoice === undefined) {
-      new Notice("❌ 已取消", 3000);
-      return;
-    }
-    console.log("[快记任务 v2] adhd:", adhdChoice);
+    console.log("[快记任务 v2] final state:", state);
 
-    // ============ Step 3: 业务大类(category)============ v0.4.1
-    // 飞书 task 表「大类」select 字段,4 个固定 enum:
-    //   📦 产品项目 / 🪣 杂务 / 🔧 技能工具 / 📚 领域学习
-    // ADHD 自觉察:把生活财务杂务 / 技能学习也纳入看板,避免被产品项目挤占丢失
-    //
-    // 分支:
-    //   - 产品项目 → 走 Step 3a / 3b / 3c(产品项目一级 / 子级 / 项目小类)
-    //   - 其他三类 → 跳过产品项目相关 3 步,走 Step 3d(subcategory 手输)
-    const categoryChoice = await quickAddApi.suggester(
-      ["📦 产品项目", "🪣 杂务", "🔧 技能工具", "📚 领域学习"],
-      ["产品项目", "杂务", "技能工具", "领域学习"]
-    );
-    if (!categoryChoice) {
-      new Notice("❌ 已取消", 3000);
-      return;
-    }
-    console.log("[快记任务 v2] category:", categoryChoice);
-
-    // 状态变量(横跨 3a/3b/3c/3d 用)
-    let chosenParentName = null;
-    let chosenParentRecordId = null;
-    let chosenSubName = null;
-    let finalProjectMinor = [];
-    let subcategoryList = [];          // v0.4.1:仅非产品项目分支用
-    let titlePrefix = "";
-
-    if (categoryChoice === "产品项目") {
-      // ============ Step 3a: 产品项目一级(parent_project)============
-      // 数据源:飞书产品项目表 where 活跃=true AND 父产品=空(v0.3.5)
-      // 数据空 → 跳过此步,不弹窗
-      if (qopts.active_top_level && qopts.active_top_level.length > 0) {
-        const topNames = qopts.active_top_level.map(p => p.name);
-        const topOptions = [
-          "❌ 跳过 / 不归类(临时小事)",
-          ...topNames.map(n => `📁 ${n}`),
-        ];
-        const topValues = ["__SKIP__", ...topNames];
-        const topPick = await quickAddApi.suggester(topOptions, topValues);
-        if (topPick === undefined) {
-          new Notice("❌ 已取消", 3000);
-          return;
-        }
-        if (topPick !== "__SKIP__") {
-          chosenParentName = topPick;
-          const found = qopts.active_top_level.find(p => p.name === topPick);
-          chosenParentRecordId = found?.record_id || null;
-        }
-        console.log("[快记任务 v2] parent:", chosenParentName, "(", chosenParentRecordId, ")");
-      } else {
-        console.log("[快记任务 v2] active_top_level 空,跳过产品项目一级菜单");
-      }
-
-      // ============ Step 3b: 产品项目子级(parent_subproject)============
-      // 数据源:qopts.subprojects_by_parent[选中一级 record_id]
-      // 一级没选 / 该一级无活跃子级 → 跳过此步
-      if (chosenParentRecordId && qopts.subprojects_by_parent) {
-        const subs = qopts.subprojects_by_parent[chosenParentRecordId] || [];
-        if (subs.length > 0) {
-          const subNames = subs.map(s => s.name);
-          const subOptions = [
-            `❌ 跳过(只填一级「${chosenParentName}」)`,
-            ...subNames.map(n => `📂 ${n}`),
-          ];
-          const subValues = ["__SKIP__", ...subNames];
-          const subPick = await quickAddApi.suggester(subOptions, subValues);
-          if (subPick === undefined) {
-            new Notice("❌ 已取消", 3000);
-            return;
-          }
-          if (subPick !== "__SKIP__") {
-            chosenSubName = subPick;
-            titlePrefix = `【${subPick}】`;
-          } else {
-            titlePrefix = `【${chosenParentName}】`;
-          }
-        } else {
-          titlePrefix = `【${chosenParentName}】`;
-        }
-      } else if (chosenParentName) {
-        titlePrefix = `【${chosenParentName}】`;
-      }
-      console.log("[快记任务 v2] subproject:", chosenSubName, "/ titlePrefix:", titlePrefix);
-
-      // ============ Step 3c: 项目小类(v0.3.8 加 / v0.3.9 改单选)============
-      // task 表 single-select 字段「项目小类」— 三级分类的最精细一层
-      // 例:布丁内容(子级) → 干货 / 训练营 / 课程产品
-      //     装备配置(子级) → Codex / claudecode / 软硬件
-      // 数据源:飞书 task 表 default_view_id 拉最近 5 条 distinct 用过的值
-      // v0.3.9 实证:飞书侧字段是 single-select(API 拒绝 2 个 enum 值),改为单选 UX
-      // frontmatter 仍写 list 格式(`project_minor: [训练营]`),保持 schema 一致性
-      if (qopts.recent_project_minor && qopts.recent_project_minor.length > 0) {
-        const pmOpts = ["❌ 跳过 / 不填(项目小类)", ...qopts.recent_project_minor.map(x => `🏷 ${x}`)];
-        const pmVals = ["__SKIP__", ...qopts.recent_project_minor];
-        const pmPick = await quickAddApi.suggester(pmOpts, pmVals);
-        if (pmPick === undefined) {
-          new Notice("❌ 已取消", 3000);
-          return;
-        }
-        if (pmPick !== "__SKIP__") {
-          finalProjectMinor.push(pmPick);
-        }
-      }
-      console.log("[快记任务 v2] project_minor:", finalProjectMinor);
-    } else {
-      // ============ Step 3d: 非产品项目分支 → subcategory 手输 ============ v0.4.1
-      // 杂务 / 技能工具 / 领域学习 → 弹手输框,逗号分隔,允许留空
-      // 写入 frontmatter `subcategory: [财务, 家务]`,推飞书「小类」multi-select 字段
-      // titlePrefix:有 subcategory → 【大类/小类】,无 → 【大类】
-      const subInput = await quickAddApi.inputPrompt(
-        `「${categoryChoice}」小类(可选,逗号分隔,如:财务, 家务;留空跳过)`,
-        "",
-        ""
-      );
-      if (subInput && subInput.trim()) {
-        subcategoryList = subInput
-          .split(/[,，]/)             // 中英文逗号都吃
-          .map(s => s.trim())
-          .filter(Boolean);
-      }
-      if (subcategoryList.length > 0) {
-        titlePrefix = `【${categoryChoice}/${subcategoryList.join("/")}】`;
-      } else {
-        titlePrefix = `【${categoryChoice}】`;
-      }
-      console.log("[快记任务 v2] subcategory:", subcategoryList, "/ titlePrefix:", titlePrefix);
-    }
-
-    // ============ Step 5: 截止日期 DDL ============
-    // preset:今天/明天/本周末/下周末/本月底/手输 + 跳过
-    const nowBJ = new Date(Date.now() + 8 * 3600 * 1000);
-    const toISODate = d => d.toISOString().slice(0, 10);
-    const addDays = (d, n) => {
-      const r = new Date(d);
-      r.setUTCDate(r.getUTCDate() + n);
-      return r;
-    };
-    const dayOfWeek = nowBJ.getUTCDay(); // 0=Sun 6=Sat
-    // 本周末:本周日(若今天周日,daysToSun=0 → 今天就是)
-    const daysToThisSun = (7 - dayOfWeek) % 7;
-    const thisWeekend = daysToThisSun === 0 ? nowBJ : addDays(nowBJ, daysToThisSun);
-    const nextWeekend = addDays(thisWeekend, 7);
-    const lastDayOfMonth = new Date(Date.UTC(nowBJ.getUTCFullYear(), nowBJ.getUTCMonth() + 1, 0));
-
-    const dueOptions = [
-      "❌ 跳过 / 无 DDL",
-      `⏰ 今天(${toISODate(nowBJ)})`,
-      `📅 明天(${toISODate(addDays(nowBJ, 1))})`,
-      `🌅 本周末(${toISODate(thisWeekend)})`,
-      `🗓 下周末(${toISODate(nextWeekend)})`,
-      `🌙 本月底(${toISODate(lastDayOfMonth)})`,
-      "📝 手输 YYYY-MM-DD",
-    ];
-    const dueValues = [
-      "__SKIP__",
-      toISODate(nowBJ),
-      toISODate(addDays(nowBJ, 1)),
-      toISODate(thisWeekend),
-      toISODate(nextWeekend),
-      toISODate(lastDayOfMonth),
-      "__INPUT__",
-    ];
-    const duePick = await quickAddApi.suggester(dueOptions, dueValues);
-    if (duePick === undefined) {
-      new Notice("❌ 已取消", 3000);
-      return;
-    }
-    let dueDate = null;
-    if (duePick === "__INPUT__") {
-      const manual = await quickAddApi.inputPrompt("截止日期 (YYYY-MM-DD)", "", toISODate(nowBJ));
-      if (manual && /^\d{4}-\d{2}-\d{2}$/.test(manual.trim())) {
-        dueDate = manual.trim();
-      } else if (manual) {
-        new Notice("⚠️ 格式不对(需 YYYY-MM-DD),DDL 跳过", 4000);
-      }
-    } else if (duePick !== "__SKIP__") {
-      dueDate = duePick;
-    }
-    // ADHD="有 DDL" 但 DDL 没填 → 警告但继续
-    if (adhdChoice === "有 DDL" && !dueDate) {
-      new Notice("⚠️ 选了「有 DDL」却没设截止日期,继续创建", 4000);
-    }
-    console.log("[快记任务 v2] due:", dueDate);
-
-    // ============ Step 6: 执行月 ============
-    const defaultMonth = `${nowBJ.getUTCFullYear() % 100} 年 ${nowBJ.getUTCMonth() + 1} 月`;
-    const selectedMonths = await selectMultiOrDefault(
-      quickAddApi, qopts.recent_months, defaultMonth, "执行月", "📆"
-    );
-    if (selectedMonths === null) {
-      new Notice("❌ 已取消", 3000);
-      return;
-    }
-    console.log("[快记任务 v2] months:", selectedMonths);
-
-    // ============ Step 7: 执行周 ============
-    const iso = isoWeek(nowBJ);
-    const defaultWeekPrefix = `${iso.year % 100}W${String(iso.week).padStart(2, "0")}`;
-    // 飞书侧的 option name 可能是 "26W22(5月25日-5月31日)",优先复用完整字符串
-    const matchedRecentWeek = (qopts.recent_weeks || []).find(w => w.startsWith(defaultWeekPrefix));
-    const defaultWeek = matchedRecentWeek || defaultWeekPrefix;
-    const selectedWeeks = await selectMultiOrDefault(
-      quickAddApi, qopts.recent_weeks, defaultWeek, "执行周", "📅"
-    );
-    if (selectedWeeks === null) {
-      new Notice("❌ 已取消", 3000);
-      return;
-    }
-    console.log("[快记任务 v2] weeks:", selectedWeeks);
-
-    // ============ Step 7: 是否今日 ============
-    const isToday = await quickAddApi.suggester(
-      ["📥 进需求池(默认,后续在飞书勾今日)", "⭐ 今日(立即排进今日 journal)"],
-      [false, true]
-    );
-    if (isToday === undefined) {
-      new Notice("❌ 已取消", 3000);
-      return;
-    }
-
-    // ============ Step 8: 执行状态(v0.4.1 加)============
-    // 飞书 task 表「执行状态」select 字段 + sync.py task_md_map 7 态全量
-    // 默认 Todo;常见非 Todo 场景:已经在做的事补建 task → Doing;暂未启动但 idea → Idea
-    // 显示按"创建时常用度"排序,Todo / Doing / Idea / Block 在前;Done / SubDone / cancel 兜底
-    const statusChoice = await quickAddApi.suggester(
-      [
-        "📋 Todo(默认 — 待办)",
-        "🔄 Doing(进行中)",
-        "💡 Idea(想法 / 草稿)",
-        "🚧 Block(受阻)",
-        "⏸ SubDone(子任务完成,主任务未完)",
-        "✅ Done(已完成 — 补录历史)",
-        "❌ cancel(取消)",
-      ],
-      ["todo", "doing", "idea", "block", "subdone", "done", "cancel"]
-    );
-    if (!statusChoice) {
-      new Notice("❌ 已取消", 3000);
-      return;
-    }
-    console.log("[快记任务 v2] status:", statusChoice);
-
-    // ============ Step 9: 标题 ============
-    const title = await quickAddApi.inputPrompt("任务标题(简短;后续可加详情)");
-    if (!title || !title.trim()) {
-      new Notice("❌ 标题为空,已取消", 3000);
-      return;
-    }
-    const titleTrimmed = `${titlePrefix}${title.trim()}`;
-
-    // ============ Step 10: 计算日期 + 路径 ============
+    // ============ 计算日期 + 路径 ============
     const bjISO = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 19);
     const dateContext = getDateContext(app);
     const createdISO = `${dateContext}T${bjISO.slice(11)}`;
+    const titleTrimmed = `${state.titlePrefix}${state.title}`;
     const safeTitle = titleTrimmed.replace(/[\\\/:*?"<>|]/g, "_");
     const filename = `${dateContext}-${safeTitle}.md`;
     const taskPath = `04 Inbox/task/${filename}`;
@@ -436,47 +573,38 @@ module.exports = async function (params) {
       return;
     }
 
-    // ============ Step 11: 生成 task md 内容 ============
+    // ============ 生成 task md 内容 ============
     // parent_project 语义(沿用 v0.2.4):**最终归属** — 选了小类用小类名,否则用大类名
-    // 飞书侧只有 1 个「产品项目」link 字段,必须指向最精细 record 才能按二级看板筛选
-    // parent_subproject 是 OB 侧 metadata(可空),给 OB base 视图分层显示用,不推飞书
-    const finalParentName = chosenSubName || chosenParentName;
+    const finalParentName = state.subName || state.parentName;
     const parentProjectLine = finalParentName
       ? `parent_project: "[[${finalParentName}]]"`
       : `parent_project:`;
-    const parentSubLine = chosenSubName
-      ? `parent_subproject: "[[${chosenSubName}]]"`
+    const parentSubLine = state.subName
+      ? `parent_subproject: "[[${state.subName}]]"`
       : `parent_subproject:`;
-    const adhdLine = adhdChoice ? `adhd_priority: ${adhdChoice}` : `adhd_priority:`;
-    const dueLine = dueDate ? `due: ${dueDate}` : `due:`;
-    const monthsLine = selectedMonths.length > 0
-      ? `iteration_month: [${selectedMonths.join(", ")}]`
+    const adhdLine = state.adhd ? `adhd_priority: ${state.adhd}` : `adhd_priority:`;
+    const dueLine = state.due ? `due: ${state.due}` : `due:`;
+    const monthsLine = state.months.length > 0
+      ? `iteration_month: [${state.months.join(", ")}]`
       : `iteration_month:`;
-    const weeksLine = selectedWeeks.length > 0
-      ? `iteration_week: [${selectedWeeks.join(", ")}]`
+    const weeksLine = state.weeks.length > 0
+      ? `iteration_week: [${state.weeks.join(", ")}]`
       : `iteration_week:`;
-    // v0.3.8: project_minor(项目小类)— 多选 list
-    const projectMinorLine = finalProjectMinor.length > 0
-      ? `project_minor: [${finalProjectMinor.join(", ")}]`
+    const projectMinorLine = state.projectMinor.length > 0
+      ? `project_minor: [${state.projectMinor.join(", ")}]`
       : `project_minor:`;
-    // v0.4.1: category(业务大类)— select 单选,4 选 1 必填(走到这一步必有值)
-    const categoryLine = `category: ${categoryChoice}`;
-    // v0.4.1: subcategory(小类)— 非产品项目分支手输 list;产品项目分支留空
-    const subcategoryLine = subcategoryList.length > 0
-      ? `subcategory: [${subcategoryList.join(", ")}]`
+    const categoryLine = `category: ${state.category}`;
+    const subcategoryLine = state.subcategoryList.length > 0
+      ? `subcategory: [${state.subcategoryList.join(", ")}]`
       : `subcategory:`;
-    // today_history 事件流:today=true 时立即 init 为 [dateContext];今日 journal 才能查到
-    const todayHistoryInit = isToday ? `[${dateContext}]` : `[]`;
-    // v0.3.6: today_source 区分"计划/非计划"(ADHD 自觉察用)
-    // 此 userscript 触发 = 当天 Cmd+P 临时建 → unplanned
-    // pull-today 流程 (sync.py) 设 today=true 时 → planned(早晨规划好拉的)
-    // today=false 时 today_source 留空(不在今日)
-    const todaySourceLine = isToday ? `today_source: unplanned` : `today_source:`;
+    const todayHistoryInit = state.isToday ? `[${dateContext}]` : `[]`;
+    // v0.3.6: today_source — 此 userscript 触发 = 当天临时建 → unplanned;today=false 时留空
+    const todaySourceLine = state.isToday ? `today_source: unplanned` : `today_source:`;
 
     const content = `---
-priority: ${priorityChoice}
-status: ${statusChoice}
-today: ${isToday}
+priority: ${state.priority}
+status: ${state.status}
+today: ${state.isToday}
 today_history: ${todayHistoryInit}
 ${todaySourceLine}
 created: ${createdISO}
@@ -487,16 +615,13 @@ ${subcategoryLine}
 ${projectMinorLine}
 ${adhdLine}
 estimate_hours:
-actual_hours:
 efficiency:
-quality:
 acceptance:
 thinking:
 resources:
 retrospective:
 ${parentProjectLine}
 ${parentSubLine}
-parent_task:
 parent_inspiration:
 日志: "[[${journalPath}]]"
 feishu_record:
@@ -511,14 +636,6 @@ tags:
 # ${titleTrimmed}
 
 ## 📝 执行概述
-
-
-## 📦 交付
-<!-- ⭐ 最重要字段。同步到飞书「交付」字段。完成后填:做出来什么?产出 / 文件 / 链接 / 截图 / 部署位置 等 -->
-
-
-## 👥 用户故事
-<!-- 同步到飞书「用户故事」字段。"作为 X,我希望 Y,以便 Z"句式。可选,产品类 task 用 -->
 
 
 ## ✅ 验收条件
@@ -538,9 +655,9 @@ tags:
 - [ ] ${titleTrimmed}
 `;
 
-    // ============ Step 12: 创建 task md ============
+    // ============ 创建 task md ============
     await app.vault.create(taskPath, content);
-    const todayBanner = isToday
+    const todayBanner = state.isToday
       ? "⭐ 今日 task(today: true,会进今日 journal「🎯 今日计划」段)"
       : "📥 进需求池(today: false,飞书勾今日 + pull-today 才进 journal)";
     new Notice(
@@ -548,7 +665,7 @@ tags:
       5000
     );
 
-    // ============ Step 13: 调 sync.py --task-md --apply ============
+    // ============ 调 sync.py --task-md --apply ============
     // 铁律 #1 例外:单条 CREATE 自动 apply,无覆盖风险
     const escapedTaskPath = `${vaultRoot}/${taskPath}`.replace(/"/g, '\\"');
     const syncCmd = `python3 "${syncScript.replace(/"/g, '\\"')}" --vault "${vaultRoot.replace(/"/g, '\\"')}" --task-md "${escapedTaskPath}" --apply`;
@@ -575,7 +692,7 @@ tags:
     }
 
     if (syncOK) {
-      const syncBanner = isToday
+      const syncBanner = state.isToday
         ? "⭐ 飞书「是否今日」已同步勾选 → 跑 pull-today 可写入今日 journal"
         : "📥 task 在需求池;后续在飞书勾「是否今日」+ pull-today 才进 journal";
       new Notice(
