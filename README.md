@@ -3,9 +3,13 @@
 > 📋 **Obsidian ↔ 飞书项目管理多维表 全闭环同步工具**。让你既享受 Obsidian 的 ADHD 友好「子弹笔记式任务流」,又拥有飞书的「项目看板可视化」,**两端永远一致**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.5.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.5.1-blue.svg)](CHANGELOG.md)
 
 ---
+
+## 🚀 v0.5.1 上线 — 时区可配置(默认 mac local,对齐飞书 app + Obsidian)(2026-05-29)
+
+v0.3.3 → v0.5.0 一直 hardcode UTC+8(北京时间),mac 在非北京时区(如 PDT)时跟飞书 app + Obsidian Daily Notes 不一致 → 跨天同步混乱。v0.5.1 加 `config.behavior.timezone` 选项,默认 `local`(mac 系统时区)。想保持原北京时间:config 改 `Asia/Shanghai`。详见 [CHANGELOG v0.5.1](CHANGELOG.md#v051---2026-05-29)。
 
 ## 🚀 v0.5.0 上线 — task md ↔ 飞书 5 字段补全(OB ↔ 飞书 1:1 闭环)(2026-05-28)
 

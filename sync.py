@@ -174,6 +174,34 @@ def is_short_record_id(record_id: str) -> bool:
     return not record_id.startswith("rec")
 
 
+def _now_with_tz(config: Optional[dict] = None) -> datetime:
+    """v0.5.1(2026-05-29):统一拿带时区的"现在",尊重 config.behavior.timezone
+
+    config.behavior.timezone 可选值:
+    - 'local'(默认): mac 系统本地时区(跟飞书 app / Obsidian Daily Notes 一致)
+    - 'Asia/Shanghai': 强制北京时间(v0.3.3 → v0.5.0 的老行为,跨时区移动时不变)
+    - 'America/Los_Angeles' / 'America/New_York' / 其他 IANA 时区名: 强制该时区
+    - 'UTC+8' / 'UTC-7' 等 offset: 强制 UTC 偏移
+
+    向后兼容:不传 config(为 None / 没 behavior.timezone 配置)→ 默认 local
+    """
+    if config is None:
+        return datetime.now().astimezone()
+    tz_name = (config.get("behavior") or {}).get("timezone", "local")
+    if tz_name == "local":
+        return datetime.now().astimezone()
+    if tz_name == "Asia/Shanghai":
+        return datetime.now(timezone(timedelta(hours=8)))
+    # IANA 时区(zoneinfo,Python 3.9+)
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo(tz_name))
+    except Exception:
+        # 解析失败 → fallback local + 打 warning
+        print(f"⚠️  config.behavior.timezone='{tz_name}' 无法解析,fallback 用 mac local 时区", file=sys.stderr)
+        return datetime.now().astimezone()
+
+
 def parse_callout_below(content: str, task_line_idx: int, callout_types: list) -> Optional[str]:
     """解析 task 行下方紧跟的 callout(用于抽交付字段)。
     返回 callout 正文(去掉 > 前缀,合并多行),无则返回 None
@@ -665,8 +693,8 @@ def ensure_feishu_doc(md_path: Path, config: dict, force_update: bool = False) -
         # 写回 frontmatter
         ok = update_md_frontmatter(md_path, {
             "feishu_doc_token": doc_id,
-            # v0.3.3: 显式 UTC+8,防 shell TZ=PDT 时算成美西时间
-            "feishu_doc_synced_at": datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%dT%H:%M:%S"),
+            # v0.5.1: 走 _now_with_tz 尊重 config.behavior.timezone
+            "feishu_doc_synced_at": _now_with_tz(config).strftime("%Y-%m-%dT%H:%M:%S"),
         })
         if not ok:
             print(f"    ⚠️  doc 创建成功但 frontmatter 回写失败,下次 sync 会重复创建")
@@ -854,8 +882,8 @@ def build_delivery_value(items: list, existing_value: str, config: dict) -> str:
     delivery_cfg = config.get("fields", {}).get("delivery", {})
     format_template = delivery_cfg.get("format_template", "{items_md}")
     append_template = delivery_cfg.get("append_template", "{original_text}\n\n{items_md}")
-    # v0.3.3: 显式 UTC+8,防 shell TZ=PDT 时算成美西时间
-    sync_date = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    # v0.5.1: 走 _now_with_tz 尊重 config.behavior.timezone
+    sync_date = _now_with_tz(config).strftime("%Y-%m-%d")
 
     # 格式化 items 为 markdown 列表
     # use_obsidian_uri=true → 用 obsidian:// 可点击链接;否则 [[wikilink]] 死链
@@ -3016,8 +3044,8 @@ def pull_from_feishu(since_date: Optional[str] = None, apply: bool = False) -> N
     """
     config = load_config()
     vault_root = find_vault_root()  # 关键: 找含 .obsidian/ 的目录, 不依赖 cwd
-    # v0.3.3: 显式 UTC+8,防 shell TZ=PDT 时 today journal 写错位置
-    today = datetime.now(timezone(timedelta(hours=8))).strftime(config["reverse"]["write_target"]["date_format"])
+    # v0.5.1: 走 _now_with_tz 尊重 config.behavior.timezone
+    today = _now_with_tz(config).strftime(config["reverse"]["write_target"]["date_format"])
     today_journal = vault_root / config["reverse"]["write_target"]["journal_dir"] / f"{today}.md"
 
     print(f"\n{'='*60}")
@@ -3795,7 +3823,7 @@ def _create_task_md_from_feishu_record(rid, row, fields_meta, config, vault_root
 
     # 文件名安全
     safe_title = re.sub(r'[/\\*?"<>|]', "_", title)
-    today_date = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    today_date = _now_with_tz(config).strftime("%Y-%m-%d")  # v0.5.1: 走 _now_with_tz
 
     task_dir = vault_root / "04 Inbox" / "task"
     task_dir.mkdir(parents=True, exist_ok=True)
@@ -3984,7 +4012,7 @@ def pull_today_from_feishu(apply: bool = False) -> None:
     # v0.2.5 修:plan_set_false 触发条件加 today_history 含今日的兜底
     # 原因:journal dataview 用 contains(today_history, this.file.day) 渲染
     # 如果 today 已是 false 但 today_history 仍含今日 → 仍然显示在今日 journal → 用户期望"清理"
-    today_date_for_scan = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    today_date_for_scan = _now_with_tz(config).strftime("%Y-%m-%d")  # v0.5.1
     for rid, entry in ob_index.items():
         if rid in today_record_ids:
             continue
@@ -4038,7 +4066,7 @@ def pull_today_from_feishu(apply: bool = False) -> None:
     # 但 today_history 只有 [..., 5/28],缺 5/29 → 5/29 journal dataview
     # contains(today_history, this.file.day) 不匹配 → 不显示
     # 修:预计算并标识,dry-run 显示 + apply 写入
-    today_date_iso_for_history = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    today_date_iso_for_history = _now_with_tz(config).strftime("%Y-%m-%d")  # v0.5.1
     history_diffs: dict = {}  # rid -> new today_history(含今日)
     for rid, _t, p in plan_skip:
         try:
@@ -4118,7 +4146,8 @@ def pull_today_from_feishu(apply: bool = False) -> None:
     created_count = 0
     field_sync_count = 0  # v0.3.7: 真改了字段的 task md 数
     # v0.3.0:append today_history 事件流(历史保真,见 rules/feishu-project-sync.md「今日 todo 历史保真」)
-    today_date_iso = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    # v0.5.1: 走 _now_with_tz 尊重 config.behavior.timezone
+    today_date_iso = _now_with_tz(config).strftime("%Y-%m-%d")
 
     def _merge_with_field_diff(rid_, base_updates: dict) -> dict:
         """v0.3.7: base updates(today/history/source)+ 飞书字段 diff updates 合并"""

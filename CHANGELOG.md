@@ -2,6 +2,41 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.5.1] - 2026-05-29 — 时区可配置(默认 mac local,对齐飞书 app + Obsidian Daily Notes)
+
+> **背景**:v0.3.3 → v0.5.0 一直 hardcode `Asia/Shanghai`(北京时间),不管 mac 系统时区。用户跨时区移动(如 mac 时区 = PDT)时,**飞书 app 用 mac 本地时区,sync.py 用北京时间**,两边对"今日"的认知差 1 天 → 跨天同步混乱。
+>
+> 用户原话:"飞书勾选你的时候是 mac 系统时间,但是拉回同步工作应该是 CC 设置的美国时间,这两个需要对应"
+
+### 🎯 改动
+
+| 改动 | 行为 |
+|---|---|
+| 新加 `_now_with_tz(config)` helper | 统一拿带时区的"现在",尊重 `config.behavior.timezone` |
+| `config.behavior.timezone` 新选项 | `'local'`(默认 / mac 本地)/ `'Asia/Shanghai'`(强制北京)/ 其他 IANA 时区 |
+| sync.py 7 处 hardcode UTC+8 全部替换 | feishu_doc_synced_at / sync_date / 反向 pull today / 反向建 today_date / plan_set_false history scan / plan_skip history compute / apply today_date_iso |
+| 默认行为变化 | **从 hardcode `Asia/Shanghai` 改为 mac local** |
+
+### ⚠️ 用户侧需要做的事(可选)
+
+如果你想**保持原 `Asia/Shanghai` 行为**(不管 mac 时区,永远北京时间):
+
+```yaml
+# 在你的 config.yaml 加 / 改
+behavior:
+  timezone: Asia/Shanghai
+```
+
+如果你接受新默认(跟 mac 本地时区一致,飞书 app + Obsidian Daily Notes + sync.py 三者对齐),**不用改任何东西**。
+
+### 🧪 实测
+
+```
+config timezone: local              → 2026-05-28 23:34 PDT
+config timezone: Asia/Shanghai      → 2026-05-29 14:34 UTC+08:00
+default(无 config)                 → 2026-05-28 23:34 PDT
+```
+
 ## [v0.4.2] - 2026-05-28 — Cmd+P「快记任务」加「⬅ 回上一步」(state machine 重构)
 
 > **背景**:v0.4.1 把 Cmd+P 流程从 9 步扩到 11 步后,用户反馈"一旦设置错误,要有退回上一步的操作"。原版只有 Esc=整体取消,中途选错只能整个重来 — 11 步太长,UX 摩擦明显。
