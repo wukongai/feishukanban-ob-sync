@@ -303,6 +303,25 @@ cat > "$SNIPPET_FILE" <<EOF
       "runOnStartup": false
     },
     "runOnStartup": false
+  },
+  {
+    "id": "push-all-today-choice",
+    "name": "🎯 批量推今日 task 到飞书(反向)",
+    "type": "Macro",
+    "command": true,
+    "macro": {
+      "name": "🎯 批量推今日 task 到飞书(反向)",
+      "id": "push-all-today-macro-id",
+      "commands": [{
+        "name": "扫全 vault today=true task → 各自 push 飞书(v0.4.0 Step 3)",
+        "type": "UserScript",
+        "id": "push-all-today-userscript-cmd",
+        "path": "$SCRIPTS_DIR/userscripts/quickadd-批量推今日-task-md.js",
+        "settings": {}
+      }],
+      "runOnStartup": false
+    },
+    "runOnStartup": false
   }
 ]
 EOF

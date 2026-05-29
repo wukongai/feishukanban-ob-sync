@@ -102,29 +102,58 @@ module.exports = async function (params) {
     const failMatch = stdout.match(/(\d+)\s*成功\s*\/\s*(\d+)\s*失败/);
     if (failMatch) failCount = parseInt(failMatch[2], 10);
 
-    // ============ Step 4: 自动刷新今日 journal(2026-05-26 v0.2.4 加)============
-    // 用户期望:UserScript 跑完后 journal 立即看到新渲染,不要手动 Cmd+R
-    // 方法 A:Dataview 命令强制 rebuild 全部 dataview 块
-    // 方法 B:重新加载所有打开 today journal 的 leaf(强制 preview rerender)
+    // ============ Step 4: 自动刷新今日 journal(2026-05-26 v0.2.4 加 / v0.4.0 根治升级)============
+    // 痛点:sync.py 外部改 frontmatter 后,Obsidian metadata cache 有延迟,
+    // dataview 接到 reload 命令时还是用老 cache → 即使调了 rebuild,task 也不显示新状态
+    // 根治链路:
+    //   等 1.5s(给 fs watcher + metadata cache 跑完)
+    //   → 调多个可能的 dataview command ID(版本兼容)
+    //   → 直接调 dataview plugin internal API(index reload)
+    //   → 重新打开 today journal 触发 preview rerender
     const bjDate = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
     const todayJournalPath = `journals/${bjDate}.md`;
     const journalFile = app.vault.getAbstractFileByPath(todayJournalPath);
 
+    // ⭐ 关键:等 fs watcher + metadata cache 同步(1.5s 测试稳)
+    await new Promise(r => setTimeout(r, 1500));
+
     try {
-      // 方法 A:调 Dataview 全局 rebuild 命令
-      const dvCommands = [
+      // 方法 A:调 Dataview 全局 rebuild 命令 — 试多个 ID(不同 dataview 版本不同)
+      const dvCommandIds = [
+        "dataview:dataview-drop-cache-and-reload",
+        "dataview:dataview-force-refresh-views",
         "dataview:dataview-rebuild-current-view",
+        "dataview:dataview-rebuild",
         "dataview:rebuild",
       ];
-      for (const cmdId of dvCommands) {
+      let dvFired = false;
+      for (const cmdId of dvCommandIds) {
         if (app.commands.findCommand?.(cmdId)) {
           app.commands.executeCommandById(cmdId);
-          console.log(`[拉今日 todo v1] 触发 ${cmdId}`);
+          dvFired = true;
+          console.log(`[拉今日 todo v1] dataview command 触发: ${cmdId}`);
           break;
         }
       }
+      if (!dvFired) console.warn("[拉今日 todo v1] 所有 dataview command ID 都未找到");
 
-      // 方法 B:对所有打开 today journal 的 leaf,触发 preview rerender
+      // 方法 B:直接调 dataview plugin internal API 强制 reindex
+      // API 名可能不同 dataview 版本不同,逐个 try
+      const dv = app.plugins.plugins["dataview"];
+      if (dv) {
+        if (typeof dv.index?.reload === "function") {
+          await dv.index.reload();
+          console.log("[拉今日 todo v1] dv.index.reload() 触发");
+        } else if (typeof dv.index?.touch === "function" && journalFile) {
+          // touch 单个文件 — 强制重 index
+          dv.index.touch(journalFile.path);
+          console.log(`[拉今日 todo v1] dv.index.touch(${todayJournalPath}) 触发`);
+        }
+      } else {
+        console.warn("[拉今日 todo v1] dataview plugin 未启用");
+      }
+
+      // 方法 C:对所有打开 today journal 的 leaf,触发 preview rerender
       if (journalFile) {
         const leaves = app.workspace.getLeavesOfType("markdown");
         for (const leaf of leaves) {
@@ -135,6 +164,22 @@ module.exports = async function (params) {
             }
           }
         }
+      }
+
+      // 方法 D(v0.4.0 Step 3 终极兜底):重启 dataview plugin
+      // 如果 A/B/C 都不生效 — disable + enable plugin 强制完全 reinit
+      // 所有 task md 重新 index,所有 dataview 块重新 query
+      // 视觉效果:dataview 块短暂 "Loading..." 1-2 秒,然后正确渲染
+      try {
+        if (app.plugins.plugins["dataview"] && app.plugins.disablePlugin && app.plugins.enablePlugin) {
+          console.log("[拉今日 todo v1] 终极兜底:disable+enable dataview plugin");
+          await app.plugins.disablePlugin("dataview");
+          await new Promise(r => setTimeout(r, 300));
+          await app.plugins.enablePlugin("dataview");
+          console.log("[拉今日 todo v1] dataview plugin 重启完成 — 全量重 index");
+        }
+      } catch (e) {
+        console.warn("[拉今日 todo v1] dataview 重启兜底失败:", e);
       }
     } catch (e) {
       console.warn("[拉今日 todo v1] 自动刷新失败(不阻塞流程):", e);

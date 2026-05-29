@@ -14,26 +14,32 @@ related: ["[[VERSION]]", "[[../CHANGELOG]]"]
 
 ---
 
-## 🏃 当前版本:**v0.3.8**(进行中 / 工作树)
+## 🏃 当前版本:**v0.5.0**(工作树已完成代码,待 commit + tag + push)
 
-### 内容(根据 README + install.sh + config.example.yaml 工作树状态推断)
+### 内容
 
-- ✨ **Cmd+P 快记任务 Step 4.5「项目小类」** — 三级分类最精细层
-  - 数据源:飞书 task 表 `project_minor` multi-select 字段最近 5 条 distinct
-  - 多选循环交互(类似 v0.3.5 iteration_* 多选)
-  - sync.py 三处同步:`parse_task_md` / `build_fields_payload` / `--quickadd-options`
+- ✨ **task md ↔ 飞书 5 字段补全** — OB ↔ 飞书 1:1 闭环
+  - 飞书侧 5 新字段:完成质量(select) / 用时(number) / 父任务(link 自关联本表) / 交付(text) / 用户故事(text)
+  - OB 侧表达:frontmatter 3 个(`quality / actual_hours / parent_task`)+ 正文 H2 段 2 个(`## 📦 交付 / ## 👥 用户故事`)
+  - sync.py 三处映射:**forward**(OB→飞书)+ **reverse**(飞书→OB pull-today)+ **反向建**(_create_task_md_from_feishu_record)
+  - 算法亮点:`parent_task` wikilink ↔ record_id 双向解析;首次反向同步正文 H2 段(新 helper `update_h2_section_in_task_md`)
 
 ### 进度
 
 | 项目 | 状态 |
 |---|---|
-| README + install.sh banner v0.3.8 | ✅ 工作树已改 |
-| config.example.yaml 加 `project_minor` 字段定义 | ✅ 工作树已改 |
-| sync.py `cmd_quickadd_options` 拉项目小类 distinct | ⏳ 待实施 |
-| userscript Step 4.5 多选 helper | ⏳ 待实施 |
-| task-template 加 `project_minor` 字段定义 | ⏳ 待实施 |
-| CHANGELOG v0.3.8 entry | ⏳ 待写 |
-| commit + tag + push | ⏳ 待做 |
+| sync.py 5 字段 forward + reverse + 反向建 | ✅ 工作树完成 |
+| config.yaml / config.example.yaml 5 字段配置 | ✅ 工作树完成 |
+| docs/feishu-schema.md 27 字段表 | ✅ 工作树完成 |
+| CHANGELOG v0.5.0 entry | ✅ 工作树完成 |
+| README + install.sh banner v0.5.0 | ✅ README 已改;install.sh 未涉及 |
+| dry-run 端到端验证(forward + reverse + parent_task 兜底) | ✅ 通过 |
+| 真机 apply 端到端验证 | ⏳ 留给用户在自己 vault 跑 |
+| commit + tag + push | ⏳ 待用户确认后做 |
+
+---
+
+## 📦 历史 v0.3.8(已发):Cmd+P 快记任务加 Step 4.5「项目小类」三级分类
 
 ---
 
@@ -68,7 +74,7 @@ v0.3.7 反向白名单未含 iteration_*(多选 list + 飞书侧 select_options 
 
 ---
 
-## 🎯 v0.4.0 候选(目标:跨 macOS / Linux / WSL2 兼容)
+## 🎯 v0.5.0 候选(目标:跨 macOS / Linux / WSL2 兼容)
 
 - ⏳ install.sh `sed -i ''` → 抽 helper 适配 BSD / GNU sed
 - ⏳ 路径处理统一 `pathlib`(已部分用,审计全文件)

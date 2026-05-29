@@ -3,9 +3,13 @@
 > 📋 **Obsidian ↔ 飞书项目管理多维表 全闭环同步工具**。让你既享受 Obsidian 的 ADHD 友好「子弹笔记式任务流」,又拥有飞书的「项目看板可视化」,**两端永远一致**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.3.8-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.5.0-blue.svg)](CHANGELOG.md)
 
 ---
+
+## 🚀 v0.5.0 上线 — task md ↔ 飞书 5 字段补全(OB ↔ 飞书 1:1 闭环)(2026-05-28)
+
+OB 端 5 月 28 日给 task 模板新加 **5 个字段**(完成质量 / 用时 / 父任务 / 交付正文段 / 用户故事正文段),sync.py 同步实现 **forward + reverse + 反向建** 三处映射。完成本版本后**飞书 app 上手编「交付」/「用户故事」等 text 字段会被 pull-today 拉回 OB**(用户原话:"任务 md 中最重要的是最重要的是交付内容")。亮点:`parent_task` 自关联 link 字段 wikilink ↔ record_id 双向解析;**首次反向同步正文 H2 段**,新加 `update_h2_section_in_task_md` helper(段不存在时自动在「## ✅ 完成标记」前插入)。详见 [CHANGELOG v0.5.0](CHANGELOG.md#v040---2026-05-28)。
 
 ## 🚀 v0.3.8 上线 — Cmd+P 快记任务加 Step 4.5「项目小类」三级分类(2026-05-28)
 

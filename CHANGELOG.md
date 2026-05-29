@@ -69,7 +69,7 @@ QuickAdd 的 Esc 返回 `undefined`,在 step fn 里被映射为 CANCEL,顶层 ru
 
 ### 🔬 流程对比
 
-**旧(v0.4.0)9 步**:
+**旧(v0.5.0)9 步**:
 ```
 1 优先级 → 2 ADHD → 3 产品项目一级 → 4 子级 → 4.5 项目小类 →
 5 DDL → 6 月 → 7 周 → 8 今日 → 9 标题(status 写死 todo)
@@ -110,6 +110,208 @@ QuickAdd 的 Esc 返回 `undefined`,在 step fn 里被映射为 CANCEL,顶层 ru
 - **老 task 不受影响** — 已存在的 task md `category:` / `status: todo` 维持原值
 
 ---
+
+## [v0.5.0] - 2026-05-28 — task md ↔ 飞书 5 字段补全 + **完整反向同步**(16 frontmatter + 7 H2 段) + Step 3 反向 push + 闭环修
+
+> **Step 3 扩展(本版本 3 块连续叠加)**:
+> - 🔥 修 `--task-md` 路径不存在的 fallback(Auto Note Mover 把 task md 移到 02 Area/08 炒股/ 后 sync.py 找不到)
+> - 🔥 修 `_scan_ob_task_md_by_feishu_record` 扫范围从 04 Inbox/task → 全 vault(解决 Auto Note Mover 移走后 pull-today 误判"飞书有 OB 无" + 死循环重建)
+> - ⭐ 加 `--push-all-today` 反向 OB→飞书 批量推 + Cmd+P「🎯 批量推今日 task」 userscript
+> - 🔧 H2 段顺序对齐飞书看板视图顺序(用户故事 → 验收 → 思路 → 概述 → 交付 → 资料 → 复盘)
+> - 🔧 dataview cache 根治:userscript 等 fs/metadata cache 同步 + 多 command ID + plugin API + journal preview rerender
+
+### 🆕 v0.5.0 Step 3 新增能力
+
+#### 1. `--push-all-today` 反向批量 push(对称 pull-today)
+
+```bash
+# 场景:AI 助手补充 OB task md 内容 → 一键批量推飞书
+python3 sync.py --push-all-today          # dry-run 看哪些会推
+python3 sync.py --push-all-today --apply  # 真推
+```
+
+- 扫全 vault 找 `today=true` task md → 各自调 `push_task_md` 单条 push
+- 冲突策略:OB 覆盖飞书(对称 pull-today 的"飞书覆盖 OB")
+- 防御:`build_fields_payload` 空字段不写,不会清空飞书侧已有数据
+- userscript:Cmd+P 「🎯 批量推今日 task 到飞书(反向)」
+
+#### 2. `push_task_md` refactor 加 `_silent_fail`
+
+原 sys.exit(1) → 加 `_silent_fail=True` 时返回 dict `{success, action, record_id, error, path}`,让批量调用方汇总错误而非中断。
+
+#### 3. `--task-md` 路径不存在 fallback
+
+userscript 创建 task md → Auto Note Mover 根据关键词(「炒股」/「财务」等)移动 → userscript 传给 sync.py 的原路径失效。
+
+修复:`push_task_md` 路径不存在时,自动 vault rglob 同名 .md,优先 `04 Inbox/task/`,fallback 全 vault。
+
+#### 4. `_scan_ob_task_md_by_feishu_record` 全 vault 扫 + duplicate 检测
+
+`pull_today_from_feishu` 的 ob_index 不再仅扫 `04 Inbox/task/`,改扫全 vault(排除 .obsidian / .git / .trash 等):
+- 解决"飞书有 OB 无"误判(原因:Auto Note Mover 移走后没被识别)
+- 解决死循环:sync.py 重建 task md → Auto Note Mover 又移走 → 留下 duplicate
+- 加 duplicate 检测:同一 rec_id 多 task md → 取 mtime 最新 + 报警让用户清理
+
+#### 5. H2 段顺序对齐飞书看板视图
+
+模板 + userscript + 反向建 sync.py 3 处统一改为:**用户故事 → 验收条件 → 执行思路 → 执行概述 → 交付 → 相关资料 → 复盘**(对齐用户截图所见的飞书看板字段顺序)。
+
+#### 6. dataview cache 根治
+
+`quickadd-拉今日todo.js` Step 4 改造:
+- 等 1.5s 让 fs watcher + metadata cache 同步(sync.py 外部改 frontmatter 后 Obsidian 有 race)
+- 试 5 个可能的 dataview command ID(`dataview:dataview-drop-cache-and-reload` / `dataview:dataview-force-refresh-views` / `dataview:dataview-rebuild-current-view` / `dataview:dataview-rebuild` / `dataview:rebuild`)
+- 直接调 `app.plugins.plugins["dataview"].index.reload()` plugin API
+- 重新打开 today journal 触发 preview rerender
+
+`quickadd-批量推今日-task-md.js` 同款机制。
+
+### 🛠 改动文件汇总(v0.5.0 完整 + Step 2 + Step 3)
+
+| 文件 | 改动 |
+|---|---|
+| `sync.py` | `push_task_md`:路径 fallback + `_silent_fail` refactor |
+|  | `_scan_ob_task_md_by_feishu_record`:scan_root 改 vault_root + duplicate 检测 |
+|  | `_create_task_md_from_feishu_record`:扫 vault 防重复 + H2 段顺序新版 |
+|  | `push_all_today_task_md` 新函数 + `--push-all-today` CLI |
+| `obsidian-assets/userscripts/quickadd-拉今日todo.js` | dataview cache 根治(等待 + 多 command ID + plugin API + journal rerender)|
+| `obsidian-assets/userscripts/quickadd-快记任务-v2-task-md.js` | 内嵌模板补 5 字段 + H2 段顺序新版 |
+| `obsidian-assets/userscripts/quickadd-批量推今日-task-md.js`(新)| 调 `--push-all-today --apply` + 解析 stdout + Notice |
+| `obsidian-assets/templates/task-template.md` | frontmatter 加 actual_hours/quality/parent_task + H2 段顺序新版 |
+| `install.sh` | QuickAdd choices JSON 加 `push-all-today-choice` |
+| `config.yaml` + `config.example.yaml` | `field_name: 父任务` → `field_name: 相关任务` |
+
+> **背景**:OB 端 5 月 28 日给 task 模板新加了 5 字段(完成质量 / 用时 / 父任务 / 交付正文段 / 用户故事正文段),sync.py 同步实现 **forward + reverse + 反向建** 三处映射,完成 OB ↔ 飞书 task 字段双向闭环。
+>
+> **Step 2 扩展(本版本同期)**:用户反馈"不只 5 字段,我要全部反向同步" → 调飞书 API 拉一手字段表后发现 OB rules 误标"飞书无对应"的字段实际存在,反向同步范围扩展为 **16 frontmatter + 7 H2 段**(原 v0.5.0 5 字段基础 + 加 efficiency / project_minor / iteration_* / parent_project + execution_summary / acceptance / **thinking** / **resources** / retrospective_text)。
+>
+> 用户原话:"任务 md 中最重要的是最重要的是交付内容" + "不是 5 个字段吧,我需要的是全部字段拉回啊"。
+
+### 🔥 P0 修 bug:飞书字段名「父任务」→「相关任务」
+
+Step 2 调飞书 API 拉一手字段表时发现,飞书表里**根本没有「父任务」字段** — 实际字段名是「**相关任务**」(`fldm6h6LjN`,link 双向自关联,飞书自动反向显示成"子任务")。v0.5.0 第一版 config 写错字段名 → forward apply 时飞书 cli 会返回"字段不存在"错误。
+
+修复:
+- `config.yaml` + `config.example.yaml`:`field_name: 父任务` → `field_name: 相关任务`
+- `sync.py:_extract_fields_from_feishu_row`:`_link_first_id(_get("父任务"))` → `_link_first_id(_get("相关任务"))`
+
+### 🐛 修 v0.3.7 老 bug:`parent_project` 反向同步 startswith 启发 fallback 污染
+
+Step 2 实施时发现 `_extract_fields_from_feishu_row` 有一段 v0.3.7 加的 fallback:
+```python
+if not parent_project and title.startswith("【布丁"):
+    parent_project = "00 布丁"
+```
+
+在完整反向同步场景下,这会把所有「【布丁」开头的 task md 的 `parent_project` 改为 "00 布丁",**篡改用户实际选的子级关联**(如 "布丁开发" / "布丁内容")。实测 dry-run 命中 4 条假 diff。
+
+修复:**完全删除** startswith 启发 fallback。反向 parent_project 只取「产品项目」link 字段的 text(无 link → 空 → PRESERVE 保留 OB)。
+
+### 📊 反向同步覆盖范围(Step 2 后)
+
+| 类别 | v0.5.0 第一版 | v0.5.0 Step 2 后 |
+|---|---|---|
+| **Frontmatter 反向同步白名单** | 11 字段 | **16 字段**(+ efficiency / project_minor / iteration_week / iteration_month / parent_project)|
+| **正文 H2 段反向同步白名单** | 2 段(交付 / 用户故事)| **7 段**(+ 执行概述 / 验收条件 / 执行思路 / 相关资料 / 复盘)|
+
+⭐ 特别澄清:OB rules 之前标「执行思路 / 相关资料」为"飞书无对应,sync 静默跳过" — **错误**。调飞书 API(`feishu-cli bitable field list`)一手验证:`fldFbyifxQ`(执行思路 text)和 `fldulkShMa`(相关资料 text)都存在。v0.5.0 Step 2 把这两段纳入双向同步。
+
+### 🎯 5 字段双向同步
+
+| 飞书字段 | 类型 | OB 表达 | Forward | Reverse |
+|---|---|---|---|---|
+| **完成质量** | select 单选 | frontmatter `quality: 高/中/低` | ✅ | ✅ |
+| **用时** | number | frontmatter `actual_hours: 1.5` | ✅ | ✅ |
+| **父任务** | link(自关联本表) | frontmatter `parent_task: "[[<父 task 文件名>]]"` | ✅ wikilink → vault 反查 record_id | ✅ record_id → ob_index → wikilink |
+| **交付** | text | 正文「## 📦 交付」H2 段 | ✅ | ✅ ⭐ 首次反向同步正文段 |
+| **用户故事** | text | 正文「## 👥 用户故事」H2 段 | ✅ | ✅ |
+
+### 🔬 算法亮点
+
+#### parent_task 双向 wikilink ↔ record_id 解析
+
+- **Forward**(OB→飞书):`resolve_parent_task_record_id()` — `[[2026-05-20-XXX]]` → vault `04 Inbox/task/2026-05-20-XXX.md`(直接路径优先 + rglob fallback) → 读 frontmatter `feishu_record` → 飞书 link 字段写 `[<rec_id>]`(数组形态)
+- **Reverse**(飞书→OB):飞书 link 字段返回 `[{"id": "rec..."}]` → 反查 `_scan_ob_task_md_by_feishu_record` 索引 → 取该 path 的 stem → 拼 `[[<stem>]]`
+- **失败兜底**:父 task 未 sync(无 feishu_record)/ vault 内找不到 → warning + 跳过该字段(**不阻断其他字段**同步)
+
+#### H2 段反向同步(首次实现)
+
+- 新函数 `update_h2_section_in_task_md(p, h2_title, new_content)`:
+  - 段已存在 → 替换段内容(保留 H2 标题行)
+  - 段不存在 → 在「## ✅ 完成标记」之前插入完整新 H2 段(老 task md 兼容)
+  - 找不到「## ✅ 完成标记」标识 → 放弃插入(防御误改不规范 task md)
+- 防御策略对齐 `PRESERVE_OB_IF_FS_EMPTY`:**飞书侧空 → 保留 OB**(避免误清 OB 内有效内容)
+- 新白名单 `_REVERSE_SYNC_H2_WHITELIST = [("delivery", "## 📦 交付", "交付"), ("user_story", "## 👥 用户故事", "用户故事")]`
+
+#### dry-run 显示完整 H2 段 diff
+
+```
+--- 🔄 字段同步详情(飞书 → OB,共 1 条 task md)---
+  📝 2026-05-26-【布丁开发】功能：日常习惯打卡.md
+     • 📑 交付: (空) → 交付物: / - [2026-05-08-习惯打卡UI重做-设计文档](https://fei...
+```
+
+多行内容自动 `\n` → ` / ` 压缩 + 截 50 字,方便用户审 diff。
+
+### 🛠 改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `sync.py` | `parse_task_md`:加 delivery / user_story H2 段抽取 + quality / actual_hours / parent_task frontmatter 抽取 |
+|  | `build_fields_payload`:task_md_fields 分发 case 加 quality(select 单选)/ actual_hours(number)/ parent_task(link 自关联,新 `resolve_parent_task_record_id` helper)/ delivery + user_story(text catch-all) |
+|  | `push_task_md` dry-run 输出加 5 字段提示 |
+|  | `_extract_fields_from_feishu_row`:加 ob_index 可选参数;返回 dict 加 quality / actual_hours / parent_task / delivery / user_story 5 key;`_text_value` / `_link_first_id` 新 helper |
+|  | `_REVERSE_SYNC_FIELD_WHITELIST` 加 quality / actual_hours / parent_task |
+|  | 新加 `_REVERSE_SYNC_H2_WHITELIST` / `_read_h2_section_content` / `update_h2_section_in_task_md` / `_diff_h2_sections_with_feishu` |
+|  | `_diff_frontmatter_with_feishu` `PRESERVE_OB_IF_FS_EMPTY` 加 3 新字段 |
+|  | `_create_task_md_from_feishu_record`:加 ob_index 参数;模板加 actual_hours / quality / parent_task frontmatter + ## 📦 交付 / ## 👥 用户故事 H2 段 |
+|  | `pull_today_from_feishu`:`_compute_field_diff` 计算 H2 段 diff;3 个 apply 分支(plan_set_true / plan_skip / plan_set_false)都调 `_apply_h2_updates` 同步 H2;plan_missing 调 `_create_task_md_from_feishu_record` 时传 ob_index |
+| `config.example.yaml` | `task_md_fields` 加 quality / actual_hours / parent_task / delivery / user_story 配置;`reverse.field_to_ob` 加 5 个 `*_field` 文档项 |
+| `config.yaml` | 同上(用户私域) |
+| `docs/feishu-schema.md` | 字段总数 22 → 27,加 5 新字段定义;feishu-cli 创建脚本加 5 行;v0.5.0 字段说明 section |
+| `obsidian-assets/userscripts/quickadd-快记任务-v2-task-md.js` | **真机验收时发现的 bug 修补** — Cmd+P 快记任务 userscript **内嵌**模板字符串(不读 OB 端 task 模板文件),独立加 5 字段:frontmatter `actual_hours / quality / parent_task` 3 行 + 正文「## 📦 交付」/「## 👥 用户故事」2 个 H2 段(各带 HTML 注释)。**用户侧重装**:`bash install.sh --apply --force --scripts-dir ...` + Cmd+Q 重启 Obsidian 让 QuickAdd 加载新版 |
+
+### ⚠️ 用户侧需要做的事
+
+#### ✅ 必做 1:飞书表后台加 5 字段
+
+按 `docs/feishu-schema.md` 的 feishu-cli 命令 + 你自己的 BASE/TABLE 跑一下,或在飞书后台 UI 手建:
+
+- 「完成质量」select 单选,选项 `高 / 中 / 低`
+- 「用时」number,formatter `0.0`
+- 「父任务」link,**自关联到本表**(选当前 table_id 作为 link_table)
+- 「交付」text
+- 「用户故事」text
+
+#### ✅ 必做 2:把 `config.example.yaml` 的 5 新字段配置同步到你的 `config.yaml`
+
+找到 `task_md_fields:` 段 `execution_summary:` 下面,加 5 个新 block(完整内容见 `config.example.yaml` 的「v0.5.0 加:5 字段补全」section)。
+
+#### ✅ 必做 3:OB 端 task 模板加 5 字段
+
+这一步**已经被 OB CC 在 2026-05-28 做完**:
+- `03 Resources/素材库/模版/task 模版.md` 加 `quality / actual_hours / parent_task` frontmatter + ## 📦 交付 / ## 👥 用户故事 H2 段
+- `.claude/rules/base-and-frontmatter.md` task md schema 同步
+- `.claude/rules/feishu-project-sync.md` 1:1 映射表 + 反向同步白名单 audit
+
+#### 可选 4:批量给历史 task md 补 5 字段
+
+老 task md(2026-05-28 前建的)没有这 5 字段。如果想让历史 task md 也用上反向同步:
+- 简单粗暴:每次完成历史 task 时手动在 frontmatter 加 quality / actual_hours,在正文加 ## 📦 交付 段
+- 批量:写个 helper 脚本扫 `04 Inbox/task/*.md` → frontmatter 加缺的 key(空值即可)+ 正文在 `## ✅ 完成标记` 前插 ## 📦 交付 / ## 👥 用户故事 段
+
+不补也行 — sync.py 会对缺字段 / 缺段静默跳过,不报错。
+
+### 🧪 验收测试结果(实施 CC 跑)
+
+- ✅ **Phase 2 Forward dry-run**:`/tmp/test-5字段-forward.md`(5 字段全填 + parent_task 指向已 sync 的 `2026-05-28-test-反向-subdone-v2.md`)→ payload 含「完成质量 ['高']」「用时 1.5」「父任务 ['recvkROcczcHOn']」「交付 多行文本」「用户故事 文本」5 字段
+- ✅ **Phase 2 parent_task 兜底**:同上 md parent_task 改指 `[[2099-12-31-不存在的父任务]]` → dry-run 输出 `⚠️ parent_task 找不到 vault 内对应 task md → 跳过该字段` + payload 中无「父任务」字段(其他 4 字段照常)
+- ✅ **Phase 3 Reverse pull-today dry-run**:真实场景命中 — `2026-05-26-【布丁开发】功能：日常习惯打卡.md` 飞书侧「交付」非空 + OB 端 ## 📦 交付 段空 → dry-run 显示 `📑 交付: (空) → 交付物: / - [2026-05-08-习惯打卡UI重做-设计文档](https://fei...`(多行 `\n` → ` / ` 截 50 字)
+
+### 🚫 非目标(留 P2 backlog)
+
+- 不做附件字段(飞书「附件」attachment 类型)— 架构复杂,需 OSS / 飞书文件 token 转换单独 spec
+- 不动「执行思路」/「相关资料」字段 — OB 端有但飞书表无,继续 sync 静默跳过
 
 ## [v0.3.8] - 2026-05-28 — Cmd+P 快记任务加 Step 4.5「项目小类」三级分类
 

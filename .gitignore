@@ -34,3 +34,6 @@ tutorials/*/local-config.yaml
 
 # install.sh 生成的 QuickAdd choices snippet
 .quickadd-choices.json
+
+# Content-factory skill symlinks(本项目按需 install,不入 git)
+.claude/skills/

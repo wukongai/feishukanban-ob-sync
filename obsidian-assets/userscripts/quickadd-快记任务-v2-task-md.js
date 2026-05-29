@@ -615,13 +615,12 @@ ${subcategoryLine}
 ${projectMinorLine}
 ${adhdLine}
 estimate_hours:
+actual_hours:
 efficiency:
-acceptance:
-thinking:
-resources:
-retrospective:
+quality:
 ${parentProjectLine}
 ${parentSubLine}
+parent_task:
 parent_inspiration:
 日志: "[[${journalPath}]]"
 feishu_record:
@@ -635,13 +634,23 @@ tags:
 
 # ${titleTrimmed}
 
-## 📝 执行概述
+<!-- v0.4.0(2026-05-28)H2 段顺序对齐飞书看板视图字段顺序 -->
+
+## 👥 用户故事
+<!-- 同步到飞书「用户故事」字段。"作为 X,我希望 Y,以便 Z"句式。可选,产品类 task 用 -->
 
 
 ## ✅ 验收条件
 
 
 ## 💡 执行思路
+
+
+## 📝 执行概述
+
+
+## 📦 交付
+<!-- ⭐ 最重要字段。同步到飞书「交付」字段。完成后填:做出来什么?产出 / 文件 / 链接 / 截图 / 部署位置 等 -->
 
 
 ## 🔗 相关资料

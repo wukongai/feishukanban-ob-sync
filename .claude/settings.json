@@ -56,15 +56,15 @@
 
       "Bash(/Users/aim5/Documents/CodingProject/feishukanban-ob-sync/install.sh:*)",
       "Bash(./install.sh:*)",
-      "Bash(bash install.sh:*)"
+      "Bash(bash install.sh:*)",
+
+      "Read(//**)"
     ],
     "deny": [
       "Bash(git push --force:*)",
       "Bash(git push -f:*)",
       "Bash(git reset --hard:*)",
       "Bash(git clean -fd:*)",
-      "Write(config.yaml)",
-      "Edit(config.yaml)",
       "Write(/Users/aim5/.claude/settings.json)",
       "Edit(/Users/aim5/.claude/settings.json)",
       "Write(/Users/aim5/.claude/CLAUDE.md)",

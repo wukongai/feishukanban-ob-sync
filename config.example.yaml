@@ -182,6 +182,42 @@ task_md_fields:
     field_name: 复盘               # text(从 task md「## 🪞 复盘」段抽)
   execution_summary:
     field_name: 执行概述           # text(从 task md「## 📝 执行概述」段抽,也是正文主体)
+
+  # === 2026-05-28 v0.4.0 加:5 字段补全(OB ↔ 飞书 1:1 闭环)===
+
+  # quality(完成质量):task md frontmatter `quality` → 飞书「完成质量」select(高/中/低)
+  # 完成 task 时回填
+  quality:
+    field_name: 完成质量            # select(单)— null = 跳过
+
+  # actual_hours(实际用时):task md frontmatter `actual_hours: 1.5` → 飞书「用时」number
+  # 完成 task 时回填
+  actual_hours:
+    field_name: 用时                # number — null = 跳过
+
+  # parent_task(父任务/相关任务):task md frontmatter `parent_task: "[[<父 task 文件名>]]"`
+  # → 飞书「相关任务」link 字段(自关联到本表,task 拆分关系)
+  # ⚠️ 飞书表的字段名是「相关任务」(双向 link,飞书会自动反向显示"子任务"),不是「父任务」
+  # sync.py 流程:
+  #   1. wikilink 解析 → 取 stem(如 "2026-05-28-test1")
+  #   2. vault `04 Inbox/task/<stem>.md` 直接找,失败 fallback rglob 该目录
+  #   3. 读其 frontmatter.feishu_record → 飞书 link 字段写 [rec_id](数组形式)
+  #   4. 父 task 无 feishu_record / 找不到 → warning + 跳过该字段(其他字段不阻断)
+  parent_task:
+    field_name: 相关任务            # link 双向(自关联本表)— null = 跳过
+
+  # delivery(交付正文段):task md「## 📦 交付」H2 段内容 → 飞书「交付」text
+  # ⭐ 用户视角"最重要字段";反向 pull-today 也拉回此段
+  # 注:跟顶层 fields.delivery(D 混合架构,journal inline 模式专用)是两套独立配置
+  # task md 模式优先 H2 段;journal inline 模式仍走 D 混合(扫 wikilink / callout / backlinks)
+  delivery:
+    field_name: 交付                # text — null = 跳过
+
+  # user_story(用户故事正文段):task md「## 👥 用户故事」H2 段内容 → 飞书「用户故事」text
+  # 可选,产品类 task 用("作为 X,我希望 Y,以便 Z"句式)
+  user_story:
+    field_name: 用户故事            # text — null = 跳过
+
   # due(截止日期):飞书表暂无对应字段。等用户在后台加 datetime 字段后填 field_name
   due:
     field_name: null               # null = 跳过
@@ -262,6 +298,14 @@ reverse:
       P1: "⏫"
       P2: "🔼"
       P3: "🔽"
+    # 2026-05-28 v0.4.0 加:补 5 字段反向同步配置(纯文档,_extract_fields_from_feishu_row 内部 hard-code)
+    # 这些字段已加入 _REVERSE_SYNC_FIELD_WHITELIST(frontmatter 3 个)
+    # + _REVERSE_SYNC_H2_WHITELIST(正文 H2 段 2 个)
+    quality_field: 完成质量
+    actual_hours_field: 用时
+    parent_task_field: 相关任务      # 飞书表实际字段名,非「父任务」
+    delivery_field: 交付
+    user_story_field: 用户故事
 
   # 写入位置策略
   write_target:

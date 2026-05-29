@@ -468,6 +468,9 @@ def _format_yaml_value(value) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     # list → inline YAML(2026-05-26 v0.3.0 加,for today_history 事件流)
+    # v0.4.0+ Step 3(2026-05-29)反转决策:回到 unquoted ISO date —
+    # console 诊断证明 unquoted YAML date → dataview luxon DateTime → contains 比较正确工作
+    # quoted string 反而被 dataview 当 string,跟 this.file.day(DateTime)类型不匹配
     if isinstance(value, list):
         items = [_format_yaml_value(v) for v in value]
         return "[" + ", ".join(items) + "]"
@@ -1077,6 +1080,9 @@ def parse_task_md(md_path: Path, config: dict) -> Optional[dict]:
     thinking = extract_section(body, "💡 执行思路")
     resources = extract_section(body, "🔗 相关资料")
     retrospective_text = extract_section(body, "🪞 复盘")
+    # v0.4.0(2026-05-28):5 字段补全 — 新加 H2 段 + 3 frontmatter
+    delivery_text = extract_section(body, "📦 交付")
+    user_story_text = extract_section(body, "👥 用户故事")
 
     feishu_record = fm.get("feishu_record")
     if feishu_record and not isinstance(feishu_record, str):
@@ -1113,12 +1119,20 @@ def parse_task_md(md_path: Path, config: dict) -> Optional[dict]:
         "project_minor": _ensure_list(fm.get("project_minor")),
         "adhd_priority": fm.get("adhd_priority"),
         "estimate_hours": fm.get("estimate_hours"),
+        # v0.4.0(2026-05-28): actual_hours / quality / parent_task / delivery / user_story
+        "actual_hours": fm.get("actual_hours"),
         "efficiency": fm.get("efficiency"),
+        "quality": fm.get("quality"),
         "acceptance": acceptance,
         "thinking": thinking,
         "resources": resources,
         "retrospective_text": retrospective_text,
         "execution_summary": execution_summary,
+        "delivery": delivery_text,
+        "user_story": user_story_text,
+        # parent_task: "[[2026-05-20-XXX]]" → "2026-05-20-XXX"(裸 stem)
+        # build_fields_payload 时再做 vault 查 record_id 解析
+        "parent_task": _strip_wikilink(fm.get("parent_task")),
         "due": _date_str(fm.get("due")),
         # parent_project: 2026-05-26 v0.2.2 加 — task 关联到具体大项目
         # frontmatter 形如 `parent_project: "[[<项目名>]]"` → 抽出项目名(去掉 [[]])
@@ -1366,6 +1380,57 @@ def resolve_link_record_id(
 
     print(f"⚠️  「{ob_value}」(去前缀「{stripped}」)在飞书关联表里找不到,parent_project 此条跳过")
     print(f"    可用项目: {', '.join(sorted(index.keys())[:10])}{'...' if len(index) > 10 else ''}")
+    return None
+
+
+def resolve_parent_task_record_id(parent_task_name: str, vault_root: Path) -> Optional[str]:
+    """v0.4.0(2026-05-28):把 OB task md wikilink 名解析为飞书「父任务」link 字段需要的 record_id
+
+    "父任务"字段在飞书侧是 link 类型自关联到本表(项目管理表),需要传 record_id 数组。
+    本函数 vault 内查同名 task md → 读其 frontmatter.feishu_record → 返回。
+
+    Args:
+        parent_task_name: 已去 [[ ]] 的 task md stem(如 "2026-05-20-test1")
+        vault_root: vault 根目录(用于查 04 Inbox/task/<name>.md)
+
+    Returns:
+        飞书 record_id(已 sync 的父 task)或 None(找不到 / 未 sync,调用方应跳过)
+
+    匹配优先级:
+        1. vault_root / "04 Inbox/task" / f"{name}.md"(直接路径,O(1))
+        2. fallback:vault_root / "04 Inbox/task" 内 rglob f"{name}.md"(防御性,处理子目录)
+    """
+    if not parent_task_name:
+        return None
+
+    task_dir = vault_root / "04 Inbox" / "task"
+    if not task_dir.exists():
+        print(f"⚠️  parent_task 查找失败:vault 内 {task_dir} 不存在")
+        return None
+
+    candidates = []
+    direct = task_dir / f"{parent_task_name}.md"
+    if direct.exists():
+        candidates.append(direct)
+    else:
+        candidates = list(task_dir.rglob(f"{parent_task_name}.md"))
+
+    if not candidates:
+        print(f"⚠️  parent_task 找不到 vault 内对应 task md: [[{parent_task_name}]] → 跳过该字段")
+        return None
+
+    for p in candidates:
+        try:
+            text = p.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        fm, _, _ = parse_frontmatter(text)
+        if fm:
+            rec_id = fm.get("feishu_record")
+            if rec_id and isinstance(rec_id, str) and rec_id.strip() and not rec_id.startswith("#"):
+                return rec_id.strip()
+
+    print(f"⚠️  parent_task `[[{parent_task_name}]]` 在 vault 找到 task md 但无 feishu_record(未 sync)→ 跳过该字段")
     return None
 
 
@@ -1686,11 +1751,15 @@ def cmd_quickadd_options(config: dict) -> dict:
         records = _extract_link_table_records(
             link_table_id, name_field, parent_field, active_field, config
         )
-        # 大类:活跃 + 父=空
+        # v0.3.9 修:"大类"扁平化展示所有 active=true(不再按"父=空"过滤)
+        # 原因:飞书产品项目表里很多活跃叶子项目(如「内容工厂」「AiCoding训练营」)
+        # 挂在 inactive 父下面 — 用户视角它们就是"可选项目",不应该被过滤掉
+        # 用户选完后,userscript Step 4 用 subprojects_by_parent[record_id] 查有无子级
+        # 有就弹二级菜单,无(叶子)就直接跳过
         result["active_top_level"] = [
             {"name": r["name"], "record_id": r["record_id"]}
             for r in records
-            if r["active"] and not r["parent_ids"]
+            if r["active"]
         ]
         # 小类:活跃,按 parent_id groupby
         sub_by_parent: dict[str, list[dict]] = {}
@@ -1964,11 +2033,17 @@ def build_fields_payload(task: dict, config: dict, vault_root: Path, existing_de
             value = task.get(ob_key)
             if value is None or value == "":
                 continue
-            # select(多)字段需要 list 包裹(v0.3.8: project_minor 走同分支)
-            if ob_key in ("subcategory", "project_minor"):
+            # 飞书侧所有 select 字段(单/多选)都要 list 包裹(v0.3.9 实证:cli list 返回 ['P0'] 这种格式)
+            # 历史 record 验证:价值优先级 ['P0'] / 执行状态 ['Todo'] / 项目小类 ['claudecode'] 全是 list
+            # OB frontmatter 写单 str 也兼容(自动包 list),写 list 也兼容(直接用)
+            # v0.3.8: subcategory / project_minor;v0.3.9 补:priority_str / category / adhd_priority / efficiency
+            # v0.4.0(2026-05-28):quality(高/中/低 单选)
+            if ob_key in ("subcategory", "project_minor", "adhd_priority",
+                          "priority_str", "category", "efficiency", "quality"):
                 out[field_name] = value if isinstance(value, list) else [value]
             # number 字段
-            elif ob_key == "estimate_hours":
+            # v0.4.0(2026-05-28):actual_hours(用时,跟 estimate_hours 同 float)
+            elif ob_key in ("estimate_hours", "actual_hours"):
                 try:
                     out[field_name] = float(value)
                 except (ValueError, TypeError):
@@ -1976,6 +2051,13 @@ def build_fields_payload(task: dict, config: dict, vault_root: Path, existing_de
             # checkbox(bool)字段 — today_flag → 飞书「是否今日」
             elif ob_key == "today_flag":
                 out[field_name] = bool(value)
+            # v0.4.0(2026-05-28):parent_task 自关联 link 字段
+            # frontmatter `parent_task: "[[<父 task 文件名>]]"` → vault 查 stem → 取 feishu_record
+            # 找不到 / 父 task 未 sync → resolve_parent_task_record_id 已打 warning,这里跳过(不阻断其他字段)
+            elif ob_key == "parent_task":
+                rec_id = resolve_parent_task_record_id(str(value), vault_root)
+                if rec_id:
+                    out[field_name] = [rec_id]
             # parent_project:可能是 link 类型(配 link_table_id)或 select 类型(只配 field_name)
             # link 类型需要查关联表拿 record_id,select 类型按字符串处理
             elif ob_key == "parent_project":
@@ -2217,21 +2299,38 @@ def push_journal(file_path: Path, apply: bool = False, only_completed: bool = Fa
     print(f"{'='*60}\n")
 
 
-def push_task_md(md_path: Path, apply: bool = False) -> None:
+def push_task_md(md_path: Path, apply: bool = False, _silent_fail: bool = False) -> Optional[dict]:
     """单 task md 推送到飞书(CREATE/UPDATE) — 2026-05-25 上线
 
     用法:python3 sync.py --task-md path/to/task.md [--apply]
 
     流程:
-    1. parse_task_md 抽 frontmatter + 正文 H2 段
-    2. build_fields_payload 转飞书 payload(走 _task_md_mode 分支)
-    3. feishu_upsert_record CREATE/UPDATE
-    4. 成功后回写 feishu_record + feishu_url 到 task md frontmatter
+    1. (v0.4.0+ 2026-05-28)路径不存在 → vault 内 rglob 同名 fallback
+       解决:Cmd+P 创建 task md 后,Obsidian Auto Note Mover 等插件可能根据
+       关键词自动移动文件,userscript 传的原路径会找不到
+    2. parse_task_md 抽 frontmatter + 正文 H2 段
+    3. build_fields_payload 转飞书 payload(走 _task_md_mode 分支)
+    4. feishu_upsert_record CREATE/UPDATE
+    5. 成功后回写 feishu_record + feishu_url 到 task md frontmatter
 
     铁律 #1 例外(rules/feishu-project-sync.md):
     - 仅"单条 CREATE 新 task"自动跑(空白记录新建,无覆盖风险)
     - UPDATE 仍需 dry-run + 用户审核(由调用方决定是否 --apply)
+
+    v0.4.0+ Step 3(2026-05-28):加 _silent_fail 参数支持批量调用
+    - False(默认,CLI 模式):失败 sys.exit(1) — 兼容原行为
+    - True(批量调用):返回 dict {success, action, record_id, error, path},
+      不 sys.exit,让批量循环继续处理下一条
+
+    Returns: dict 当 _silent_fail=True,None 当 _silent_fail=False(走 sys.exit)
     """
+    def _fail(msg: str, action: str = "?") -> Optional[dict]:
+        """统一失败出口"""
+        if _silent_fail:
+            return {"success": False, "action": action, "error": msg, "path": str(md_path)}
+        print(f"\n❌ {msg}", file=sys.stderr)
+        sys.exit(1)
+
     config = load_config()
 
     print(f"\n{'=' * 60}")
@@ -2240,9 +2339,38 @@ def push_task_md(md_path: Path, apply: bool = False) -> None:
         print(f"📌 dry-run(--apply 才真写)")
     print(f"{'=' * 60}\n")
 
+    # v0.4.0+(2026-05-28):路径不存在 fallback — vault 内 rglob 同名文件
+    # 触发场景:Obsidian Auto Note Mover 等插件在 userscript 创建文件后自动移走,
+    # 导致 userscript 传给 sync.py 的原路径已失效。本 fallback 让 sync.py 自动找到新位置
+    if not md_path.exists():
+        print(f"⚠️  路径不存在: {md_path}")
+        print(f"    可能 Obsidian Auto Note Mover 等插件移动了文件,vault 内 rglob 同名查找...")
+        vault_root = None
+        try:
+            vault_root = find_vault_root()
+        except Exception:
+            pass
+        if vault_root:
+            # 排除 .obsidian / .trash / .git 等隐藏 / 系统目录(避免误命中备份)
+            candidates = [
+                p for p in vault_root.rglob(md_path.name)
+                if not any(part.startswith(".") for part in p.parts)
+            ]
+            # 优先:04 Inbox/task 内的(用户主流位置)
+            inbox_matches = [c for c in candidates if "04 Inbox" in c.parts and "task" in c.parts]
+            if inbox_matches:
+                md_path = inbox_matches[0]
+            elif candidates:
+                md_path = candidates[0]
+            else:
+                return _fail(f"vault 内未找到 {md_path.name}")
+            print(f"    ✅ 找到实际位置: {md_path.relative_to(vault_root)}")
+        else:
+            return _fail("无 vault root,无法 fallback")
+
     task = parse_task_md(md_path, config)
     if task is None:
-        sys.exit(1)
+        return _fail(f"parse_task_md 失败: {md_path}")
 
     is_create = not task.get("record_id")
     action = "CREATE" if is_create else "UPDATE"
@@ -2260,13 +2388,26 @@ def push_task_md(md_path: Path, apply: bool = False) -> None:
         print(f"    ADHD: {task['adhd_priority']}")
     if task.get("estimate_hours"):
         print(f"    估时: {task['estimate_hours']}h")
+    # v0.4.0(2026-05-28): 5 字段补全 — task md「完成质量 / 用时 / 父任务 / 交付 / 用户故事」
+    if task.get("actual_hours"):
+        print(f"    用时: {task['actual_hours']}h")
+    if task.get("quality"):
+        print(f"    完成质量: {task['quality']}")
+    if task.get("parent_task"):
+        print(f"    父任务: [[{task['parent_task']}]]")
+    if task.get("delivery"):
+        prev = task["delivery"].replace("\n", " ")[:60]
+        print(f"    📦 交付: {prev}{'...' if len(task['delivery']) > 60 else ''}")
+    if task.get("user_story"):
+        prev = task["user_story"].replace("\n", " ")[:60]
+        print(f"    👥 用户故事: {prev}{'...' if len(task['user_story']) > 60 else ''}")
 
     fields = build_fields_payload(task, config, VAULT_ROOT, existing_delivery="")
     print(f"\n    Payload: {json.dumps(fields, ensure_ascii=False, indent=6)[:800]}")
 
     if not apply:
         print(f"\n📌 dry-run 完成。--apply 真写飞书 + 回写 feishu_record/url 到 task md")
-        return
+        return {"success": True, "action": action, "record_id": task.get("record_id"), "path": str(md_path), "dry_run": True} if _silent_fail else None
 
     print(f"\n🚀 开始 {action}...")
     try:
@@ -2277,13 +2418,11 @@ def push_task_md(md_path: Path, apply: bool = False) -> None:
             dry_run=False,
         )
     except Exception as e:
-        print(f"\n❌ {action} 失败: {e}")
-        sys.exit(1)
+        return _fail(f"{action} 失败: {e}", action=action)
 
     record_id = result.get("record_id")
     if not record_id:
-        print(f"\n❌ {action} 成功但未返回 record_id: {result}")
-        sys.exit(1)
+        return _fail(f"{action} 成功但未返回 record_id: {result}", action=action)
 
     record_url = build_record_url(record_id, config)
 
@@ -2306,6 +2445,287 @@ def push_task_md(md_path: Path, apply: bool = False) -> None:
     if is_create:
         if inject_completion_link(md_path, task["title"], record_url):
             print(f"🔗 已把「## ✅ 完成标记」段 checkbox 行改为带链接的 markdown link")
+
+    return {"success": True, "action": action, "record_id": record_id, "path": str(md_path)} if _silent_fail else None
+
+
+def migrate_today_history_unquoted(apply: bool = False) -> None:
+    """v0.4.0+ Step 3(2026-05-29):反向 migration — quoted ISO date 改回 unquoted
+
+    上次 migration(往 quoted 改)方向错了 — console 诊断证明 unquoted YAML date
+    → dataview luxon DateTime,contains 比较工作;quoted string → dataview string,
+    contains 比较 string vs DateTime 失败。
+
+    本命令把所有 today_history 内的 quoted ISO date string 改回 unquoted。
+
+    用法:
+        python3 sync.py --migrate-today-history-unquote          # dry-run
+        python3 sync.py --migrate-today-history-unquote --apply  # 真改
+    """
+    vault_root = find_vault_root()
+
+    print(f"\n{'='*60}")
+    print(f"🔧 migrate-today-history-unquote: quoted 改回 unquoted")
+    if not apply:
+        print(f"📌 dry-run(--apply 才真改)")
+    print(f"{'='*60}\n")
+
+    pattern_th = re.compile(r"^today_history:\s*\[([^\]]*?)\]\s*$", re.MULTILINE)
+    pattern_quoted_date = re.compile(r"'(\d{4}-\d{2}-\d{2})'")
+
+    candidates = []
+    for md in vault_root.rglob("*.md"):
+        if any(part.startswith(".") for part in md.parts):
+            continue
+        if md.name.startswith("_"):
+            continue
+        try:
+            text = md.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        m = re.match(r"^(---\r?\n)(.*?)(\r?\n---\r?\n)", text, re.DOTALL)
+        if not m:
+            continue
+        fm_text = m.group(2)
+        th_m = pattern_th.search(fm_text)
+        if not th_m:
+            continue
+        inner = th_m.group(1).strip()
+        if not inner or not pattern_quoted_date.search(inner):
+            continue
+        # 把 quoted date 改 unquoted
+        new_inner = pattern_quoted_date.sub(r"\1", inner)
+        new_line = f"today_history: [{new_inner}]"
+        candidates.append((md, th_m.group(0), new_line))
+
+    if not candidates:
+        print(f"✅ 所有 today_history 已是 unquoted,无需 migration")
+        return
+
+    print(f"📋 找到 {len(candidates)} 条 task md 含 quoted today_history\n")
+
+    for md, original, new_line in candidates[:10]:
+        try:
+            rel = md.relative_to(vault_root)
+        except Exception:
+            rel = md
+        print(f"  📝 {rel}")
+        print(f"     - {original}")
+        print(f"     + {new_line}")
+    if len(candidates) > 10:
+        print(f"  ... 还有 {len(candidates) - 10} 条")
+
+    if not apply:
+        print(f"\n📌 dry-run 完成。--apply 真改 {len(candidates)} 条")
+        return
+
+    print(f"\n🚀 开始 apply...")
+    success_count = 0
+    fail_count = 0
+    for md, original, new_line in candidates:
+        try:
+            text = md.read_text(encoding="utf-8")
+            new_text = text.replace(original, new_line, 1)
+            if new_text != text:
+                md.write_text(new_text, encoding="utf-8")
+                success_count += 1
+            else:
+                fail_count += 1
+        except Exception as e:
+            print(f"  ❌ {md.name}: {e}")
+            fail_count += 1
+
+    print(f"\n{'='*60}")
+    print(f"📊 unquote migrate 完成: ✅ {success_count} / ❌ {fail_count}")
+    print(f"{'='*60}\n")
+
+
+def migrate_today_history_quoted(apply: bool = False) -> None:
+    """v0.4.0+ Step 3(2026-05-28)一次性 migration:把所有 task md 的
+    `today_history: [date1, date2]` unquoted 形式改写为 `today_history: ['date1', 'date2']` quoted
+
+    原因:Obsidian dataview 对 unquoted YAML date 解析为 DateTime 对象,
+    跟 `this.file.day`(也是 DateTime)的 contains() 比较可能失败(类型转换 bug)。
+    quoted string 形式跟 file.day toISODate() 比较一致,稳定显示。
+
+    用法:
+        python3 sync.py --migrate-today-history          # dry-run 看哪些会改
+        python3 sync.py --migrate-today-history --apply  # 真改
+    """
+    vault_root = find_vault_root()
+
+    print(f"\n{'='*60}")
+    print(f"🔧 migrate-today-history: today_history 改为 quoted string")
+    if not apply:
+        print(f"📌 dry-run(--apply 才真改)")
+    print(f"{'='*60}\n")
+
+    # 扫全 vault task md 找 today_history 不是 quoted 的
+    candidates = []
+    pattern_unquoted = re.compile(r"^today_history:\s*\[([^\]]*?)\]\s*$", re.MULTILINE)
+    pattern_date_in_list = re.compile(r"(?<![\'\"])(\d{4}-\d{2}-\d{2})(?![\'\"])")
+
+    for md in vault_root.rglob("*.md"):
+        if any(part.startswith(".") for part in md.parts):
+            continue
+        if md.name.startswith("_"):
+            continue
+        try:
+            text = md.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        # 只看 frontmatter 部分
+        m = re.match(r"^(---\r?\n)(.*?)(\r?\n---\r?\n)", text, re.DOTALL)
+        if not m:
+            continue
+        fm_text = m.group(2)
+        # 找 today_history 行
+        th_match = pattern_unquoted.search(fm_text)
+        if not th_match:
+            continue
+        inner = th_match.group(1).strip()
+        if not inner:
+            continue  # 空 list 跳过
+        # 检查是否含 unquoted date
+        unquoted_dates = pattern_date_in_list.findall(inner)
+        if not unquoted_dates:
+            continue  # 已全部 quoted,跳过
+        candidates.append((md, th_match.group(0), inner))
+
+    if not candidates:
+        print(f"✅ 所有 task md 的 today_history 已是 quoted 或空,无需 migration")
+        return
+
+    print(f"📋 找到 {len(candidates)} 条 task md 含 unquoted today_history\n")
+
+    for md, original_line, inner in candidates[:10]:
+        try:
+            rel = md.relative_to(vault_root)
+        except Exception:
+            rel = md
+        # 构造 quoted 版本
+        dates = [d.strip() for d in inner.split(",") if d.strip()]
+        quoted_dates = [
+            f"'{d}'" if re.match(r"^\d{4}-\d{2}-\d{2}$", d) and not (d.startswith("'") or d.startswith('"')) else d
+            for d in dates
+        ]
+        new_line = f"today_history: [{', '.join(quoted_dates)}]"
+        print(f"  📝 {rel}")
+        print(f"     - {original_line}")
+        print(f"     + {new_line}")
+
+    if len(candidates) > 10:
+        print(f"  ... 还有 {len(candidates) - 10} 条")
+
+    if not apply:
+        print(f"\n📌 dry-run 完成。--apply 真改 {len(candidates)} 条 task md")
+        return
+
+    # apply: 逐条改
+    print(f"\n🚀 开始 apply...")
+    success_count = 0
+    fail_count = 0
+    for md, original_line, inner in candidates:
+        try:
+            text = md.read_text(encoding="utf-8")
+            dates = [d.strip() for d in inner.split(",") if d.strip()]
+            quoted_dates = [
+                f"'{d}'" if re.match(r"^\d{4}-\d{2}-\d{2}$", d) and not (d.startswith("'") or d.startswith('"')) else d
+                for d in dates
+            ]
+            new_line = f"today_history: [{', '.join(quoted_dates)}]"
+            new_text = text.replace(original_line, new_line, 1)
+            if new_text != text:
+                md.write_text(new_text, encoding="utf-8")
+                success_count += 1
+            else:
+                print(f"  ⚠️  {md.name} 替换无变化")
+                fail_count += 1
+        except Exception as e:
+            print(f"  ❌ {md.name}: {e}")
+            fail_count += 1
+
+    print(f"\n{'='*60}")
+    print(f"📊 migrate 完成: ✅ {success_count} / ❌ {fail_count}")
+    print(f"{'='*60}\n")
+
+
+def push_all_today_task_md(apply: bool = False) -> None:
+    """v0.4.0+ Step 3(2026-05-28):批量推 OB today=true task md 到飞书(forward 方向)
+
+    用法:
+        python3 sync.py --push-all-today              # dry-run 看哪些会推
+        python3 sync.py --push-all-today --apply      # 真推
+
+    场景:AI 助手 / Claude Code 在 OB 端补充了多条 task md 的「## 📦 交付」/
+    「## 🪞 复盘」/「## 💡 执行思路」等 H2 段后,一键把所有今日 task 的改动推到飞书看板
+    (对称 pull-today 飞书 → OB 的反向操作)
+
+    扫描范围:全 vault(对齐 v0.4.0 Step 3 `_scan_ob_task_md_by_feishu_record` 的全 vault 扫)
+    过滤:today=true(对应飞书侧也勾「是否今日」=true 的 task)
+
+    冲突策略:OB 覆盖飞书(对称 pull-today 的"飞书覆盖 OB")
+    防御:`build_fields_payload` 内部已 handle 空字段(空字段不写),不会清空飞书侧已有数据
+    """
+    config = load_config()
+    vault_root = find_vault_root()
+
+    print(f"\n{'='*60}")
+    print(f"🎯 push-all-today: 批量推 OB today=true task md → 飞书 forward")
+    if not apply:
+        print(f"📌 dry-run(--apply 才真写)")
+    print(f"{'='*60}\n")
+
+    # 扫全 vault 找 today=true 的 task md
+    print("⏳ 扫 OB vault task md(全 vault,today=true 过滤)...")
+    ob_index = _scan_ob_task_md_by_feishu_record(vault_root)
+    today_entries = [(rid, entry) for rid, entry in ob_index.items() if entry["today"]]
+    print(f"✅ 找到 {len(today_entries)} 条 today=true task md\n")
+
+    if not today_entries:
+        print("⚠️  无 today=true task md 可推,退出")
+        return
+
+    # 逐条 push
+    success_count = 0
+    fail_count = 0
+    create_count = 0
+    update_count = 0
+    failures = []
+    for rid, entry in today_entries:
+        p = entry["path"]
+        print(f"\n{'─'*60}")
+        try:
+            print(f"📍 {p.relative_to(vault_root)}")
+        except Exception:
+            print(f"📍 {p}")
+        result = push_task_md(p, apply=apply, _silent_fail=True)
+        if result is None:
+            # 不应该到这里(_silent_fail=True 必返 dict)
+            fail_count += 1
+            failures.append((p, "返回 None(_silent_fail 异常)"))
+            continue
+        if result.get("success"):
+            success_count += 1
+            if result.get("action") == "CREATE":
+                create_count += 1
+            elif result.get("action") == "UPDATE":
+                update_count += 1
+        else:
+            fail_count += 1
+            failures.append((p, result.get("error", "未知错误")))
+
+    print(f"\n{'='*60}")
+    print(f"📊 push-all-today {'apply' if apply else 'dry-run'} 汇总:")
+    print(f"  ✅ 成功: {success_count}({create_count} CREATE / {update_count} UPDATE)")
+    print(f"  ❌ 失败: {fail_count}")
+    if failures:
+        print(f"\n失败详情:")
+        for p, err in failures[:10]:
+            print(f"  - {p.name[:50]}: {err}")
+        if len(failures) > 10:
+            print(f"  ... 还有 {len(failures) - 10} 条")
+    print(f"{'='*60}\n")
 
 
 def build_record_url(record_id: str, config: dict) -> str:
@@ -2769,19 +3189,43 @@ def _fetch_all_records_from_feishu(config: dict) -> tuple:
     return all_records, all_ids, fields_meta
 
 
-def _scan_ob_task_md_by_feishu_record(task_dir: Path) -> dict:
-    """扫 04 Inbox/task/ 下所有 .md,按 feishu_record 字段建索引。
+def _scan_ob_task_md_by_feishu_record(scan_root: Path) -> dict:
+    """扫 scan_root 下所有 .md,按 feishu_record 字段建索引。
+
+    v0.4.0+(2026-05-28)Step 3:scan_root 从 04 Inbox/task/ 扩展到 vault_root(全 vault 扫)—
+    解决 Obsidian Auto Note Mover 等插件根据关键词自动移动 task md 后(如「炒股」→ 02 Area/08 炒股/),
+    sync.py 无法关联回它,导致 pull-today 误判"飞书有 OB 无" → 重建 → Auto Note Mover 又拦 → 死循环
 
     Returns: {rec_id: {"path": Path, "today": bool, "status": str, "today_history": list[str]}}
-    跳过没 feishu_record 字段的 task md(=本地新建未 sync 飞书的)
-    跳过 _ 开头的 _task.base / _说明.md 等
+    跳过:
+    - 没 feishu_record 字段的 .md(=本地笔记非 task)
+    - _ 开头的 _task.base / _说明.md 等
+    - 隐藏目录(.obsidian / .git / .trash 等)
 
-    v0.2.5 修:加 today_history 抽取(用于 pull_today_from_feishu 防御性清理"残留"日期)
+    Duplicate 检测:同一 rec_id 有多份 task md(Auto Note Mover 移走 + sync 重建留下重复)
+    → 取**最后修改时间最新**的,打 warning 让用户清理
+
+    v0.2.5: 加 today_history 抽取(用于 pull_today_from_feishu 防御性清理"残留"日期)
     """
-    index = {}
-    for md_path in task_dir.rglob("*.md"):
+    EXCLUDE_HIDDEN_PREFIX = (".",)  # 跳过 .obsidian / .git / .trash 等
+
+    # 收集所有 candidate .md,按 mtime 倒序(最新在前)
+    candidates = []
+    for md_path in scan_root.rglob("*.md"):
+        if any(part.startswith(EXCLUDE_HIDDEN_PREFIX) for part in md_path.parts):
+            continue
         if md_path.name.startswith("_"):
             continue
+        try:
+            mtime = md_path.stat().st_mtime
+        except Exception:
+            continue
+        candidates.append((mtime, md_path))
+    candidates.sort(key=lambda x: x[0], reverse=True)
+
+    index = {}
+    duplicates = []  # [(rec_id, kept_path, dropped_path), ...]
+    for _, md_path in candidates:
         try:
             text = md_path.read_text(encoding="utf-8")
         except Exception:
@@ -2820,6 +3264,10 @@ def _scan_ob_task_md_by_feishu_record(task_dir: Path) -> dict:
                         today_history = [d.strip().strip("'\"") for d in inner.split(",")]
 
         if rec_id:
+            if rec_id in index:
+                # 重复:已有 index 是更新的(mtime sort 在前),当前是更老的 → drop 当前
+                duplicates.append((rec_id, index[rec_id]["path"], md_path))
+                continue
             index[rec_id] = {
                 "path": md_path,
                 "today": today_val,
@@ -2827,16 +3275,38 @@ def _scan_ob_task_md_by_feishu_record(task_dir: Path) -> dict:
                 "today_history": today_history,
             }
 
+    if duplicates:
+        print(f"⚠️  发现 {len(duplicates)} 条 task md 重复绑定同一 feishu_record:")
+        print(f"    (可能 Auto Note Mover 移走文件后 sync.py 又重建,留下重复)")
+        for rec_id, kept, dropped in duplicates[:5]:
+            try:
+                kept_rel = kept.relative_to(scan_root)
+                dropped_rel = dropped.relative_to(scan_root)
+            except Exception:
+                kept_rel, dropped_rel = kept, dropped
+            print(f"    🔗 {rec_id}")
+            print(f"       ✅ 保留(mtime 新): {kept_rel}")
+            print(f"       ⏭  跳过(mtime 旧): {dropped_rel}")
+        if len(duplicates) > 5:
+            print(f"    ... 还有 {len(duplicates) - 5} 条")
+        print(f"    💡 建议:手动 review + 删除「跳过」的那份")
+
     return index
 
 
-def _extract_fields_from_feishu_row(row, fields_meta, config) -> dict:
+def _extract_fields_from_feishu_row(row, fields_meta, config, ob_index: Optional[dict] = None) -> dict:
     """v0.3.7: 从飞书 row 抽出 OB frontmatter 同步字段 dict
 
     与 _create_task_md_from_feishu_record(plan_missing 反向建)+ pull-today 反向 diff sync 共享。
     不含 today / today_history / today_source(today 逻辑独立)
     不含 feishu_record / feishu_url / created / 日志(不应反向覆盖)
-    不含正文段(acceptance / thinking / resources / retrospective / execution_summary)
+    v0.4.0(2026-05-28)起含正文 H2 段(delivery / user_story);仍不含其他 H2 段
+    (acceptance / thinking / resources / retrospective / execution_summary 暂保持单向 OB→飞书)
+
+    Args:
+        row, fields_meta, config: 飞书 record list 返回
+        ob_index: v0.4.0 加 — _scan_ob_task_md_by_feishu_record 索引(用于 parent_task 反向 record_id → wikilink)
+                  传 None → parent_task 字段空字符串(找不到对应 OB task md)
 
     Returns dict:
         title: str
@@ -2850,6 +3320,20 @@ def _extract_fields_from_feishu_row(row, fields_meta, config) -> dict:
         done_date: str (YYYY-MM-DD or "")
         parent_project: str (裸名字,如 "00 布丁";无 wikilink 包裹)
         created_iso: str | None (反向建模板用,diff sync 不用)
+        # v0.4.0(2026-05-28):5 字段补全
+        quality: str ("高"/"中"/"低" 或 "")
+        actual_hours: str | "" (number 直接 stringify,跟 estimate_hours 同格式)
+        parent_task: str ("[[<父 task stem>]]" wikilink 形态;OB 无对应或飞书侧空 → "")
+        delivery: str (正文段内容,多行;飞书侧空 → "")
+        user_story: str (正文段内容)
+        # v0.4.0+ Step 2(2026-05-28)反向同步扩展 10 字段
+        efficiency: str ("高"/"中"/"低" 或 "")
+        project_minor: list[str] (multi-select)
+        iteration_week: list[str] (multi-select,如 ["26W23(...)"])
+        iteration_month: list[str] (multi-select,如 ["26 年 5 月"])
+        parent_project (覆盖):优先「产品项目」link 字段反解析(取 link record 的 text);
+                              无 link → fallback 老的"项目"启发性值;最后 fallback "00 布丁"
+        execution_summary / acceptance / thinking / resources / retrospective_text: str (5 个 H2 段内容)
     """
     def _idx(field):
         return fields_meta.index(field) if field in fields_meta else -1
@@ -2860,6 +3344,39 @@ def _extract_fields_from_feishu_row(row, fields_meta, config) -> dict:
 
     def _list_first(v):
         return v[0] if isinstance(v, list) and v else (v if not isinstance(v, list) else None)
+
+    def _text_value(v):
+        """飞书 text 字段值 → 纯字符串
+        - string → as-is
+        - list of {"text": "..."} 段 → 拼接(rich text 形态)
+        - None → ""
+        """
+        if v is None:
+            return ""
+        if isinstance(v, str):
+            return v
+        if isinstance(v, list):
+            parts = []
+            for seg in v:
+                if isinstance(seg, dict) and "text" in seg:
+                    parts.append(seg["text"])
+                elif isinstance(seg, str):
+                    parts.append(seg)
+                else:
+                    parts.append(str(seg))
+            return "".join(parts)
+        return str(v)
+
+    def _link_first_id(v):
+        """飞书 link 字段值 → 第一个 record_id
+        link 字段格式:[{"id": "rec...", "text": "...", "type": "text"}, ...]
+        """
+        if not isinstance(v, list) or not v:
+            return None
+        first = v[0]
+        if isinstance(first, dict):
+            return first.get("id") or first.get("record_id")
+        return None
 
     def _ms_to_date(ms):
         if not ms:
@@ -2900,11 +3417,67 @@ def _extract_fields_from_feishu_row(row, fields_meta, config) -> dict:
     due = _ms_to_date(_get("截止日期"))
     done_date = _ms_to_date(_get("完成时间"))
 
-    # parent_project — 飞书"项目"字段(单选),无则启发性默认
-    project_val = _list_first(_get("项目"))
-    parent_project = project_val or ""
-    if not parent_project and title.startswith("【布丁"):
-        parent_project = "00 布丁"
+    # parent_project — v0.4.0+ Step 2(2026-05-28)重构:
+    # 优先「产品项目」link 字段反解析(取 link record 的 text),无 link → 空字符串
+    # 移除老的"if title startswith 【布丁 → 00 布丁"启发性 fallback —
+    # 该 fallback 在完整反向同步场景下会**篡改用户实际选的子级关联**(已实测 bug)
+    # 飞书侧 link 字段空 → fs_str 为空 → PRESERVE_OB_IF_FS_EMPTY 保留 OB
+    parent_project = ""
+
+    # v0.4.0(2026-05-28):5 字段补全
+    # quality(完成质量):飞书 select 单选 → list 首元素或空
+    quality = _list_first(_get("完成质量")) or ""
+    # actual_hours(用时):飞书 number → 跟 estimate_hours 同 stringify
+    actual_hours_raw = _get("用时")
+    actual_hours = str(actual_hours_raw) if actual_hours_raw not in (None, "") else ""
+    # parent_task(飞书侧字段名「相关任务」,2026-05-28 修):飞书 link 字段 → 取首 record_id → 反查 ob_index → wikilink
+    # ob_index 无对应 record_id(可能父 task 未被 pull / 不存在)→ 留空字符串(不写注释)
+    parent_task = ""
+    parent_rec_id = _link_first_id(_get("相关任务"))
+    if parent_rec_id and ob_index and parent_rec_id in ob_index:
+        parent_path = ob_index[parent_rec_id]["path"]
+        parent_task = f"[[{parent_path.stem}]]"
+    # delivery / user_story:正文 H2 段,飞书 text 字段
+    delivery = _text_value(_get("交付"))
+    user_story = _text_value(_get("用户故事"))
+
+    # v0.4.0+(2026-05-28)Step 2 反向同步扩展 — 10 字段补全(efficiency / project_minor /
+    # iteration_* / parent_project + execution_summary / acceptance / thinking / resources / retrospective)
+    # 这些字段 forward 早就支持(task_md_fields 通用分发),reverse 之前缺
+    efficiency = _list_first(_get("完成效率")) or ""
+    project_minor_raw = _get("项目小类") or []
+    project_minor = project_minor_raw if isinstance(project_minor_raw, list) else (
+        [project_minor_raw] if project_minor_raw else []
+    )
+    iter_week_raw = _get("执行迭代周") or []
+    iteration_week = iter_week_raw if isinstance(iter_week_raw, list) else (
+        [iter_week_raw] if iter_week_raw else []
+    )
+    iter_month_raw = _get("执行迭代月") or []
+    iteration_month = iter_month_raw if isinstance(iter_month_raw, list) else (
+        [iter_month_raw] if iter_month_raw else []
+    )
+    # parent_project(产品项目 link 字段)— 飞书 link 字段返回 [{"id": rec, "text": "...", ...}]
+    # 反向解析:取 text(record 名)直接作为 wikilink target(无前缀,因为 OB 端 "00 布丁"
+    # ↔ 飞书 "布丁" 差异由 strip_prefix_regex 处理,反向时仅取飞书原名 — 若用户 OB 端用前缀名,
+    # 反向写回会显示无前缀名 [[布丁]],ob_index 找不到精确匹配;**这是已知 trade-off**,
+    # 用户可在 OB 端给「布丁」加 alias 或手动 rename)
+    parent_project_link = _get("产品项目")
+    parent_project_reverse = ""
+    if isinstance(parent_project_link, list) and parent_project_link:
+        first = parent_project_link[0]
+        if isinstance(first, dict):
+            parent_project_reverse = first.get("text") or ""
+    # 覆盖原先启发性 "项目" 字段判断(优先「产品项目」link 反解析)
+    if parent_project_reverse:
+        parent_project = parent_project_reverse
+
+    # 正文 H2 段反向(5 个):
+    execution_summary = _text_value(_get("执行概述"))
+    acceptance = _text_value(_get("验收条件"))
+    thinking = _text_value(_get("执行思路"))
+    resources = _text_value(_get("相关资料"))
+    retrospective_text = _text_value(_get("复盘"))
 
     return {
         "title": title,
@@ -2918,18 +3491,129 @@ def _extract_fields_from_feishu_row(row, fields_meta, config) -> dict:
         "done_date": done_date,
         "parent_project": parent_project,
         "created_iso": created_iso,
+        # v0.4.0(2026-05-28)5 字段补全
+        "quality": quality,
+        "actual_hours": actual_hours,
+        "parent_task": parent_task,
+        "delivery": delivery,
+        "user_story": user_story,
+        # v0.4.0+ Step 2(2026-05-28)反向同步 10 字段扩展
+        "efficiency": efficiency,
+        "project_minor": project_minor,
+        "iteration_week": iteration_week,
+        "iteration_month": iteration_month,
+        "execution_summary": execution_summary,
+        "acceptance": acceptance,
+        "thinking": thinking,
+        "resources": resources,
+        "retrospective_text": retrospective_text,
     }
 
 
 # v0.3.7 反向 diff sync 的字段白名单(从飞书覆盖 OB frontmatter 时只动这些)
 # 不含 title(标题改了会改文件名,风险大)/ created / feishu_record / feishu_url / today*
-# 不含 iteration_week / iteration_month(多选 list + 飞书侧字段复杂,v0.3.8 候选)
-# 不含 parent_project — v0.2.5 helper 读写死的"项目"字段名,实际是"产品项目" link 字段
-# 需要解析 link record → 名字,留 v0.3.8 修
+# v0.4.0(2026-05-28):加 quality / actual_hours / parent_task(3 frontmatter)
+# v0.4.0+ Step 2(2026-05-28)完整反向同步扩展:加 efficiency / project_minor / iteration_* / parent_project
+# 现在覆盖 16 frontmatter 字段(原 8 + v0.4.0 加 3 + Step 2 加 5 = 16)
 _REVERSE_SYNC_FIELD_WHITELIST = [
     "priority", "status", "category", "subcategory",
     "adhd_priority", "estimate_hours", "due", "done_date",
+    "quality", "actual_hours", "parent_task",
+    # v0.4.0+ Step 2 新加 5 frontmatter
+    "efficiency", "project_minor",
+    "iteration_week", "iteration_month",
+    "parent_project",
 ]
+
+
+# v0.4.0(2026-05-28)反向 H2 段同步白名单
+# (fs_key, h2_title_full, label) — 飞书 row 字段 → task md 正文 H2 段
+# 冲突策略:飞书覆盖 OB(对齐 _REVERSE_SYNC_FIELD_WHITELIST);飞书侧空 → 保留 OB(防御)
+# v0.4.0+ Step 2(2026-05-28):加 5 H2 段 — execution_summary / acceptance / thinking / resources / retrospective
+# (其中 thinking / resources 飞书实际有字段,OB rules 之前误标"飞书无对应"是错的)
+# 现在覆盖 7 H2 段(原 2 + 5)
+_REVERSE_SYNC_H2_WHITELIST = [
+    ("delivery", "## 📦 交付", "交付"),
+    ("user_story", "## 👥 用户故事", "用户故事"),
+    # v0.4.0+ Step 2 新加 5 H2 段
+    ("execution_summary", "## 📝 执行概述", "执行概述"),
+    ("acceptance", "## ✅ 验收条件", "验收条件"),
+    ("thinking", "## 💡 执行思路", "执行思路"),
+    ("resources", "## 🔗 相关资料", "相关资料"),
+    ("retrospective_text", "## 🪞 复盘", "复盘"),
+]
+
+
+def _read_h2_section_content(file_path: Path, h2_pattern: str) -> str:
+    """读 task md 文件内 ## <h2_pattern> 段的内容(去 HTML 注释 + strip)
+
+    h2_pattern 是去掉 "## " 前缀的标题(如 "📦 交付"),用于和 parse_task_md.extract_section 一致。
+    """
+    try:
+        text = file_path.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+    m = re.search(
+        rf"^## +{re.escape(h2_pattern)}.*?\n(.*?)(?=\n## +|\Z)",
+        text, re.MULTILINE | re.DOTALL,
+    )
+    if not m:
+        return ""
+    content = m.group(1).strip()
+    content = re.sub(r"<!--.*?-->", "", content, flags=re.DOTALL).strip()
+    return content
+
+
+def update_h2_section_in_task_md(file_path: Path, h2_title: str, new_content: str) -> bool:
+    """v0.4.0(2026-05-28):反向同步 H2 段 — 飞书侧值覆盖 task md 内对应 H2 段内容
+
+    - H2 段存在 → 替换内容(保留 H2 标题行不动)
+    - H2 段不存在 → 在「## ✅ 完成标记」之前插入完整新 H2 段(标题+内容+空行)
+    - new_content 为空 → 不动文件(防御误清,对齐 PRESERVE_OB_IF_FS_EMPTY 策略)
+    - 找不到「## ✅ 完成标记」标识 → 放弃插入(task md 不规范,返回 False)
+
+    Args:
+        h2_title: 完整 H2 标题(含前缀,如 "## 📦 交付")
+        new_content: 飞书侧字段内容,可多行
+
+    Returns: True if 改了文件,False 不变 / 跳过
+    """
+    if not new_content or not new_content.strip():
+        return False
+    try:
+        text = file_path.read_text(encoding="utf-8")
+    except Exception:
+        return False
+
+    # new_content 末尾 strip 避免插入多余空行(后续我们主动加分隔)
+    new_content_clean = new_content.strip()
+
+    # 段查找:^## <title>\s*$\r?\n + 内容(到下一个 ## 或文件末尾)
+    pattern = re.compile(
+        rf"^({re.escape(h2_title)})\s*$\r?\n(.*?)(?=\n## +|\Z)",
+        re.MULTILINE | re.DOTALL,
+    )
+    match = pattern.search(text)
+    if match:
+        # 段存在 → 替换段内容
+        new_segment = f"{match.group(1)}\n{new_content_clean}\n"
+        text_new = text[:match.start()] + new_segment + text[match.end():]
+    else:
+        # 段不存在 → 在 ✅ 完成标记 之前插入
+        insert_marker = "## ✅ 完成标记"
+        if insert_marker not in text:
+            return False
+        new_segment = f"{h2_title}\n{new_content_clean}\n\n"
+        text_new = text.replace(insert_marker, new_segment + insert_marker, 1)
+
+    if text_new == text:
+        return False
+    try:
+        file_path.write_text(text_new, encoding="utf-8")
+        return True
+    except Exception as e:
+        print(f"⚠️  写 {file_path} 失败: {e}", file=sys.stderr)
+        return False
 
 
 def _strip_wikilink(v) -> str:
@@ -2980,9 +3664,17 @@ def _diff_frontmatter_with_feishu(p, fs_fields: dict) -> tuple[dict, list]:
 
     # v0.3.7 防御性策略:**飞书侧空 → 保留 OB**(避免误清 OB 端有效数据,如手填的 due)
     # 仅 status / priority 例外:它们必有值,空值是异常,飞书侧空也覆盖 OB(理论上不会触发)
+    # v0.4.0(2026-05-28):加 quality / actual_hours / parent_task(完成时手填,飞书侧空不应清 OB)
+    # v0.4.0+ Step 2(2026-05-28):加 efficiency / project_minor / iteration_* / parent_project
+    # 所有 reverse 同步字段都加 PRESERVE 防御(逻辑:OB 端可能正在编辑,飞书侧暂空不该覆盖)
     PRESERVE_OB_IF_FS_EMPTY = {
         "category", "subcategory", "adhd_priority",
         "estimate_hours", "due", "done_date",
+        "quality", "actual_hours", "parent_task",
+        # v0.4.0+ Step 2 新加
+        "efficiency", "project_minor",
+        "iteration_week", "iteration_month",
+        "parent_project",
     }
 
     for field in _REVERSE_SYNC_FIELD_WHITELIST:
@@ -2994,7 +3686,9 @@ def _diff_frontmatter_with_feishu(p, fs_fields: dict) -> tuple[dict, list]:
         if fs_is_empty and field in PRESERVE_OB_IF_FS_EMPTY:
             continue
 
-        if field == "subcategory":
+        # v0.4.0+ Step 2(2026-05-28):multi-select 字段 list deep equal
+        # subcategory(原有)+ project_minor / iteration_week / iteration_month(新加)
+        if field in ("subcategory", "project_minor", "iteration_week", "iteration_month"):
             # list deep equal(顺序敏感)
             ob_list = ob_raw if isinstance(ob_raw, list) else (
                 [] if not ob_raw else [str(ob_raw)]
@@ -3003,6 +3697,19 @@ def _diff_frontmatter_with_feishu(p, fs_fields: dict) -> tuple[dict, list]:
             if ob_list != fs_list:
                 updates[field] = fs_list
                 diff_summary.append((field, ob_list, fs_list))
+        elif field == "parent_project":
+            # parent_project: 飞书侧裸名(如 "布丁") ↔ OB 端 wikilink "[[00 布丁]]"
+            # OB → 飞书:strip_prefix_regex 去前缀 + wikilink 解析
+            # 飞书 → OB:反向直接用飞书名(无前缀),wrap wikilink
+            # 同名比较(去 wikilink 包裹 + 比 stripped name)
+            ob_norm = _strip_wikilink(ob_raw) if ob_raw else ""
+            # 跟 _extract... 一样,去掉数字前缀比较(允许 OB "00 布丁" ↔ 飞书 "布丁")
+            ob_norm_stripped = re.sub(r"^\d+\s+", "", ob_norm).strip()
+            fs_str = _norm_str(fs_val)
+            if ob_norm_stripped != fs_str and ob_norm != fs_str:
+                # 不同 → 飞书覆盖。值是飞书原名(无前缀),OB 端 wikilink 包裹
+                updates[field] = f"[[{fs_str}]]" if fs_str else ""
+                diff_summary.append((field, ob_norm or "(空)", fs_str or "(空)"))
         else:
             # 普通字段:string 规整化后比较
             ob_str = _norm_str(ob_raw)
@@ -3014,16 +3721,50 @@ def _diff_frontmatter_with_feishu(p, fs_fields: dict) -> tuple[dict, list]:
     return updates, diff_summary
 
 
-def _create_task_md_from_feishu_record(rid, row, fields_meta, config, vault_root):
+def _diff_h2_sections_with_feishu(p: Path, fs_fields: dict) -> tuple[dict, list]:
+    """v0.4.0(2026-05-28):对比 OB task md 正文 H2 段 与飞书侧字段,返回 H2 updates + diff 摘要
+
+    冲突策略对齐 _diff_frontmatter_with_feishu:
+    - 飞书侧覆盖 OB(飞书是 ADHD 实时操作端,OB 是文档端)
+    - 飞书侧空 → 保留 OB(防御误清,对齐 PRESERVE_OB_IF_FS_EMPTY 思想)
+
+    Args:
+        p: OB task md Path
+        fs_fields: _extract_fields_from_feishu_row 返回 dict(需含 delivery / user_story 等 key)
+
+    Returns:
+        (h2_updates_dict, h2_diff_summary)
+        h2_updates_dict: {h2_title_full: new_content, ...} 仅含 OB ≠ 飞书且飞书非空的项
+        h2_diff_summary: [(h2_label, ob_excerpt, fs_excerpt), ...] 用于 dry-run 打印
+    """
+    updates: dict = {}
+    diff_summary: list = []
+    for fs_key, h2_title_full, label in _REVERSE_SYNC_H2_WHITELIST:
+        fs_val_raw = fs_fields.get(fs_key) or ""
+        fs_val = str(fs_val_raw).strip()
+        if not fs_val:
+            continue  # 飞书侧空 → 保留 OB(防御误清)
+        h2_pattern = h2_title_full.replace("## ", "", 1).strip()
+        ob_val = _read_h2_section_content(p, h2_pattern).strip()
+        if ob_val != fs_val:
+            updates[h2_title_full] = fs_val
+            diff_summary.append((label, ob_val or "(空)", fs_val or "(空)"))
+    return updates, diff_summary
+
+
+def _create_task_md_from_feishu_record(rid, row, fields_meta, config, vault_root, ob_index: Optional[dict] = None):
     """从飞书 record 反向建 OB task md(v0.2.5 加,v0.3.7 重构调 helper)
 
     字段映射 → 见 _extract_fields_from_feishu_row docstring
+
+    v0.4.0(2026-05-28):支持 ob_index 反向解析 parent_task → wikilink;
+    新模板含 quality / actual_hours / parent_task frontmatter + 📦 交付 / 👥 用户故事 H2 段
 
     Returns: 创建的 Path(成功) or None(已存在 / 跳过)
     """
     from datetime import datetime, timezone, timedelta
 
-    fs = _extract_fields_from_feishu_row(row, fields_meta, config)
+    fs = _extract_fields_from_feishu_row(row, fields_meta, config, ob_index=ob_index)
     title = fs["title"]
     priority = fs["priority"]
     status = fs["status"]
@@ -3035,6 +3776,22 @@ def _create_task_md_from_feishu_record(rid, row, fields_meta, config, vault_root
     done_date = fs["done_date"]
     parent_project = fs["parent_project"]
     created_iso = fs["created_iso"]
+    # v0.4.0(2026-05-28):5 字段补全
+    quality = fs.get("quality", "")
+    actual_hours = fs.get("actual_hours", "")
+    parent_task = fs.get("parent_task", "")  # "[[<stem>]]" 或 ""
+    delivery = fs.get("delivery", "")
+    user_story = fs.get("user_story", "")
+    # v0.4.0+ Step 2(2026-05-28)反向同步 10 字段扩展
+    efficiency = fs.get("efficiency", "")
+    project_minor = fs.get("project_minor", []) or []
+    iteration_week_list = fs.get("iteration_week", []) or []
+    iteration_month_list = fs.get("iteration_month", []) or []
+    execution_summary = fs.get("execution_summary", "")
+    acceptance = fs.get("acceptance", "")
+    thinking = fs.get("thinking", "")
+    resources = fs.get("resources", "")
+    retrospective_text_body = fs.get("retrospective_text", "")
 
     # 文件名安全
     safe_title = re.sub(r'[/\\*?"<>|]', "_", title)
@@ -3045,6 +3802,19 @@ def _create_task_md_from_feishu_record(rid, row, fields_meta, config, vault_root
     fpath = task_dir / f"{today_date}-{safe_title}.md"
 
     if fpath.exists():
+        return None
+
+    # v0.4.0+(2026-05-28)Step 3 防御:vault 内可能已有同名 task md(Auto Note Mover 移到别处),
+    # 但 ob_index 因 frontmatter 损坏 / 历史原因没扫到,此时再建会造成更多 duplicate。
+    # 扫全 vault 同名 `<safe_title>.md`(任意日期前缀)→ 已存在 → skip 并报警
+    existing_anywhere = [
+        p for p in vault_root.rglob(f"*{safe_title}.md")
+        if not any(part.startswith(".") for part in p.parts)
+        and not p.name.startswith("_")
+    ]
+    if existing_anywhere:
+        print(f"    ⚠️  vault 内已有同名 task md(可能 Auto Note Mover 移到别处):{existing_anywhere[0].relative_to(vault_root)}")
+        print(f"    跳过自动建,请手动 review:确认 feishu_record 字段是否对齐(应为 {rid})")
         return None
 
     # 拼飞书 URL
@@ -3062,6 +3832,23 @@ def _create_task_md_from_feishu_record(rid, row, fields_meta, config, vault_root
         f"subcategory: {subcategory}" if subcategory else "subcategory:"
     )
     created_line = created_iso or (today_date + "T00:00:00")
+    # v0.4.0(2026-05-28):parent_task wikilink 形态(空 → 留空字段)
+    parent_task_line = (
+        f'parent_task: "{parent_task}"' if parent_task else "parent_task:"
+    )
+    # 正文 H2 段内容空字符串 → 段下方留空(对齐模板风格)
+    delivery_body = delivery if delivery else ""
+    user_story_body = user_story if user_story else ""
+
+    # v0.4.0+ Step 2(2026-05-28):新加 frontmatter / H2 段反向填值
+    project_minor_line = f"project_minor: {project_minor}" if project_minor else "project_minor:"
+    iter_week_line = f"iteration_week: {iteration_week_list}" if iteration_week_list else "iteration_week:"
+    iter_month_line = f"iteration_month: {iteration_month_list}" if iteration_month_list else "iteration_month:"
+    execution_summary_body = execution_summary if execution_summary else "(从飞书拉回,详情见飞书 record)"
+    acceptance_body = acceptance if acceptance else ""
+    thinking_body = thinking if thinking else ""
+    resources_body = resources if resources else ""
+    retrospective_body = retrospective_text_body if retrospective_text_body else ""
 
     content = f"""---
 priority: {priority}
@@ -3074,21 +3861,21 @@ due: {due}
 done_date: {done_date}
 category: {category}
 {subcat_line}
+{project_minor_line}
 adhd_priority: {adhd_priority}
 estimate_hours: {estimate_hours}
-efficiency:
-acceptance:
-thinking:
-resources:
-retrospective:
+actual_hours: {actual_hours}
+efficiency: {efficiency}
+quality: {quality}
 {parent_project_line}
 parent_subproject:
+{parent_task_line}
 parent_inspiration:
 日志: "[[journals/{today_date}]]"
 feishu_record: {rid}
 feishu_url: '{url}'
-iteration_week:
-iteration_month:
+{iter_week_line}
+{iter_month_line}
 completion_month:
 tags:
   - task
@@ -3097,8 +3884,28 @@ tags:
 
 # {title}
 
+<!-- v0.4.0(2026-05-28)H2 段顺序对齐飞书看板视图字段顺序 -->
+
+## 👥 用户故事
+{user_story_body}
+
+## ✅ 验收条件
+{acceptance_body}
+
+## 💡 执行思路
+{thinking_body}
+
 ## 📝 执行概述
-(从飞书拉回,详情见飞书 record)
+{execution_summary_body}
+
+## 📦 交付
+{delivery_body}
+
+## 🔗 相关资料
+{resources_body}
+
+## 🪞 复盘
+{retrospective_body}
 
 ## ✅ 完成标记
 - [ ] [{title}]({url})
@@ -3148,8 +3955,10 @@ def pull_today_from_feishu(apply: bool = False) -> None:
     print(f"🔍 飞书「是否今日」=true: {len(today_record_ids)} 条")
 
     # Step 3: 扫 OB 端 task md 建索引
-    print("⏳ 扫 OB task md(按 feishu_record 建索引)...")
-    ob_index = _scan_ob_task_md_by_feishu_record(task_dir)
+    # v0.4.0+(2026-05-28)Step 3:扫全 vault(非仅 04 Inbox/task/)— 兼容 Auto Note Mover 等
+    # 自动移动 task md 的场景。task_dir 仍是新建 task md 的主目录(plan_missing 时建在此)
+    print("⏳ 扫 OB vault task md(全 vault,按 feishu_record 建索引)...")
+    ob_index = _scan_ob_task_md_by_feishu_record(vault_root)
     print(f"✅ OB 共 {len(ob_index)} 个 task md(有 feishu_record 关联的)\n")
 
     # Step 4: 分类计划
@@ -3193,9 +4002,20 @@ def pull_today_from_feishu(apply: bool = False) -> None:
         row_ = rid_to_row.get(rid_)
         if row_ is None:
             return None
-        fs_fields = _extract_fields_from_feishu_row(row_, fields_meta, config)
+        # v0.4.0(2026-05-28):传 ob_index 让 parent_task 反向 record_id → wikilink
+        fs_fields = _extract_fields_from_feishu_row(row_, fields_meta, config, ob_index=ob_index)
         updates_, summary_ = _diff_frontmatter_with_feishu(p_, fs_fields)
-        return {"path": p_, "updates": updates_, "summary": summary_} if updates_ else None
+        # v0.4.0(2026-05-28):正文 H2 段反向 diff(交付 / 用户故事)
+        h2_updates_, h2_summary_ = _diff_h2_sections_with_feishu(p_, fs_fields)
+        if not updates_ and not h2_updates_:
+            return None
+        return {
+            "path": p_,
+            "updates": updates_,
+            "summary": summary_,
+            "h2_updates": h2_updates_,
+            "h2_summary": h2_summary_,
+        }
 
     for rid, _t, p in plan_set_true:
         d = _compute_field_diff(rid, p)
@@ -3213,6 +4033,25 @@ def pull_today_from_feishu(apply: bool = False) -> None:
             field_diffs[rid] = d
             field_diff_count += 1
 
+    # v0.4.0+ Step 3(2026-05-29):预计算 plan_skip 中"today_history 缺今日"
+    # 关键 bug 场景:跨天未完成 task,5/28 已 today=true,5/29 跑 pull-today → plan_skip
+    # 但 today_history 只有 [..., 5/28],缺 5/29 → 5/29 journal dataview
+    # contains(today_history, this.file.day) 不匹配 → 不显示
+    # 修:预计算并标识,dry-run 显示 + apply 写入
+    today_date_iso_for_history = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    history_diffs: dict = {}  # rid -> new today_history(含今日)
+    for rid, _t, p in plan_skip:
+        try:
+            fm_cur, _, _ = parse_frontmatter(p.read_text(encoding="utf-8"))
+            history = fm_cur.get("today_history", []) if fm_cur else []
+            if not isinstance(history, list):
+                history = []
+        except Exception:
+            history = []
+        history_strs = [str(h) for h in history]
+        if today_date_iso_for_history not in history_strs:
+            history_diffs[rid] = history + [today_date_iso_for_history]
+
     # Step 5: 打印计划摘要
     print(f"📋 计划摘要:")
     print(f"  ➡️  设 today=true:    {len(plan_set_true)} 条")
@@ -3220,6 +4059,7 @@ def pull_today_from_feishu(apply: bool = False) -> None:
     print(f"  ⏭️  已是 today:       {len(plan_skip)} 条")
     print(f"  ⚠️  飞书有 OB 无:    {len(plan_missing)} 条")
     print(f"  🔄 字段同步(v0.3.7): {field_diff_count} 条 task md 有飞书侧字段改动")
+    print(f"  📅 today_history += {today_date_iso_for_history}: {len(history_diffs)} 条(plan_skip 中缺今日的)")
 
     if plan_set_true:
         print(f"\n--- 设 today=true({len(plan_set_true)} 条)---")
@@ -3247,19 +4087,24 @@ def pull_today_from_feishu(apply: bool = False) -> None:
             print(f"  ... 还有 {len(plan_missing) - 10} 条")
 
     # v0.3.7: 字段 diff 详情(dry-run 必显示,apply 也显示让用户复核)
+    # v0.4.0(2026-05-28):加 H2 段 diff 显示(交付 / 用户故事,多行截 50 字)
     if field_diffs:
         print(f"\n--- 🔄 字段同步详情(飞书 → OB,共 {field_diff_count} 条 task md)---")
         for rid, d in field_diffs.items():
             print(f"  📝 {d['path'].name[:55]}")
-            for field, ob_val, fs_val in d["summary"]:
-                # 截断长 list / string 显示
-                def _short(v):
-                    s = str(v)
-                    return s if len(s) <= 35 else s[:32] + "..."
-                print(f"     • {field}: {_short(ob_val)} → {_short(fs_val)}")
 
-    if not (plan_set_true or plan_set_false or plan_missing or field_diffs):
-        print(f"\n✅ OB ↔ 飞书 today 状态 + 字段已对齐,无需更新")
+            def _short(v, limit=35):
+                s = str(v).replace("\n", " / ")
+                return s if len(s) <= limit else s[: limit - 3] + "..."
+
+            for field, ob_val, fs_val in d["summary"]:
+                print(f"     • {field}: {_short(ob_val)} → {_short(fs_val)}")
+            # H2 段(交付 / 用户故事)— 截 50 字方便看长文 diff
+            for h2_label, ob_val, fs_val in d.get("h2_summary", []) or []:
+                print(f"     • 📑 {h2_label}: {_short(ob_val, 50)} → {_short(fs_val, 50)}")
+
+    if not (plan_set_true or plan_set_false or plan_missing or field_diffs or history_diffs):
+        print(f"\n✅ OB ↔ 飞书 today 状态 + today_history + 字段已对齐,无需更新")
         return
 
     if not apply:
@@ -3283,6 +4128,18 @@ def pull_today_from_feishu(apply: bool = False) -> None:
                 merged[k] = v
         return merged
 
+    def _apply_h2_updates(rid_, p_) -> int:
+        """v0.4.0(2026-05-28):同步飞书 H2 段(交付 / 用户故事)→ task md 正文
+        Returns: 真改了的 H2 段数(0 / 1 / 2)
+        """
+        if rid_ not in field_diffs:
+            return 0
+        cnt = 0
+        for h2_title, new_content in (field_diffs[rid_].get("h2_updates") or {}).items():
+            if update_h2_section_in_task_md(p_, h2_title, new_content):
+                cnt += 1
+        return cnt
+
     for rid, title, p in plan_set_true:
         # 读现有 today_history,append 当日(去重)
         try:
@@ -3305,24 +4162,58 @@ def pull_today_from_feishu(apply: bool = False) -> None:
         final = _merge_with_field_diff(rid, base)
         field_changed = rid in field_diffs
         if update_md_frontmatter(p, final):
-            extra = f" + {len(field_diffs[rid]['summary'])} 字段 sync" if field_changed else ""
+            # v0.4.0(2026-05-28):H2 段同步(交付 / 用户故事)
+            h2_changed = _apply_h2_updates(rid, p)
+            fm_n = len(field_diffs[rid]['summary']) if field_changed else 0
+            extra_parts = []
+            if fm_n:
+                extra_parts.append(f"{fm_n} 字段 sync")
+            if h2_changed:
+                extra_parts.append(f"{h2_changed} H2 段 sync")
+            extra = (" + " + " + ".join(extra_parts)) if extra_parts else ""
             print(f"  ✅ {p.name}: today → true (+ today_history += {today_date_iso}){extra}")
             success_count += 1
-            if field_changed:
+            if field_changed or h2_changed:
                 field_sync_count += 1
         else:
             print(f"  ❌ {p.name}: 更新失败")
             fail_count += 1
 
     # v0.3.7: plan_skip 不再"真跳",对有字段 diff 的 task md 做字段 sync
+    # v0.4.0(2026-05-28):加 H2 段反向同步
+    # v0.4.0+ Step 3(2026-05-29)关键修:plan_skip 也维护 today_history 含今日
+    # 场景:跨天未完成 task,5/28 已 today=true,5/29 跑 pull-today → plan_skip
+    # 但 today_history 只有 [..., 5/28],缺 5/29 → 5/29 journal dataview 不显示
+    # 修:history_diffs 在 Step 4.6 预计算,这里直接用
     for rid, title, p in plan_skip:
-        if rid not in field_diffs:
-            continue  # 真跳:today + 字段都对齐
-        updates = field_diffs[rid]["updates"]
-        if update_md_frontmatter(p, updates):
-            print(f"  🔄 {p.name}: {len(field_diffs[rid]['summary'])} 字段 sync(today 已对齐)")
+        has_field_diff = rid in field_diffs
+        has_history_diff = rid in history_diffs
+
+        if not has_field_diff and not has_history_diff:
+            continue  # 完全跳:today + today_history + 字段 + H2 段都对齐
+
+        updates = dict(field_diffs[rid]["updates"]) if has_field_diff else {}
+        if has_history_diff:
+            updates["today_history"] = history_diffs[rid]
+        # frontmatter 更新
+        fm_ok = True
+        if updates:
+            fm_ok = update_md_frontmatter(p, updates)
+        if fm_ok:
+            h2_changed = _apply_h2_updates(rid, p)
+            fm_n = len(field_diffs[rid]['summary']) if has_field_diff else 0
+            parts = []
+            if has_history_diff:
+                parts.append(f"today_history += {today_date_iso_for_history}")
+            if fm_n:
+                parts.append(f"{fm_n} 字段")
+            if h2_changed:
+                parts.append(f"{h2_changed} H2 段")
+            label = " + ".join(parts) if parts else "0(无变化)"
+            print(f"  🔄 {p.name}: {label} sync(today 已对齐)")
             success_count += 1
-            field_sync_count += 1
+            if fm_n or h2_changed or has_history_diff:
+                field_sync_count += 1
         else:
             print(f"  ❌ {p.name}: 字段 sync 失败")
             fail_count += 1
@@ -3350,21 +4241,30 @@ def pull_today_from_feishu(apply: bool = False) -> None:
         final = _merge_with_field_diff(rid, base)
         field_changed = rid in field_diffs
         if update_md_frontmatter(p, final):
+            # v0.4.0(2026-05-28):H2 段同步
+            h2_changed = _apply_h2_updates(rid, p)
             suffix = f" (+ today_history -= {today_date_iso})" if history_changed else ""
-            extra = f" + {len(field_diffs[rid]['summary'])} 字段 sync" if field_changed else ""
+            fm_n = len(field_diffs[rid]['summary']) if field_changed else 0
+            extra_parts = []
+            if fm_n:
+                extra_parts.append(f"{fm_n} 字段 sync")
+            if h2_changed:
+                extra_parts.append(f"{h2_changed} H2 段 sync")
+            extra = (" + " + " + ".join(extra_parts)) if extra_parts else ""
             print(f"  ✅ {p.name}: today → false{suffix}{extra}")
             success_count += 1
-            if field_changed:
+            if field_changed or h2_changed:
                 field_sync_count += 1
         else:
             print(f"  ❌ {p.name}: 更新失败")
             fail_count += 1
 
     # ⚠️ v0.2.5 新增:自动建 task md(飞书有 OB 无)
+    # v0.4.0(2026-05-28):传 ob_index 让新建 task md 的 parent_task 能反向找 wikilink
     if plan_missing:
         print(f"\n🆕 自动建 task md({len(plan_missing)} 条)...")
         for rid, title, row in plan_missing:
-            created = _create_task_md_from_feishu_record(rid, row, fields_meta, config, vault_root)
+            created = _create_task_md_from_feishu_record(rid, row, fields_meta, config, vault_root, ob_index=ob_index)
             if created:
                 print(f"  ✅ 建: {created.name}")
                 created_count += 1
@@ -3390,6 +4290,12 @@ def main():
     parser.add_argument("--pull", action="store_true", help="反向同步:从飞书拉到 OB(老:写 journal inline)")
     parser.add_argument("--pull-today", action="store_true",
                         help="2026-05-26 上线:飞书「是否今日」=true → OB task md frontmatter today=true(双向对齐)")
+    parser.add_argument("--push-all-today", action="store_true",
+                        help="v0.4.0+ Step 3(2026-05-28):反向方向 — 批量推 OB today=true task md 到飞书 forward")
+    parser.add_argument("--migrate-today-history", action="store_true",
+                        help="v0.4.0+ Step 3(2026-05-28)一次性 migration — 把 today_history unquoted 改 quoted(修 dataview 不显示 bug)")
+    parser.add_argument("--migrate-today-history-unquote", action="store_true",
+                        help="v0.4.0+ Step 3(2026-05-29)反向 migration — quoted 改回 unquoted(上次 quoted 方向错了)")
     parser.add_argument("--since", help="--pull 模式的起始日期(YYYY-MM-DD)")
     parser.add_argument("--only-completed", action="store_true",
                         help="只同步已完成 task ([x] / [-]),跳过未完成的")
@@ -3427,8 +4333,18 @@ def main():
         print(json.dumps(result, ensure_ascii=False))
         return
 
+    if args.migrate_today_history:
+        migrate_today_history_quoted(apply=args.apply)
+        return
+
+    if args.migrate_today_history_unquote:
+        migrate_today_history_unquoted(apply=args.apply)
+        return
+
     if args.pull_today:
         pull_today_from_feishu(apply=args.apply)
+    elif args.push_all_today:
+        push_all_today_task_md(apply=args.apply)
     elif args.pull:
         pull_from_feishu(since_date=args.since, apply=args.apply)
     elif args.task_md:
