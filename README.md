@@ -3,9 +3,13 @@
 > 📋 **Obsidian ↔ 飞书项目管理多维表 全闭环同步工具**。让你既享受 Obsidian 的 ADHD 友好「子弹笔记式任务流」,又拥有飞书的「项目看板可视化」,**两端永远一致**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.5.3-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.6.0-blue.svg)](CHANGELOG.md)
 
 ---
+
+## 🚀 v0.6.0 上线 — 执行明细子表(daily execution log)双向 sync(2026-05-29)
+
+每条 task 关联 N 条 daily 明细 record,**解决 journal dataview 只能反映当下状态、看不到"那天结束时状态快照"的根本架构问题**。飞书侧加「执行状态」字段对齐 7 态;OB 端 task md 加「## 📈 执行明细」段 = `- 日期 \| 状态 \| key=val / ...`;sync.py 双向集成(push 跟子表 diff;pull-today pre-fetch 子表全表后 merge 写回);Cmd+P「📈 记录今日明细」3 步 wizard 快记。**同步修「批量推今日」取消今日不同步 bug**(只筛 OB today=true 漏掉 OB 改 false 的)。详见 [CHANGELOG v0.6.0](CHANGELOG.md#v060---2026-05-29)。
 
 ## 🚀 v0.5.3 上线 — 单条 pull/push(类 git)+ 修 SubDone 推不上 bug(2026-05-29)
 

@@ -264,6 +264,55 @@ task_md_fields:
   #     field_name: 项目             # select 字段名
   #     # link_table_id: null         # 注释掉或不填即走 select 模式
 
+# === 执行明细子表(daily execution log)===
+# v0.6.0(2026-05-29)上线:每条 task 关联 N 条「执行明细」record,每条 = 1 天的执行情况
+# 解决:原 task md frontmatter 只存 status 终极值,看不到"那天的状态"
+# OB 端用 task md 「## 📈 执行明细」段表达;飞书侧用主表「执行明细」link 字段关联子表
+#
+# 段格式(OB 端):
+#   ## 📈 执行明细
+#
+#   - 2026-05-28 | doing | plan=推 push-all bug 修复 / review=跑了 dry-run / est=2 / act=1.5 / done=标准完成
+#   - 2026-05-29 | done  | review=上线了 / act=3 / done=超额完成
+#
+# 规则:
+#   - 日期 | 状态(OB 小写 enum) | key=val / key=val / ...
+#   - 主键 = (task record_id, 日期);同日 OB 重写 → 飞书侧覆盖
+#   - 不写的 key 不推(空字段保护,跟主字段映射同款防御)
+#
+# 留空 table_id '' 或注释整段 → 禁用此功能(向后兼容 v0.5.x)
+execution_detail:
+  table_id: tblXXXXXXXXXX                  # 子表 table_id(从 feishu-cli bitable table list 拿)
+  link_field_on_main: 执行明细              # 主表里关联到子表的 link 字段名
+
+  # 子表字段映射(OB key → 飞书字段名);留空 field_name '' → 该字段不推/不拉
+  fields:
+    link_back:
+      field_name: 任务                     # 子表里关联回主表的 link 字段(必填,不可禁用)
+    date:
+      field_name: 日期                     # datetime 字段,毫秒时间戳
+    status:
+      field_name: 执行状态                  # select(v0.6.0 新加);OB 小写 → 飞书首字母大写
+      map:
+        todo: Todo
+        doing: Doing
+        subdone: SubDone
+        done: Done
+        block: Block
+        cancel: cancel                    # 飞书侧手建小写,保留(避免 SDK 大小写敏感)
+        idea: Idea
+    plan:
+      field_name: 计划&策略                 # text — OB 端 `plan=...` 抽到这里
+    review:
+      field_name: 执行&复盘                 # text — OB 端 `review=...` 抽到这里
+    estimate_hours:
+      field_name: 估时                     # number — OB 端 `est=...`
+    actual_hours:
+      field_name: 用时                     # number — OB 端 `act=...`
+    completion:
+      field_name: 完成度                   # select — OB 端 `done=...`(可选)
+      # 飞书选项:最小完成 / 标准完成 / 超额完成 / 阻碍 / 未启动 — OB 直填中文,不做映射
+
 # === 反向同步(飞书 → OB) ===
 # 2026-05-18 Phase 2.2 上线
 # 详见 spec: 04 Inbox/superpowers/specs/2026-05-18-sync.py-反向 pull 实现-设计.md

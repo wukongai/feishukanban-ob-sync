@@ -360,6 +360,25 @@ cat > "$SNIPPET_FILE" <<EOF
       "runOnStartup": false
     },
     "runOnStartup": false
+  },
+  {
+    "id": "log-detail-choice",
+    "name": "📈 记录今日明细(daily execution log)",
+    "type": "Macro",
+    "command": true,
+    "macro": {
+      "name": "📈 记录今日明细(daily execution log)",
+      "id": "log-detail-macro-id",
+      "commands": [{
+        "name": "记今天的执行状态 + 描述 → 飞书子表 record(v0.6.0)",
+        "type": "UserScript",
+        "id": "log-detail-userscript-cmd",
+        "path": "$SCRIPTS_DIR/userscripts/quickadd-记录今日明细.js",
+        "settings": {}
+      }],
+      "runOnStartup": false
+    },
+    "runOnStartup": false
   }
 ]
 EOF

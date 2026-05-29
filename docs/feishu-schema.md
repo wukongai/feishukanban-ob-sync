@@ -158,6 +158,49 @@ v0.2 推荐 4 个视图:
 
 ---
 
+## 📈 执行明细子表(v0.6.0 加,daily execution log)
+
+主表「执行明细」link 字段双向关联到独立子表(每条 task → N 条 daily 明细 record),解决 OB journal 看不到"那天结束时状态快照"的问题。
+
+### 子表字段(9 个)
+
+| 字段名 | 类型 | 用途 | OB key |
+|---|---|---|---|
+| **任务** | link → 主表 | 关联回主 task(双向) | `link_back` |
+| **日期** | datetime | 哪一天(主键) | `date` |
+| **执行状态** | select(7) | 当天状态(v0.6.0 新加,对齐主表) | `status` |
+| **计划&策略** | text | 当天打算 | `plan` |
+| **执行&复盘** | text | 当天实际 / 反思 | `review` |
+| **估时** | number | 当天估时 | `estimate_hours` |
+| **用时** | number | 当天用时 | `actual_hours` |
+| **完成度** | select(5) | 最小完成 / 标准完成 / 超额完成 / 阻碍 / 未启动 | `completion` |
+| id / 行号 | auto / formula | 计算字段 | — |
+
+### OB 端表达
+
+task md 加「## 📈 执行明细」段:
+```markdown
+## 📈 执行明细
+
+- 2026-05-28 | doing | plan=推 push-all bug 修复 / review=跑了 dry-run / est=2 / act=1.5 / done=标准完成
+- 2026-05-29 | done | review=上线了 / act=3 / done=超额完成
+```
+
+- 格式:`- 日期 | 状态(OB 小写 7 enum) | key=val / key=val / ...`
+- 主键 = (任务, 日期);同日 OB 重写 → 飞书侧覆盖
+- key 全可选(plan / review / est / act / done),不写不推
+- 完成度 `done=` 直填中文(最小完成 / 标准完成 / 超额完成 / 阻碍 / 未启动)
+
+### 同步行为
+
+- **push**(OB → 飞书):`sync.py --task-md --apply` 自动跑 — diff 子表 → CREATE / UPDATE / SKIP
+- **pull**(飞书 → OB):`sync.py --pull-today --apply` 自动跑 — pre-fetch 子表全表,merge 写回 OB 段
+- **Cmd+P 快记**:`📈 记录今日明细` 3 步 wizard(选状态 → 输入描述 → 自动 push)
+
+config:见 [config.example.yaml](../config.example.yaml) `execution_detail` 段。
+
+---
+
 ## 🔗 关联
 
 - [README.md](../README.md) — 主入口

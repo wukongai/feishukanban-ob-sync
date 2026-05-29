@@ -2,6 +2,65 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.6.0] - 2026-05-29 — 执行明细子表(daily execution log)双向 sync + 取消今日推送修复
+
+> **背景**:用户原话:"前一日 journal 看到的是 task 当下最新状态,不是那天的状态" + "飞书看板里有个执行明细子表,其实记录的就是历史执行状态" + "OB 上欠缺的就是这一点,每天的状态可以在这里做说明"。
+
+### 🆕 执行明细子表(daily execution log)双向 sync
+
+每条 task 关联 N 条 daily 明细 record,解决 journal dataview 只能反映 task **当下最新状态**、看不到"那天结束时的状态快照"的根本架构问题。
+
+**飞书侧**:
+- 子表「执行明细」(`tblbei3Z8davgeiF`) 加新字段「执行状态」(select,7 态对齐主表)
+- 已有字段:日期 / 计划&策略 / 执行&复盘 / 估时 / 用时 / 完成度 / 任务 link
+
+**OB 侧 task md 段**:
+```markdown
+## 📈 执行明细
+
+- 2026-05-28 | doing | plan=写完 push-all bug 修复 / review=跑了 dry-run / est=2 / act=1.5 / done=标准完成
+- 2026-05-29 | done | review=上线了 / act=3 / done=超额完成
+```
+- 格式:`- 日期 | 状态 | key=val / key=val / ...`
+- 日期 = 主键,同日 OB 重写飞书侧覆盖
+- key 全可选(plan / review / est / act / done),不写不推
+
+**sync.py 双向集成**:
+- 推:`--task-md --apply` 时跟飞书子表 diff,自动 CREATE / UPDATE / SKIP
+- 拉:`--pull-today --apply` 时 pre-fetch 子表全表(1 次 cli),按 task 分组 O(1) lookup,
+       merge 模式写回 OB「## 📈 执行明细」段(飞书覆盖同日,OB 独有保留)
+- 字段级 diff:date / link 跳过(格式差异),其他字段实质比对(支持 number 精度、select list 包裹)
+
+**Cmd+P 快记**:`📈 记录今日明细` UserScript — 3 步 wizard(选状态 → 输入描述 → 自动 push),
+直接在飞书子表加一条 record + 同步写本地段。
+
+### 🐛 修「批量推今日」取消今日不同步
+
+`push_all_today_task_md` 原只筛 OB `today=true`(line 2868),OB 把 today 改 false 的 task 被过滤,
+飞书侧「是否今日」永远停留在 true。
+
+修:union 飞书侧「是否今日=true」的 record_id 列表 → 把"取消今日"也纳入推送队列,
+推 false 给飞书。dry-run 标记 `[取消今日]`,汇总单独计数。
+
+### 📝 文档 / 配置
+
+- `config.example.yaml` 加 `execution_detail` 段(table_id / 字段映射 / status enum)
+- task md 模板加「## 📈 执行明细」段示例 + 注释
+- install.sh 加 `📈 记录今日明细` choice
+
+### 🛠 技术细节
+
+新加 sync.py 函数(4 个核心 + 4 个 helpers):
+- `parse_execution_details(body)` — 抽 OB 段 → list of dict
+- `_build_detail_fields_payload(detail, task_rid, config)` — OB dict → 飞书 fields
+- `push_execution_details(task_rid, ob_details, config, apply)` — 主推送(diff + plan + apply)
+- `pull_execution_details_for_task(task_rid, md_path, config, apply, prefetched)` — 反向拉(merge 写)
+- `_fetch_detail_records_for_task` / `_fetch_all_detail_records_grouped` — 子表拉取(单 / 批)
+- `_feishu_detail_row_to_ob_dict` / `_render_detail_line` — 翻译层
+- `_detail_values_equal` / `_extract_link_record_ids` — diff 比对 helpers
+
+`feishu_upsert_record(..., table_id=None)` 加可选 table_id 参数支持子表推送。
+
 ## [v0.5.3] - 2026-05-29 — 单条 pull/push(类 git 单条 commit)+ 修 SubDone 推不上 bug
 
 > **背景**:用户原话:"我会在本地 task 文档中更新执行状态,但是推到飞书之后执行状态更换成 subdone 状态没有在看板上变化" + "应该有一个单条拉单条推的功能,其实和 git 一样,只提交一条也不容易覆盖其他的"

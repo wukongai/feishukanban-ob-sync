@@ -992,6 +992,80 @@ def parse_journal(file_path: Path) -> list[dict]:
 # 设计参考 rules/feishu-project-sync.md「task md 化架构」section
 # ============================================================
 
+# v0.6.0(2026-05-29):执行明细 key=val 简写 → 内部 key
+# OB 端写「plan=... / review=... / est=2 / act=1.5 / done=标准完成」
+# 内部转 plan / review / estimate_hours(float) / actual_hours(float) / completion
+_DETAIL_KEY_ALIASES = {
+    "plan": "plan",
+    "review": "review",
+    "est": "estimate_hours",
+    "act": "actual_hours",
+    "done": "completion",
+}
+_DETAIL_NUMERIC_KEYS = {"estimate_hours", "actual_hours"}
+
+
+def parse_execution_details(body_text: str) -> list[dict]:
+    """抽 task md「## 📈 执行明细」段,解析每行为 dict。
+
+    v0.6.0(2026-05-29)加 — daily execution log 子表数据源。
+
+    格式(每行):
+        - YYYY-MM-DD | 状态 | plan=... / review=... / est=2 / act=1.5 / done=标准完成
+
+    Returns: [{date, status, plan?, review?, estimate_hours?, actual_hours?, completion?}, ...]
+             按日期升序排列。同日多行 → 后者覆盖前者(OB 端最新意图为准)。
+
+    边界:
+    - 段缺失 / 空 → []
+    - 行不符合格式(缺日期 / 日期格式错 / 缺状态)→ 跳过
+    - key=val 中未知 key → 忽略(向后兼容,未来加 key 不报错)
+    - 数值字段转 float 失败 → 跳过该 key
+    """
+    m = re.search(
+        r'^## +📈 +执行明细.*?\n(.*?)(?=\n## +|\Z)',
+        body_text, re.MULTILINE | re.DOTALL,
+    )
+    if not m:
+        return []
+    section = re.sub(r'<!--.*?-->', '', m.group(1), flags=re.DOTALL)
+
+    details_by_date: dict[str, dict] = {}
+    for raw_line in section.splitlines():
+        line = raw_line.strip()
+        if not line or not line.startswith("-"):
+            continue
+        line = line[1:].strip()  # 去 "- "
+        parts = [p.strip() for p in line.split("|", 2)]
+        if len(parts) < 2:
+            continue
+        date_str, status_str = parts[0], parts[1].lower()
+        if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+            continue
+        item = {"date": date_str, "status": status_str}
+        # 第 3 段:key=val 列表,/ 分隔
+        if len(parts) == 3 and parts[2]:
+            for kv in parts[2].split("/"):
+                kv = kv.strip()
+                if "=" not in kv:
+                    continue
+                key, val = kv.split("=", 1)
+                key, val = key.strip().lower(), val.strip()
+                if not val or key not in _DETAIL_KEY_ALIASES:
+                    continue
+                internal = _DETAIL_KEY_ALIASES[key]
+                if internal in _DETAIL_NUMERIC_KEYS:
+                    try:
+                        item[internal] = float(val)
+                    except ValueError:
+                        pass
+                else:
+                    item[internal] = val
+        details_by_date[date_str] = item
+
+    return [details_by_date[d] for d in sorted(details_by_date)]
+
+
 def parse_task_md(md_path: Path, config: dict) -> Optional[dict]:
     """解析 task md 文件,返回结构化字典(供 build_fields_payload 用)
 
@@ -1174,6 +1248,9 @@ def parse_task_md(md_path: Path, config: dict) -> Optional[dict]:
         # today_flag: 2026-05-26 v0.2.4 加 — 是否今日
         # YAML 已解析为 bool;但用户手写 "true"/"false" 字符串也兼容
         "today_flag": _coerce_bool(fm.get("today")),
+        # v0.6.0(2026-05-29):执行明细 — daily 子表数据源
+        # list of dict,sync.py push 时跟飞书子表 diff 后补差异
+        "execution_details": parse_execution_details(body),
     }
 
 
@@ -1910,10 +1987,12 @@ def feishu_get_record(record_id: str, config: dict) -> Optional[dict]:
         return None
 
 
-def feishu_upsert_record(record_id: Optional[str], fields: dict, config: dict, dry_run: bool = True) -> dict:
+def feishu_upsert_record(record_id: Optional[str], fields: dict, config: dict, dry_run: bool = True,
+                         table_id: Optional[str] = None) -> dict:
     """创建/更新 record。
     - record_id=None → 创建
     - record_id="rec..." → 更新
+    - table_id(v0.6.0):可选,指定子表 table_id;None 时走 config["feishu"]["table_id"] 主表
     返回 {action, record_id, payload}(dry_run 时不调 cli)
     """
     action = "update" if record_id else "create"
@@ -1923,7 +2002,7 @@ def feishu_upsert_record(record_id: Optional[str], fields: dict, config: dict, d
         return {"action": action, "record_id": record_id, "payload": payload, "_dry_run": True}
 
     base_token = config["feishu"]["base_token"]
-    table_id = config["feishu"]["table_id"]
+    table_id = table_id or config["feishu"]["table_id"]
     cli_args = [
         "bitable", "record", "upsert",
         "--base-token", base_token,
@@ -2118,6 +2197,474 @@ def date_to_ms(date_str: str) -> int:
     # 假设是 UTC+8 当天 0 点
     dt = dt.replace(tzinfo=timezone(timedelta(hours=8)))
     return int(dt.timestamp() * 1000)
+
+
+def ms_to_date_str(val) -> Optional[str]:
+    """飞书 datetime 字段值 → YYYY-MM-DD(UTC+8)。失败返回 None。
+
+    支持两种输入(cli 实测):
+    - 整数 / 数字字符串:毫秒时间戳(写入用)
+    - "YYYY-MM-DD HH:MM:SS" 字符串(cli list 返回格式)
+    """
+    if val is None or val == "":
+        return None
+    # 字符串先试 "YYYY-MM-DD HH:MM:SS" / "YYYY-MM-DD" 直读
+    if isinstance(val, str):
+        m = re.match(r'^(\d{4}-\d{2}-\d{2})', val)
+        if m:
+            return m.group(1)
+    # fallback:毫秒时间戳
+    try:
+        ms_int = int(val)
+    except (ValueError, TypeError):
+        return None
+    dt = datetime.fromtimestamp(ms_int / 1000, tz=timezone(timedelta(hours=8)))
+    return dt.strftime("%Y-%m-%d")
+
+
+# ============================================================
+# v0.6.0(2026-05-29):执行明细子表(daily execution log)推送
+# ============================================================
+
+def _extract_link_record_ids(link_val) -> list[str]:
+    """cli list 返回的 link 字段值 → record_id list。
+    可能的格式:[{'id': 'recXXX'}, ...] / ['recXXX', ...] / 'recXXX' / None
+    """
+    if not link_val:
+        return []
+    if isinstance(link_val, str):
+        return [link_val]
+    if isinstance(link_val, list):
+        out = []
+        for item in link_val:
+            if isinstance(item, dict) and "id" in item:
+                out.append(item["id"])
+            elif isinstance(item, str):
+                out.append(item)
+        return out
+    return []
+
+
+def _detail_values_equal(new_val, old_val) -> bool:
+    """判断两个 fields 值是否"实质相等",用于 diff 检测。
+    覆盖 None / list / number 精度 / link 字段 (record_id 集合相等)。
+    """
+    if new_val is None and old_val is None:
+        return True
+    if new_val is None or old_val is None:
+        return False
+    # link 字段:list of dict({id}) or list of str
+    if isinstance(new_val, list) and isinstance(old_val, list):
+        new_rids = _extract_link_record_ids(new_val)
+        old_rids = _extract_link_record_ids(old_val)
+        if new_rids or old_rids:
+            return sorted(new_rids) == sorted(old_rids)
+        return new_val == old_val
+    # 数字精度容忍
+    if isinstance(new_val, (int, float)) and isinstance(old_val, (int, float)):
+        return abs(new_val - old_val) < 0.001
+    return str(new_val).strip() == str(old_val).strip()
+
+
+def _fetch_detail_records_for_task(task_record_id: str, config: dict) -> list[tuple[str, dict]]:
+    """拉子表里关联到指定 task 的 record。
+
+    Returns: [(detail_record_id, fields_dict), ...]
+            fields_dict 形如 {field_name: value, ...}
+    实现:cli list 全表 → client-side filter link_back 字段含 task_record_id。
+    性能:子表 record 量级几百到几千,200/页 list 几页搞定。
+    """
+    detail_cfg = config.get("execution_detail")
+    if not detail_cfg or not detail_cfg.get("table_id"):
+        return []
+    link_field = detail_cfg["fields"]["link_back"]["field_name"]
+
+    all_records, all_ids = [], []
+    fields_meta = None
+    offset = 0
+    while True:
+        result = run_cli([
+            "bitable", "record", "list",
+            "--base-token", config["feishu"]["base_token"],
+            "--table-id", detail_cfg["table_id"],
+            "--limit", "200",
+            "--offset", str(offset),
+        ])
+        page_records = result.get("data", [])
+        page_ids = result.get("record_id_list", [])
+        if fields_meta is None:
+            fields_meta = result.get("fields", [])
+        if not page_records:
+            break
+        all_records.extend(page_records)
+        all_ids.extend(page_ids)
+        if len(page_records) < 200:
+            break
+        offset += 200
+
+    if not fields_meta or link_field not in fields_meta:
+        return []
+    link_idx = fields_meta.index(link_field)
+
+    matched = []
+    for rid, row in zip(all_ids, all_records):
+        link_val = row[link_idx] if link_idx < len(row) else None
+        if task_record_id in _extract_link_record_ids(link_val):
+            fields_dict = {fields_meta[i]: (row[i] if i < len(row) else None)
+                           for i in range(len(fields_meta))}
+            matched.append((rid, fields_dict))
+    return matched
+
+
+def _build_detail_fields_payload(detail: dict, task_record_id: str, config: dict) -> dict:
+    """OB 端单条明细 dict → 飞书子表 record fields payload。
+
+    detail 形如 {date, status, plan?, review?, estimate_hours?, actual_hours?, completion?}
+    空字段不写(跟主字段映射"空字段不清空"策略一致)。
+    """
+    detail_cfg = config["execution_detail"]
+    fmap = detail_cfg["fields"]
+    out = {}
+
+    # 日期(必填,毫秒时间戳)
+    date_field = fmap["date"]["field_name"]
+    out[date_field] = date_to_ms(detail["date"])
+
+    # 执行状态(select,OB 小写 → 飞书首字母大写,list 包裹以对齐 cli list 返回格式)
+    status_cfg = fmap.get("status", {})
+    status_field = status_cfg.get("field_name")
+    if status_field and detail.get("status"):
+        feishu_status = status_cfg.get("map", {}).get(detail["status"])
+        if feishu_status:
+            out[status_field] = [feishu_status]
+
+    # 文本字段
+    for ob_key in ("plan", "review"):
+        fcfg = fmap.get(ob_key, {})
+        fname = fcfg.get("field_name")
+        if fname and detail.get(ob_key):
+            out[fname] = detail[ob_key]
+
+    # 数字字段
+    for ob_key in ("estimate_hours", "actual_hours"):
+        fcfg = fmap.get(ob_key, {})
+        fname = fcfg.get("field_name")
+        val = detail.get(ob_key)
+        if fname and val is not None:
+            try:
+                out[fname] = float(val)
+            except (ValueError, TypeError):
+                pass
+
+    # 完成度(select,list 包裹对齐 cli list 返回格式)
+    comp_cfg = fmap.get("completion", {})
+    comp_field = comp_cfg.get("field_name")
+    if comp_field and detail.get("completion"):
+        out[comp_field] = [detail["completion"]]
+
+    # link_back(关联回主 task)
+    link_field = fmap["link_back"]["field_name"]
+    out[link_field] = [task_record_id]
+
+    return out
+
+
+def push_execution_details(task_record_id: str, ob_details: list[dict],
+                           config: dict, apply: bool = False) -> dict:
+    """推 OB 明细段到飞书子表(v0.6.0)。
+
+    diff 策略:
+      - OB 有 飞书无(按日期 key)→ CREATE
+      - OB 有 飞书有同日 → 字段 diff → UPDATE(只更新有差异的字段)
+      - OB 无 飞书有 → 暂不删(空字段保护,跟主字段映射策略一致)
+      - 同日 OB 多行 → parse_execution_details 已去重为最后一行
+
+    禁用条件:
+      - config 无 execution_detail 段 / table_id 空 → 整段跳过(返回 _disabled)
+      - task 还没 record_id(CREATE 主表中)→ 跳过(主 record_id 拿到后下次 push 再推明细)
+      - OB 无明细行 → 跳过(不强制每个 task 都有明细)
+
+    Returns: {creates: [...], updates: [...], skipped: [...], errors: [...]}
+    """
+    detail_cfg = config.get("execution_detail")
+    if not detail_cfg or not detail_cfg.get("table_id"):
+        return {"_disabled": True, "creates": [], "updates": [], "skipped": [], "errors": []}
+    if not task_record_id or not ob_details:
+        return {"creates": [], "updates": [], "skipped": [], "errors": []}
+
+    date_field = detail_cfg["fields"]["date"]["field_name"]
+
+    # 拉飞书已有 → 按日期 index
+    existing_by_date: dict[str, tuple[str, dict]] = {}
+    try:
+        for det_rid, fdict in _fetch_detail_records_for_task(task_record_id, config):
+            date_iso = ms_to_date_str(fdict.get(date_field))
+            if date_iso:
+                existing_by_date[date_iso] = (det_rid, fdict)
+    except Exception as e:
+        return {"creates": [], "updates": [], "skipped": [], "errors": [f"拉飞书子表失败: {e}"]}
+
+    plan = {"creates": [], "updates": [], "skipped": [], "errors": []}
+
+    for ob_detail in ob_details:
+        date_iso = ob_detail["date"]
+        new_fields = _build_detail_fields_payload(ob_detail, task_record_id, config)
+        if date_iso not in existing_by_date:
+            plan["creates"].append({"date": date_iso, "fields": new_fields})
+            continue
+        existing_rid, existing_fields = existing_by_date[date_iso]
+        # diff:跳过 date / link_back 两个"识别字段"
+        # - date 已用作 dict key 匹配,飞书 cli list 返回 "YYYY-MM-DD HH:MM:SS" 跟 OB 端毫秒整数对不上
+        # - link_back 已是 task_record_id 反查的结果,飞书侧 [{id}] 格式跟 [rid] list 对不上
+        # 这两个字段格式差异不算业务 diff,跳过避免误判
+        date_field = detail_cfg["fields"]["date"]["field_name"]
+        link_field = detail_cfg["fields"]["link_back"]["field_name"]
+        diff = {}
+        for fname, new_val in new_fields.items():
+            if fname in (date_field, link_field):
+                continue
+            if not _detail_values_equal(new_val, existing_fields.get(fname)):
+                diff[fname] = new_val
+        if diff:
+            plan["updates"].append({"date": date_iso, "record_id": existing_rid, "fields": diff})
+        else:
+            plan["skipped"].append({"date": date_iso, "record_id": existing_rid})
+
+    if not apply:
+        return plan
+
+    # 真推
+    table_id = detail_cfg["table_id"]
+    for c in plan["creates"]:
+        try:
+            result = feishu_upsert_record(
+                record_id=None, fields=c["fields"], config=config,
+                dry_run=False, table_id=table_id,
+            )
+            c["record_id"] = result.get("record_id")
+        except Exception as e:
+            plan["errors"].append({"date": c["date"], "op": "CREATE", "error": str(e)})
+    for u in plan["updates"]:
+        try:
+            feishu_upsert_record(
+                record_id=u["record_id"], fields=u["fields"], config=config,
+                dry_run=False, table_id=table_id,
+            )
+        except Exception as e:
+            plan["errors"].append({"date": u["date"], "op": "UPDATE", "error": str(e)})
+
+    return plan
+
+
+def _feishu_detail_row_to_ob_dict(fdict: dict, config: dict) -> Optional[dict]:
+    """飞书子表一条 record(fields dict)→ OB 端 detail dict。
+    用于 pull-today 反向 sync(飞书 → OB)。
+    """
+    detail_cfg = config["execution_detail"]
+    fmap = detail_cfg["fields"]
+
+    date_field = fmap["date"]["field_name"]
+    date_iso = ms_to_date_str(fdict.get(date_field))
+    if not date_iso:
+        return None
+
+    item = {"date": date_iso, "status": "todo"}
+
+    # 执行状态:飞书 → OB 小写(反向 map)
+    status_cfg = fmap.get("status", {})
+    sfield = status_cfg.get("field_name")
+    if sfield:
+        raw = fdict.get(sfield)
+        if isinstance(raw, list) and raw:
+            raw = raw[0]
+        if raw:
+            inverse_map = {v: k for k, v in status_cfg.get("map", {}).items()}
+            item["status"] = inverse_map.get(str(raw), "todo")
+
+    # 文本字段
+    for ob_key in ("plan", "review"):
+        fname = fmap.get(ob_key, {}).get("field_name")
+        if fname:
+            val = fdict.get(fname)
+            if val:
+                item[ob_key] = str(val).strip()
+
+    # 数字字段
+    for ob_key in ("estimate_hours", "actual_hours"):
+        fname = fmap.get(ob_key, {}).get("field_name")
+        if fname:
+            val = fdict.get(fname)
+            if val is not None and val != "":
+                try:
+                    item[ob_key] = float(val)
+                except (ValueError, TypeError):
+                    pass
+
+    # 完成度(select)
+    cfield = fmap.get("completion", {}).get("field_name")
+    if cfield:
+        raw = fdict.get(cfield)
+        if isinstance(raw, list) and raw:
+            raw = raw[0]
+        if raw:
+            item["completion"] = str(raw).strip()
+
+    return item
+
+
+def _render_detail_line(detail: dict) -> str:
+    """OB detail dict → markdown 行 `- YYYY-MM-DD | 状态 | key=val / key=val / ...`。
+    key 顺序固定(plan / review / est / act / done),空字段不显示。
+    数字字段整数化(2.0 → 2)。
+    """
+    KEY_ORDER = [
+        ("plan", "plan"),
+        ("review", "review"),
+        ("estimate_hours", "est"),
+        ("actual_hours", "act"),
+        ("completion", "done"),
+    ]
+    parts = []
+    for internal, short in KEY_ORDER:
+        val = detail.get(internal)
+        if val is None or val == "":
+            continue
+        if internal in ("estimate_hours", "actual_hours"):
+            val_str = str(int(val)) if isinstance(val, (int, float)) and val == int(val) else str(val)
+        else:
+            val_str = str(val).strip()
+        parts.append(f"{short}={val_str}")
+    kv_str = " / ".join(parts)
+    base = f"- {detail['date']} | {detail.get('status', 'todo')}"
+    return f"{base} | {kv_str}" if kv_str else base
+
+
+def _fetch_all_detail_records_grouped(config: dict) -> dict:
+    """拉飞书子表全表,按 link_back(任务 record_id)分组。
+
+    用于批量场景(pull_today_from_feishu)避免每个 task 单独 list 子表。
+    单 task 单条 push 仍走 _fetch_detail_records_for_task 不需要 prefetch。
+
+    Returns: {task_rid: [(det_rid, fields_dict), ...]}
+    """
+    detail_cfg = config.get("execution_detail")
+    if not detail_cfg or not detail_cfg.get("table_id"):
+        return {}
+    link_field = detail_cfg["fields"]["link_back"]["field_name"]
+
+    all_records, all_ids = [], []
+    fields_meta = None
+    offset = 0
+    while True:
+        result = run_cli([
+            "bitable", "record", "list",
+            "--base-token", config["feishu"]["base_token"],
+            "--table-id", detail_cfg["table_id"],
+            "--limit", "200",
+            "--offset", str(offset),
+        ])
+        page_records = result.get("data", [])
+        page_ids = result.get("record_id_list", [])
+        if fields_meta is None:
+            fields_meta = result.get("fields", [])
+        if not page_records:
+            break
+        all_records.extend(page_records)
+        all_ids.extend(page_ids)
+        if len(page_records) < 200:
+            break
+        offset += 200
+
+    if not fields_meta or link_field not in fields_meta:
+        return {}
+    link_idx = fields_meta.index(link_field)
+
+    grouped: dict = {}
+    for rid, row in zip(all_ids, all_records):
+        link_val = row[link_idx] if link_idx < len(row) else None
+        fields_dict = {fields_meta[i]: (row[i] if i < len(row) else None)
+                       for i in range(len(fields_meta))}
+        for trid in _extract_link_record_ids(link_val):
+            grouped.setdefault(trid, []).append((rid, fields_dict))
+    return grouped
+
+
+def pull_execution_details_for_task(task_record_id: str, md_path: Path,
+                                     config: dict, apply: bool = False,
+                                     prefetched_records: Optional[list] = None) -> dict:
+    """拉飞书子表 → 写 OB 端「## 📈 执行明细」段(merge 模式)。
+
+    merge 策略(飞书 → OB):
+      - 飞书有同日 → 覆盖 OB 同日(pull 方向)
+      - 飞书有新日期 → 加进 OB 段
+      - OB 有 飞书没有 → 保留 OB(可能是 OB 端最新加但还没 push)
+
+    禁用条件:
+      - config.execution_detail.table_id 空 → _disabled
+      - task_record_id 为空 → skipped
+
+    prefetched_records:可选,批量场景从 _fetch_all_detail_records_grouped 拿,避免反复 cli list。
+                       格式跟 _fetch_detail_records_for_task 返回一致。
+
+    Returns: {changed, added, updated, kept_ob_only, dry_run?, _disabled?, error?}
+    """
+    detail_cfg = config.get("execution_detail")
+    if not detail_cfg or not detail_cfg.get("table_id"):
+        return {"_disabled": True, "changed": False}
+    if not task_record_id:
+        return {"changed": False, "reason": "no_record_id"}
+
+    # 1. 拉飞书子表 records(关联到此 task)
+    if prefetched_records is not None:
+        feishu_records = prefetched_records
+    else:
+        try:
+            feishu_records = _fetch_detail_records_for_task(task_record_id, config)
+        except Exception as e:
+            return {"changed": False, "error": f"拉飞书子表失败: {e}"}
+
+    # 2. 飞书 record → OB dict by date
+    feishu_by_date: dict[str, dict] = {}
+    for _, fdict in feishu_records:
+        ob_d = _feishu_detail_row_to_ob_dict(fdict, config)
+        if ob_d:
+            feishu_by_date[ob_d["date"]] = ob_d
+
+    # 3. 读 OB 当前段
+    try:
+        body = md_path.read_text(encoding="utf-8")
+    except Exception as e:
+        return {"changed": False, "error": f"读 task md 失败: {e}"}
+    ob_by_date = {d["date"]: d for d in parse_execution_details(body)}
+
+    # 4. merge:飞书优先,OB 独有保留
+    merged = dict(ob_by_date)
+    added = updated = 0
+    for date, fd in feishu_by_date.items():
+        if date not in merged:
+            added += 1
+            merged[date] = fd
+        elif merged[date] != fd:
+            updated += 1
+            merged[date] = fd
+    kept_ob_only = sum(1 for d in ob_by_date if d not in feishu_by_date)
+
+    if not merged:
+        return {"changed": False, "added": 0, "updated": 0, "kept_ob_only": 0}
+    if added == 0 and updated == 0:
+        return {"changed": False, "added": 0, "updated": 0, "kept_ob_only": kept_ob_only}
+
+    # 5. 渲染新段
+    new_section = "\n" + "\n".join(_render_detail_line(merged[d]) for d in sorted(merged)) + "\n"
+
+    if not apply:
+        return {"changed": True, "added": added, "updated": updated,
+                "kept_ob_only": kept_ob_only, "dry_run": True}
+
+    # 6. 写文件
+    if update_h2_section_in_task_md(md_path, "## 📈 执行明细", new_section):
+        return {"changed": True, "added": added, "updated": updated, "kept_ob_only": kept_ob_only}
+    return {"changed": False, "reason": "write_failed"}
 
 
 def derive_iteration_week_candidate(done_date_str: str, template: str) -> str:
@@ -2433,7 +2980,36 @@ def push_task_md(md_path: Path, apply: bool = False, _silent_fail: bool = False)
     fields = build_fields_payload(task, config, VAULT_ROOT, existing_delivery="")
     print(f"\n    Payload: {json.dumps(fields, ensure_ascii=False, indent=6)[:800]}")
 
+    # v0.6.0(2026-05-29):执行明细预览(dry-run + apply 都打)
+    ob_details = task.get("execution_details", [])
+    if ob_details:
+        print(f"\n    📈 执行明细({len(ob_details)} 条):")
+        for d in ob_details:
+            preview = []
+            for k in ("plan", "review", "estimate_hours", "actual_hours", "completion"):
+                if d.get(k) is not None:
+                    short = str(d[k])[:30] + ("..." if len(str(d[k])) > 30 else "")
+                    preview.append(f"{k}={short}")
+            print(f"      - {d['date']} | {d['status']} | {' / '.join(preview) or '(无 key)'}")
+
     if not apply:
+        # v0.6.0:dry-run 也跑明细 plan(纯本地 diff,不调 cli 写;但要拉一次飞书子表)
+        if ob_details and task.get("record_id"):
+            print(f"\n    📈 执行明细 dry-run plan(拉飞书子表对比):")
+            try:
+                plan = push_execution_details(task["record_id"], ob_details, config, apply=False)
+                if plan.get("_disabled"):
+                    print(f"      ⏭  config.execution_detail.table_id 未配置,跳过")
+                else:
+                    print(f"      ➕ CREATE: {len(plan['creates'])} 条 / 🔄 UPDATE: {len(plan['updates'])} 条 / ⏭  SKIP: {len(plan['skipped'])} 条")
+                    for c in plan["creates"]:
+                        print(f"        ➕ {c['date']}: {list(c['fields'].keys())}")
+                    for u in plan["updates"]:
+                        print(f"        🔄 {u['date']} ({u['record_id']}): diff fields = {list(u['fields'].keys())}")
+            except Exception as e:
+                print(f"      ⚠️  明细 plan 失败: {e}")
+        elif ob_details and not task.get("record_id"):
+            print(f"      ⏭  主 task 还没 CREATE(无 record_id),明细要等主 CREATE 后下次 push 才推")
         print(f"\n📌 dry-run 完成。--apply 真写飞书 + 回写 feishu_record/url 到 task md")
         return {"success": True, "action": action, "record_id": task.get("record_id"), "path": str(md_path), "dry_run": True} if _silent_fail else None
 
@@ -2473,6 +3049,22 @@ def push_task_md(md_path: Path, apply: bool = False, _silent_fail: bool = False)
     if is_create:
         if inject_completion_link(md_path, task["title"], record_url):
             print(f"🔗 已把「## ✅ 完成标记」段 checkbox 行改为带链接的 markdown link")
+
+    # v0.6.0(2026-05-29):主 task push 完后推执行明细子表
+    if ob_details:
+        print(f"\n📈 推送执行明细子表({len(ob_details)} 条 OB 端明细)...")
+        try:
+            detail_plan = push_execution_details(record_id, ob_details, config, apply=True)
+            if detail_plan.get("_disabled"):
+                print(f"   ⏭  config.execution_detail.table_id 未配置,跳过明细推送")
+            else:
+                c, u, s, e = (len(detail_plan["creates"]), len(detail_plan["updates"]),
+                              len(detail_plan["skipped"]), len(detail_plan["errors"]))
+                print(f"   ✅ CREATE {c} / UPDATE {u} / SKIP {s} / ERROR {e}")
+                for err in detail_plan["errors"]:
+                    print(f"      ❌ {err}")
+        except Exception as e:
+            print(f"   ⚠️  明细推送异常: {e}(主 task push 已成功,不影响)")
 
     return {"success": True, "action": action, "record_id": record_id, "path": str(md_path)} if _silent_fail else None
 
@@ -2848,7 +3440,11 @@ def push_all_today_task_md(apply: bool = False) -> None:
     (对称 pull-today 飞书 → OB 的反向操作)
 
     扫描范围:全 vault(对齐 v0.4.0 Step 3 `_scan_ob_task_md_by_feishu_record` 的全 vault 扫)
-    过滤:today=true(对应飞书侧也勾「是否今日」=true 的 task)
+    过滤(v0.5.4 起 union):
+      - OB today=true → 推(同步所有字段)
+      - 飞书 是否今日=true 但 OB today=false → 推(同步"取消今日",把 false 写回飞书)
+    旧版只筛 OB today=true,导致用户在 OB 端把 today 改成 false 时这条被过滤,
+    飞书侧 是否今日 永远停留在 true。
 
     冲突策略:OB 覆盖飞书(对称 pull-today 的"飞书覆盖 OB")
     防御:`build_fields_payload` 内部已 handle 空字段(空字段不写),不会清空飞书侧已有数据
@@ -2862,14 +3458,36 @@ def push_all_today_task_md(apply: bool = False) -> None:
         print(f"📌 dry-run(--apply 才真写)")
     print(f"{'='*60}\n")
 
-    # 扫全 vault 找 today=true 的 task md
-    print("⏳ 扫 OB vault task md(全 vault,today=true 过滤)...")
+    # 扫全 vault task md 索引(按 feishu_record)
+    print("⏳ 扫 OB vault task md(全 vault,按 feishu_record 建索引)...")
     ob_index = _scan_ob_task_md_by_feishu_record(vault_root)
-    today_entries = [(rid, entry) for rid, entry in ob_index.items() if entry["today"]]
-    print(f"✅ 找到 {len(today_entries)} 条 today=true task md\n")
+
+    # v0.5.4(2026-05-28):拉飞书侧「是否今日」=true 的 record_id 列表,
+    # 让"OB 把 today: true 改成 false"这种"取消今日"场景也能被推上去
+    # (原版只筛 OB today=true → 改 false 的 task 被直接过滤,飞书侧永远不更新)
+    print("⏳ 拉飞书侧 是否今日=true record_id 列表(为侦测取消今日)...")
+    feishu_today_rids: set = set()
+    try:
+        all_records, all_ids, fields_meta = _fetch_all_records_from_feishu(config)
+        feishu_today_rids = {rid for rid, _ in filter_today_tasks(all_records, all_ids, fields_meta, config)}
+        print(f"✅ 飞书 是否今日=true: {len(feishu_today_rids)} 条")
+    except Exception as e:
+        print(f"⚠️  拉飞书侧 是否今日=true 列表失败({e}),只推 OB today=true(取消今日场景将漏推)")
+
+    # 分类:
+    # - ob_today_true: OB today=true → 推所有字段(原行为)
+    # - cancel_today: 飞书=true 但 OB today=false / 缺失 → 推 today=false(取消今日)
+    ob_today_rids = {rid for rid, entry in ob_index.items() if entry["today"]}
+    cancel_today_rids = {
+        rid for rid in feishu_today_rids
+        if rid in ob_index and not ob_index[rid]["today"]
+    }
+    push_rids = ob_today_rids | cancel_today_rids
+    today_entries = [(rid, ob_index[rid]) for rid in push_rids]
+    print(f"✅ 待推 {len(today_entries)} 条(today=true: {len(ob_today_rids)},取消今日: {len(cancel_today_rids)})\n")
 
     if not today_entries:
-        print("⚠️  无 today=true task md 可推,退出")
+        print("⚠️  无可推 task md(OB today=true 与 飞书 是否今日=true 均空),退出")
         return
 
     # 逐条 push
@@ -2877,14 +3495,16 @@ def push_all_today_task_md(apply: bool = False) -> None:
     fail_count = 0
     create_count = 0
     update_count = 0
+    cancel_count = 0
     failures = []
     for rid, entry in today_entries:
         p = entry["path"]
+        is_cancel = rid in cancel_today_rids
         print(f"\n{'─'*60}")
         try:
-            print(f"📍 {p.relative_to(vault_root)}")
+            print(f"📍 {p.relative_to(vault_root)}{' [取消今日]' if is_cancel else ''}")
         except Exception:
-            print(f"📍 {p}")
+            print(f"📍 {p}{' [取消今日]' if is_cancel else ''}")
         result = push_task_md(p, apply=apply, _silent_fail=True)
         if result is None:
             # 不应该到这里(_silent_fail=True 必返 dict)
@@ -2897,13 +3517,15 @@ def push_all_today_task_md(apply: bool = False) -> None:
                 create_count += 1
             elif result.get("action") == "UPDATE":
                 update_count += 1
+            if is_cancel:
+                cancel_count += 1
         else:
             fail_count += 1
             failures.append((p, result.get("error", "未知错误")))
 
     print(f"\n{'='*60}")
     print(f"📊 push-all-today {'apply' if apply else 'dry-run'} 汇总:")
-    print(f"  ✅ 成功: {success_count}({create_count} CREATE / {update_count} UPDATE)")
+    print(f"  ✅ 成功: {success_count}({create_count} CREATE / {update_count} UPDATE,其中 {cancel_count} 条为取消今日)")
     print(f"  ❌ 失败: {fail_count}")
     if failures:
         print(f"\n失败详情:")
@@ -4147,6 +4769,17 @@ def pull_today_from_feishu(apply: bool = False) -> None:
     ob_index = _scan_ob_task_md_by_feishu_record(vault_root)
     print(f"✅ OB 共 {len(ob_index)} 个 task md(有 feishu_record 关联的)\n")
 
+    # v0.6.0(2026-05-29):pre-fetch 子表全表,按 task 分组(执行明细反向同步)
+    # 配置未开启 execution_detail 时返回空 dict,后续逻辑自动跳过
+    detail_records_by_task: dict = {}
+    if config.get("execution_detail", {}).get("table_id"):
+        print("⏳ 拉飞书子表 record(执行明细反向 sync)...")
+        try:
+            detail_records_by_task = _fetch_all_detail_records_grouped(config)
+            print(f"✅ 子表共 {sum(len(v) for v in detail_records_by_task.values())} 条 record,涉及 {len(detail_records_by_task)} 个 task\n")
+        except Exception as e:
+            print(f"⚠️  拉子表失败,本次跳过明细反向 sync: {e}\n")
+
     # Step 4: 分类计划
     plan_set_true = []    # 飞书=true, OB 有 today=false → set true
     plan_set_false = []   # 飞书=false, OB 有 today=true → set false
@@ -4327,6 +4960,18 @@ def pull_today_from_feishu(apply: bool = False) -> None:
                 cnt += 1
         return cnt
 
+    def _pull_details(rid_, p_) -> Optional[dict]:
+        """v0.6.0(2026-05-29):拉飞书子表 → 写 OB 端「## 📈 执行明细」段(merge 模式)。
+        prefetched 在函数入口已批量拉,这里只做 dict lookup。
+        Returns: pull_execution_details_for_task 的结果 dict,或 None(配置未启用 / 此 task 无明细)
+        """
+        if not detail_records_by_task and not config.get("execution_detail", {}).get("table_id"):
+            return None
+        prefetched = detail_records_by_task.get(rid_, [])
+        return pull_execution_details_for_task(
+            rid_, p_, config, apply=True, prefetched_records=prefetched,
+        )
+
     for rid, title, p in plan_set_true:
         # 读现有 today_history,append 当日(去重)
         try:
@@ -4351,16 +4996,20 @@ def pull_today_from_feishu(apply: bool = False) -> None:
         if update_md_frontmatter(p, final):
             # v0.4.0(2026-05-28):H2 段同步(交付 / 用户故事)
             h2_changed = _apply_h2_updates(rid, p)
+            # v0.6.0(2026-05-29):执行明细子表反向 sync
+            det_res = _pull_details(rid, p)
             fm_n = len(field_diffs[rid]['summary']) if field_changed else 0
             extra_parts = []
             if fm_n:
                 extra_parts.append(f"{fm_n} 字段 sync")
             if h2_changed:
                 extra_parts.append(f"{h2_changed} H2 段 sync")
+            if det_res and det_res.get("changed"):
+                extra_parts.append(f"明细 +{det_res.get('added', 0)}/~{det_res.get('updated', 0)}")
             extra = (" + " + " + ".join(extra_parts)) if extra_parts else ""
             print(f"  ✅ {p.name}: today → true (+ today_history += {today_date_iso}){extra}")
             success_count += 1
-            if field_changed or h2_changed:
+            if field_changed or h2_changed or (det_res and det_res.get("changed")):
                 field_sync_count += 1
         else:
             print(f"  ❌ {p.name}: 更新失败")
@@ -4376,8 +5025,12 @@ def pull_today_from_feishu(apply: bool = False) -> None:
         has_field_diff = rid in field_diffs
         has_history_diff = rid in history_diffs
 
-        if not has_field_diff and not has_history_diff:
-            continue  # 完全跳:today + today_history + 字段 + H2 段都对齐
+        # v0.6.0(2026-05-29):detail pull 先跑一次,看有无变化(纳入 skip 判断)
+        det_res = _pull_details(rid, p)
+        has_detail_change = bool(det_res and det_res.get("changed"))
+
+        if not has_field_diff and not has_history_diff and not has_detail_change:
+            continue  # 完全跳:today + today_history + 字段 + H2 段 + 明细都对齐
 
         updates = dict(field_diffs[rid]["updates"]) if has_field_diff else {}
         if has_history_diff:
@@ -4396,10 +5049,12 @@ def pull_today_from_feishu(apply: bool = False) -> None:
                 parts.append(f"{fm_n} 字段")
             if h2_changed:
                 parts.append(f"{h2_changed} H2 段")
+            if has_detail_change:
+                parts.append(f"明细 +{det_res.get('added', 0)}/~{det_res.get('updated', 0)}")
             label = " + ".join(parts) if parts else "0(无变化)"
             print(f"  🔄 {p.name}: {label} sync(today 已对齐)")
             success_count += 1
-            if fm_n or h2_changed or has_history_diff:
+            if fm_n or h2_changed or has_history_diff or has_detail_change:
                 field_sync_count += 1
         else:
             print(f"  ❌ {p.name}: 字段 sync 失败")
@@ -4430,6 +5085,8 @@ def pull_today_from_feishu(apply: bool = False) -> None:
         if update_md_frontmatter(p, final):
             # v0.4.0(2026-05-28):H2 段同步
             h2_changed = _apply_h2_updates(rid, p)
+            # v0.6.0(2026-05-29):执行明细子表反向 sync(取消今日的 task 也保留历史明细)
+            det_res = _pull_details(rid, p)
             suffix = f" (+ today_history -= {today_date_iso})" if history_changed else ""
             fm_n = len(field_diffs[rid]['summary']) if field_changed else 0
             extra_parts = []
@@ -4437,10 +5094,12 @@ def pull_today_from_feishu(apply: bool = False) -> None:
                 extra_parts.append(f"{fm_n} 字段 sync")
             if h2_changed:
                 extra_parts.append(f"{h2_changed} H2 段 sync")
+            if det_res and det_res.get("changed"):
+                extra_parts.append(f"明细 +{det_res.get('added', 0)}/~{det_res.get('updated', 0)}")
             extra = (" + " + " + ".join(extra_parts)) if extra_parts else ""
             print(f"  ✅ {p.name}: today → false{suffix}{extra}")
             success_count += 1
-            if field_changed or h2_changed:
+            if field_changed or h2_changed or (det_res and det_res.get("changed")):
                 field_sync_count += 1
         else:
             print(f"  ❌ {p.name}: 更新失败")
