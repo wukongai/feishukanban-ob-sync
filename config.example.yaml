@@ -410,9 +410,11 @@ behavior:
   # dry-run 时是否详细打印每个字段的 before → after
   verbose_diff: true
 
-  # v0.5.1(2026-05-29):时区配置 — 用来算 sync.py "今日" 日期
-  # - 'local'(默认): mac 系统本地时区(跟飞书 app / Obsidian Daily Notes 一致)
-  # - 'Asia/Shanghai': 强制北京时间(v0.3.3 → v0.5.0 的老行为,跨时区移动时不变)
+  # v0.5.4(2026-05-30):时区配置 — 用来算 sync.py "今日" 日期
+  # 默认 Asia/Shanghai(跟飞书 + Obsidian Daily Notes(userscript +8h)对齐)
+  # 跨时区工作场景(mac TZ=PDT 但飞书+Daily Notes 用 BJ)→ 必须 BJ,不能用 local
+  # 仅在你确实想跟 mac 系统本地时区对齐时显式设 `local`
+  # - 'Asia/Shanghai'(默认 v0.5.4+): 强制北京时间
+  # - 'local': mac 系统本地时区(仅推荐 mac 时区 == 工作时区时用)
   # - 'America/Los_Angeles' / 'America/New_York' / 其他 IANA: 强制该时区
-  # - 不配 → 默认 local(对齐 mac 本地体验)
-  timezone: local
+  timezone: Asia/Shanghai
