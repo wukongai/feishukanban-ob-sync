@@ -2,6 +2,54 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.6.1] - 2026-05-29 — 执行明细段显示层升级 + 合并 v0.5.4 三个根本 bug 根治
+
+> **背景**:用户反馈"完成状态显示的是 done,人的阅读有点困难"。同时本次 commit **搭便车**合并了并行修复的 v0.5.4 三个根本 bug(`update_md_frontmatter` 不会清理 block list / `parse_frontmatter` 无损坏 fallback / 默认时区错位),让 `today_history` 跨天积累的死循环根治。
+
+### 🎨 执行明细段显示层升级(对齐 journal dataview 视觉)
+
+v0.6.0 段格式 `- 2026-05-28 | done | review=...` 纯小写英文,跟 journal dataview 渲染的 `✅ Done / 🔄 Doing / 🟧 SubDone` 不一致,用户切换两边时视觉跳跃。
+
+- sync.py 加 `_STATUS_DISPLAY` map + `_normalize_status` helper:
+  - 渲染:`"done"` → `"✅ Done"`(emoji + 首字母大写英文)
+  - 解析容忍 3 种输入:`"done"` / `"Done"` / `"✅ Done"` → 全归一为 `"done"`
+- `pull_execution_details_for_task` 加 raw 文本对比(原 dict 相等不够,老 OB 段 `"doing"` 跟新渲染 `"🔄 Doing"` 用 raw 比对才能侦测到显示层升级)
+- `pull_today_from_feishu` early-return 条件加 `detail_records_by_task` 判断,否则 frontmatter 全对齐时跳过整个 apply,detail pull 无机会跑
+- task md 模板注释更新(两份:`obsidian-assets/templates` + 用户 vault)
+- UserScript STATUS_OPTIONS value 改用 display 形式
+
+### 🐛 合并修复(v0.5.4):三个根本 bug 根治 `today_history` 死循环
+
+> **触发场景**:用户在美西 PDT 时区跨时区工作 → daily note `2026-05-30.md` 一条 task 都不显示。诊断后发现 `today_history` 因为 YAML 损坏 + 时区错位形成死循环 — 不管跑多少次 pull-today,history 永远只剩"今天"那 1 个元素,跨天后立刻不命中 dataview。
+
+**Bug A**(根本):`update_md_frontmatter` regex `^{key}:[^\n]*$` 只匹配 key 那一行,**不清理 YAML block list 子项** → 写 inline `[2026-05-30]` 时,旧 block 子项 `  - 2026-05-27` 残留 → YAML 损坏 → PyYAML 报错。
+
+修:[sync.py:636-645](sync.py#L636-L645) regex 改为 `^{key}:[^\n]*(?:\n[ \t]+[^\n]*)*` — 吞掉 key 行 + 紧跟的所有缩进行(block list 子项 / 多行值)。
+
+**Bug B**(死循环放大器):`parse_frontmatter` 调 `yaml.safe_load` 失败时直接返回 `None`,上游 fallback `history = []` → 写回时 inline 只剩"今天"一个 → 反复触发 Bug A 又破坏 → history 永远不增长。
+
+修:[sync.py:468-525](sync.py#L468-L525) 新加 `_repair_corrupted_block_list_yaml(body)`,检测 `key: [X]\n  - Y\n  - Z` 损坏模式,合并 inline + 孤立 block 子项(去重保序)重写为 inline 单行。parse 失败时先抢救再 parse。
+
+**Bug C**(时区错位):`_now_with_tz` 默认 `local`(v0.5.1 引入),mac TZ=PDT 时算"今天"=5/29,但飞书 + userscript daily note 文件名都按 BJ +8h = 5/30 → 写错日期到 history → dataview 不命中。
+
+修:[sync.py:177-205](sync.py#L177-L205) 默认改为 `Asia/Shanghai`,所有落地数据统一按北京时间(对齐飞书 + Obsidian Daily Notes)。`config.example.yaml` 默认值跟进。
+
+**配套数据修复**:7 条用户 vault 里历史损坏的 task md(`today_history` inline + 孤立 block list 混存)手动重写为干净 inline list + 补 `2026-05-30`,让今日 daily note 立刻能用。
+
+### ✅ 单测验证(根治回归)
+
+- `_repair_corrupted_block_list_yaml`:合并 inline + 孤立 block ✅;干净 inline 不动 ✅;干净 block 不动 ✅
+- `parse_frontmatter`:抢救损坏 frontmatter,history 完整还原 ✅
+- `update_md_frontmatter`:替换 block list 不留孤立子项 ✅;损坏 frontmatter 上跑 update 一次治好 YAML ✅
+- `_now_with_tz()` 不传 config 默认 +0800 BJ ✅
+
+### 🔬 真 vault 验证
+
+- 已有 task md 的 `"subdone"` → `"🟧 SubDone"` 自动升级
+- 第二次跑 raw 对齐 → SKIP,不再 rewrite(idempotent)
+- `pull-today` dry-run: `today_history += 2026-05-30: 0 条`(全部已含今日,死循环根治)
+- 时区:sync.py 算"今天" = `2026-05-30`(BJ),跟飞书 + userscript 完全对齐
+
 ## [v0.6.0] - 2026-05-29 — 执行明细子表(daily execution log)双向 sync + 取消今日推送修复
 
 > **背景**:用户原话:"前一日 journal 看到的是 task 当下最新状态,不是那天的状态" + "飞书看板里有个执行明细子表,其实记录的就是历史执行状态" + "OB 上欠缺的就是这一点,每天的状态可以在这里做说明"。
