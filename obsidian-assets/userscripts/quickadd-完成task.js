@@ -154,8 +154,7 @@ module.exports = async function (params) {
     const execEnv = {
       ...process.env,
       PATH: `${userPaths.join(":")}:${process.env.PATH || ""}`,
-      // v0.3.3: 强制北京时区,sync.py 的 datetime.now() 不再受 shell TZ=PDT 影响
-      TZ: "Asia/Shanghai",
+      // v0.5.2: 删 TZ 强制,sync.py 走 config.behavior.timezone(默认 mac local)
     };
 
     let syncOK = false;

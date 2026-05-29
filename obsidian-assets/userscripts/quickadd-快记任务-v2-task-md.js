@@ -520,7 +520,7 @@ module.exports = async function (params) {
     const execEnv = {
       ...process.env,
       PATH: `${userPaths.join(":")}:${process.env.PATH || ""}`,
-      TZ: "Asia/Shanghai",
+      // v0.5.2: 删 TZ 强制,sync.py 走 config.behavior.timezone(默认 mac local)
     };
 
     let qopts = {

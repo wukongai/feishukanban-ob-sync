@@ -3,9 +3,13 @@
 > 📋 **Obsidian ↔ 飞书项目管理多维表 全闭环同步工具**。让你既享受 Obsidian 的 ADHD 友好「子弹笔记式任务流」,又拥有飞书的「项目看板可视化」,**两端永远一致**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.5.1-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.5.2-blue.svg)](CHANGELOG.md)
 
 ---
+
+## 🚀 v0.5.2 上线 — 删 userscript TZ 强制(让 v0.5.1 config.timezone 真生效)(2026-05-29)
+
+v0.5.1 加了 `config.behavior.timezone` 但 4 个 userscript 仍强制 `TZ: "Asia/Shanghai"`,env 覆盖 config 让选项失效。v0.5.2 删 userscript 的 TZ 强制 → 跟随 mac 系统时区。详见 [CHANGELOG v0.5.2](CHANGELOG.md#v052---2026-05-29)。
 
 ## 🚀 v0.5.1 上线 — 时区可配置(默认 mac local,对齐飞书 app + Obsidian)(2026-05-29)
 

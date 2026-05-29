@@ -42,7 +42,7 @@ module.exports = async function (params) {
     const execEnv = {
       ...process.env,
       PATH: `${userPaths.join(":")}:${process.env.PATH || ""}`,
-      TZ: "Asia/Shanghai",
+      // v0.5.2: 删 TZ 强制,sync.py 走 config.behavior.timezone(默认 mac local)
     };
 
     new Notice(`🔄 正在批量推今日 task md → 飞书...(预计 10-30 秒)`, 5000);

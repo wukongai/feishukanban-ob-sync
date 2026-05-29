@@ -2,6 +2,41 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.5.2] - 2026-05-29 — 删 userscript TZ 强制(让 v0.5.1 config.timezone 真生效)
+
+> **v0.5.1 留下的隐藏 bug**:sync.py 加了 `config.behavior.timezone: local` 选项,但 **4 个 userscript 仍在 `child_process.exec` 时强制 `TZ: "Asia/Shanghai"`**,环境变量覆盖了 config — 用户改 config 无效,sync.py 还是算北京时间。
+>
+> 用户原话:"我现在 mac 的系统时间是美国,CC 运行终端时区设置是美国,因为我用的 ip 是美国 ip... 在 CC 进行加工处理的时候需要转化时间落地到 mac 本地时间"
+
+### 🎯 改动
+
+| 文件 | 改动 |
+|---|---|
+| `quickadd-拉今日todo.js` | 删 `TZ: "Asia/Shanghai"` |
+| `quickadd-批量推今日-task-md.js` | 同 |
+| `quickadd-快记任务-v2-task-md.js` | 同 |
+| `quickadd-完成task.js` | 同 |
+
+userscript 现在不强制 TZ,sync.py `_now_with_tz` 走 `config.behavior.timezone`(默认 `local` = mac 系统本地时区)。
+
+### 🧪 实测
+
+```
+mac TZ env = America/Los_Angeles(用户实际配置)
+userscript 不强制 TZ + config.timezone=local
+→ sync.py 算今日: 2026-05-28 23:51 PDT ✅ 跟飞书 app + Obsidian 一致
+
+对照:设 TZ=Asia/Shanghai(老行为)→ 2026-05-29 14:51 CST(被 env 覆盖)
+```
+
+### ⚠️ 用户侧
+
+如果想保持原 `Asia/Shanghai` 行为,只需:
+```yaml
+behavior:
+  timezone: Asia/Shanghai
+```
+
 ## [v0.5.1] - 2026-05-29 — 时区可配置(默认 mac local,对齐飞书 app + Obsidian Daily Notes)
 
 > **背景**:v0.3.3 → v0.5.0 一直 hardcode `Asia/Shanghai`(北京时间),不管 mac 系统时区。用户跨时区移动(如 mac 时区 = PDT)时,**飞书 app 用 mac 本地时区,sync.py 用北京时间**,两边对"今日"的认知差 1 天 → 跨天同步混乱。

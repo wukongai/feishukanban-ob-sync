@@ -50,8 +50,10 @@ module.exports = async function (params) {
     const execEnv = {
       ...process.env,
       PATH: `${userPaths.join(":")}:${process.env.PATH || ""}`,
-      // v0.3.3: 强制北京时区,sync.py 的 datetime.now() 不再受 shell TZ=PDT 影响
-      TZ: "Asia/Shanghai",
+      // v0.5.2(2026-05-29):删掉 TZ 强制 — 让 sync.py 用 mac 本地系统时区
+      // 旧 v0.3.3 强制 Asia/Shanghai 是为防 shell TZ 误设错位,但反而让用户跨时区移动时
+      // (如 mac TZ=PDT)sync.py "今日"算成北京时间,跟飞书 app/Obsidian Daily Notes 不一致
+      // 现在 config.behavior.timezone 可配置(默认 local),想保持 Asia/Shanghai 改 config
     };
 
     new Notice(`🔄 正在拉飞书今日 todo...(预计 5-10 秒)`, 3000);
