@@ -80,7 +80,9 @@ tags:
 ## 📈 执行明细
 <!-- v0.6.0 加 — 同步到飞书「执行明细」子表(daily execution log)。每行 1 条 daily 记录:
      - YYYY-MM-DD | 状态 | plan=... / review=... / est=... / act=... / done=...
-     · 状态:OB 小写 enum(todo / doing / subdone / done / block / cancel / idea)
+     · 状态(v0.6.1 起用 emoji + 大写显示,对齐 journal dataview):
+         ⬜ Todo / 🔄 Doing / 🟧 SubDone / ✅ Done / 🚧 Block / ❌ cancel / 💡 Idea
+       (手写小写 enum 如 `doing` 也兼容,pull-today 会自动升级到显示形式)
      · key 全可选(不写不推);同一天写多行 → 后者覆盖前者
      · 完成度(done=):最小完成 / 标准完成 / 超额完成 / 阻碍 / 未启动 -->
 

@@ -54,15 +54,15 @@ module.exports = async function (params) {
 
     console.log("[记录今日明细 v1] task:", activeFile.path, "rec:", feishuRecord);
 
-    // Step 2: 弹 suggester 选执行状态(对齐 OB 端 7 态小写)
+    // Step 2: 弹 suggester 选执行状态(v0.6.1 起用 emoji + 大写显示层,对齐 journal dataview)
     const STATUS_OPTIONS = [
-      { display: "🔄 Doing — 正在做", value: "doing" },
-      { display: "✅ Done — 完成", value: "done" },
-      { display: "🟧 SubDone — 部分完成", value: "subdone" },
-      { display: "🚧 Block — 卡住", value: "block" },
-      { display: "⬜ Todo — 还没开始", value: "todo" },
-      { display: "💡 Idea — 仅构思", value: "idea" },
-      { display: "❌ cancel — 取消", value: "cancel" },
+      { display: "🔄 Doing — 正在做", value: "🔄 Doing" },
+      { display: "✅ Done — 完成", value: "✅ Done" },
+      { display: "🟧 SubDone — 部分完成", value: "🟧 SubDone" },
+      { display: "🚧 Block — 卡住", value: "🚧 Block" },
+      { display: "⬜ Todo — 还没开始", value: "⬜ Todo" },
+      { display: "💡 Idea — 仅构思", value: "💡 Idea" },
+      { display: "❌ cancel — 取消", value: "❌ cancel" },
     ];
     const statusPick = await quickAddApi.suggester(
       STATUS_OPTIONS.map(o => o.display),

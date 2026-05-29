@@ -175,31 +175,34 @@ def is_short_record_id(record_id: str) -> bool:
 
 
 def _now_with_tz(config: Optional[dict] = None) -> datetime:
-    """v0.5.1(2026-05-29):统一拿带时区的"现在",尊重 config.behavior.timezone
+    """v0.5.4(2026-05-30)根治:统一拿带时区的"现在",**默认 Asia/Shanghai**
+
+    决策(v0.5.4):**默认改为 Asia/Shanghai**(不再 'local')
+    - 用户跨时区工作场景下,mac TZ 可能是 PDT 等异地时区,但飞书 +
+      Obsidian Daily Notes 都按北京时间 → sync.py 算"今天"必须跟它们对齐
+    - v0.5.1 default 'local' 假设"mac TZ = 工作时区"导致跨时区错位 bug
+    - v0.5.4 default 'Asia/Shanghai' = 老 v0.3.3→v0.5.0 行为的回归
 
     config.behavior.timezone 可选值:
-    - 'local'(默认): mac 系统本地时区(跟飞书 app / Obsidian Daily Notes 一致)
-    - 'Asia/Shanghai': 强制北京时间(v0.3.3 → v0.5.0 的老行为,跨时区移动时不变)
-    - 'America/Los_Angeles' / 'America/New_York' / 其他 IANA 时区名: 强制该时区
-    - 'UTC+8' / 'UTC-7' 等 offset: 强制 UTC 偏移
-
-    向后兼容:不传 config(为 None / 没 behavior.timezone 配置)→ 默认 local
+    - 'Asia/Shanghai'(默认 v0.5.4+): 强制北京时间
+    - 'local': mac 系统本地时区(只在确实想跟 mac 系统对齐时显式设)
+    - 其他 IANA 时区名 / UTC±N offset
     """
     if config is None:
-        return datetime.now().astimezone()
-    tz_name = (config.get("behavior") or {}).get("timezone", "local")
-    if tz_name == "local":
-        return datetime.now().astimezone()
+        return datetime.now(timezone(timedelta(hours=8)))
+    tz_name = (config.get("behavior") or {}).get("timezone", "Asia/Shanghai")
     if tz_name == "Asia/Shanghai":
         return datetime.now(timezone(timedelta(hours=8)))
+    if tz_name == "local":
+        return datetime.now().astimezone()
     # IANA 时区(zoneinfo,Python 3.9+)
     try:
         from zoneinfo import ZoneInfo
         return datetime.now(ZoneInfo(tz_name))
     except Exception:
-        # 解析失败 → fallback local + 打 warning
-        print(f"⚠️  config.behavior.timezone='{tz_name}' 无法解析,fallback 用 mac local 时区", file=sys.stderr)
-        return datetime.now().astimezone()
+        # 解析失败 → fallback Asia/Shanghai + 打 warning
+        print(f"⚠️  config.behavior.timezone='{tz_name}' 无法解析,fallback Asia/Shanghai", file=sys.stderr)
+        return datetime.now(timezone(timedelta(hours=8)))
 
 
 def parse_callout_below(content: str, task_line_idx: int, callout_types: list) -> Optional[str]:
@@ -462,11 +465,74 @@ def get_user_access_token() -> Optional[str]:
         return None
 
 
+def _repair_corrupted_block_list_yaml(body: str) -> str:
+    """v0.5.4(2026-05-30)Bug B 配套:从损坏的 YAML body 抢救 inline + 孤立 block list 数据
+
+    场景:历史上 update_md_frontmatter regex bug 导致下面这种损坏:
+        today_history: [2026-05-30]
+          - 2026-05-27
+          - 2026-05-28
+        (下一个 key)
+
+    inline `[2026-05-30]` close 了字段,后续 `  - x` 在 YAML 语法层面无 parent → parse error
+    抢救:把 inline 元素 + 孤立 block 子项 union(去重保序),重写为 inline 单行
+
+    Returns: 修复后的 body 字符串(可能 == 原 body 如果没检测到损坏)
+    """
+    lines = body.split("\n")
+    repaired = []
+    i = 0
+    # `key: [a, b, c]` 形式(inline flow list)
+    inline_re = re.compile(r"^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*\[(.*?)\]\s*$")
+    # `  - x` 形式(缩进 block list 子项)
+    block_item_re = re.compile(r"^[ \t]+-\s*(.+?)\s*$")
+    while i < len(lines):
+        line = lines[i]
+        m = inline_re.match(line)
+        if not m:
+            repaired.append(line)
+            i += 1
+            continue
+        # 检测后续是否有"孤立"block list 子项(损坏标志)
+        j = i + 1
+        block_items: list = []
+        while j < len(lines):
+            bm = block_item_re.match(lines[j])
+            if not bm:
+                break
+            block_items.append(bm.group(1))
+            j += 1
+        if not block_items:
+            # 干净的 inline list,不动
+            repaired.append(line)
+            i += 1
+            continue
+        # 损坏命中:合并 inline 元素 + block 元素,去重保序
+        key = m.group(1)
+        inline_str = m.group(2).strip()
+        inline_items = []
+        if inline_str:
+            inline_items = [x.strip() for x in inline_str.split(",") if x.strip()]
+        seen = set()
+        merged = []
+        for v in inline_items + block_items:
+            if v not in seen:
+                seen.add(v)
+                merged.append(v)
+        repaired.append(f"{key}: [{', '.join(merged)}]")
+        i = j  # 跳过孤立 block 子项
+    return "\n".join(repaired)
+
+
 def parse_frontmatter(text: str) -> tuple[Optional[dict], str, str]:
     """解析 .md 文件的 frontmatter。
 
     返回: (frontmatter_dict 或 None, 原 frontmatter 字符串(含 ---), 正文部分)
     无 frontmatter → (None, "", 原文)
+
+    v0.5.4(2026-05-30)Bug B 根治:yaml.safe_load 失败时,先调
+    _repair_corrupted_block_list_yaml 抢救历史损坏(inline + 孤立 block list 混存),
+    再 parse。这样 today_history 不会因为一次损坏永远只剩"今天"那 1 个元素。
     """
     if not text.startswith("---"):
         return None, "", text
@@ -477,7 +543,13 @@ def parse_frontmatter(text: str) -> tuple[Optional[dict], str, str]:
     try:
         fm = yaml.safe_load(body)
     except Exception:
-        return None, "", text
+        # v0.5.4 抢救:合并 inline + 孤立 block list 后再 parse
+        try:
+            repaired_body = _repair_corrupted_block_list_yaml(body)
+            fm = yaml.safe_load(repaired_body)
+            body = repaired_body  # 下游写回时是治好的版本
+        except Exception:
+            return None, "", text
     fm_str = head_open + body + head_close
     return (fm if isinstance(fm, dict) else None), fm_str, rest
 
@@ -561,10 +633,16 @@ def update_md_frontmatter(md_path: Path, updates: dict) -> bool:
         else:
             value_str = _format_yaml_value(value)
             new_line = f"{key}: {value_str}"
-        # 已有 key 的行(行首,可能含缩进 0;不允许 nested 如 `  feishu_doc_token:`)
-        key_re = re.compile(rf"^{re.escape(key)}:[^\n]*$", re.MULTILINE)
-        if key_re.search(body):
-            body = key_re.sub(new_line, body, count=1)
+        # v0.5.4(2026-05-30)Bug A 根治:匹配 key 行 + **连续缩进行**(YAML block list 子项 / 多行值)
+        # 旧 regex `^{key}:[^\n]*$` 只匹配 key 那一行,block list 子项 `  - x` 不被吞 →
+        # 替换后 inline 新值跟孤立 block 子项混存 → PyYAML 解析失败 → today_history 损坏死循环
+        # 新 regex 吞掉 key 行 + 紧跟的所有 `[ \t]+...` 缩进行(不缩进的下一个 key 行不吞)
+        key_block_re = re.compile(
+            rf"^{re.escape(key)}:[^\n]*(?:\n[ \t]+[^\n]*)*",
+            re.MULTILINE,
+        )
+        if key_block_re.search(body):
+            body = key_block_re.sub(new_line, body, count=1)
         else:
             # 追加到 body 末尾(确保前面有换行)
             if body and not body.endswith('\n'):
@@ -1004,6 +1082,31 @@ _DETAIL_KEY_ALIASES = {
 }
 _DETAIL_NUMERIC_KEYS = {"estimate_hours", "actual_hours"}
 
+# v0.6.1(2026-05-29):执行明细段的状态显示层(对齐 journal dataview 视觉)
+# OB 内部 enum 全小写,渲染时用 display 形式(emoji + 首字母大写英文)
+# 解析时容忍 3 种写法:纯小写 / 首字母大写 / emoji+大写 → 全归一为小写
+_STATUS_DISPLAY = {
+    "todo": "⬜ Todo",
+    "doing": "🔄 Doing",
+    "subdone": "🟧 SubDone",
+    "done": "✅ Done",
+    "block": "🚧 Block",
+    "cancel": "❌ cancel",
+    "idea": "💡 Idea",
+}
+_STATUS_INTERNAL_VALID = set(_STATUS_DISPLAY.keys())
+
+
+def _normalize_status(raw: str) -> str:
+    """任意状态值(含 emoji/大小写)→ OB 内部小写 enum。
+    容忍输入:"todo" / "Todo" / "⬜ Todo" / "TODO" 都归到 "todo"。
+    未识别 → "todo" fallback(防御性)。
+    """
+    if not raw:
+        return "todo"
+    letters = re.sub(r'[^a-zA-Z]', '', raw).lower()
+    return letters if letters in _STATUS_INTERNAL_VALID else "todo"
+
 
 def parse_execution_details(body_text: str) -> list[dict]:
     """抽 task md「## 📈 执行明细」段,解析每行为 dict。
@@ -1039,9 +1142,11 @@ def parse_execution_details(body_text: str) -> list[dict]:
         parts = [p.strip() for p in line.split("|", 2)]
         if len(parts) < 2:
             continue
-        date_str, status_str = parts[0], parts[1].lower()
+        date_str = parts[0]
         if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
             continue
+        # v0.6.1: status 容忍 emoji/大小写,归一为内部小写 enum
+        status_str = _normalize_status(parts[1])
         item = {"date": date_str, "status": status_str}
         # 第 3 段:key=val 列表,/ 分隔
         if len(parts) == 3 and parts[2]:
@@ -2535,7 +2640,10 @@ def _render_detail_line(detail: dict) -> str:
             val_str = str(val).strip()
         parts.append(f"{short}={val_str}")
     kv_str = " / ".join(parts)
-    base = f"- {detail['date']} | {detail.get('status', 'todo')}"
+    # v0.6.1:状态显示层 — emoji + 首字母大写英文(对齐 journal dataview)
+    status_internal = detail.get("status", "todo")
+    status_display = _STATUS_DISPLAY.get(status_internal, status_internal)
+    base = f"- {detail['date']} | {status_display}"
     return f"{base} | {kv_str}" if kv_str else base
 
 
@@ -2651,11 +2759,23 @@ def pull_execution_details_for_task(task_record_id: str, md_path: Path,
 
     if not merged:
         return {"changed": False, "added": 0, "updated": 0, "kept_ob_only": 0}
-    if added == 0 and updated == 0:
-        return {"changed": False, "added": 0, "updated": 0, "kept_ob_only": kept_ob_only}
 
     # 5. 渲染新段
     new_section = "\n" + "\n".join(_render_detail_line(merged[d]) for d in sorted(merged)) + "\n"
+
+    # v0.6.1:对比 task md 原文段(未经 parse-render)vs 新渲染,捕捉显示层升级
+    # 仅 dict 相等不够 — OB 原文可能写小写 "doing",飞书拉回 parse 后也是 "doing"
+    # dict 相等,但渲染出 "🔄 Doing" 跟原文 "doing" 不同 → 需要 rewrite
+    m_old = re.search(r'^## +📈 +执行明细\s*\n(.*?)(?=\n## +|\Z)', body, re.MULTILINE | re.DOTALL)
+    old_data_lines = []
+    if m_old:
+        for line in m_old.group(1).splitlines():
+            s = line.strip()
+            if s and not s.startswith("<!--") and s.startswith("-"):
+                old_data_lines.append(s)
+    new_data_lines = [_render_detail_line(merged[d]) for d in sorted(merged)]
+    if added == 0 and updated == 0 and old_data_lines == new_data_lines:
+        return {"changed": False, "added": 0, "updated": 0, "kept_ob_only": kept_ob_only}
 
     if not apply:
         return {"changed": True, "added": added, "updated": updated,
@@ -4922,7 +5042,10 @@ def pull_today_from_feishu(apply: bool = False) -> None:
             for h2_label, ob_val, fs_val in d.get("h2_summary", []) or []:
                 print(f"     • 📑 {h2_label}: {_short(ob_val, 50)} → {_short(fs_val, 50)}")
 
-    if not (plan_set_true or plan_set_false or plan_missing or field_diffs or history_diffs):
+    # v0.6.1:把 plan_skip 也算进 early-return 判断 — plan_skip 内会跑 _pull_details
+    # 即使 frontmatter 全对齐,飞书子表可能加了 daily 明细 record 需要拉回 OB 段
+    has_detail_sync_potential = bool(detail_records_by_task) and bool(plan_skip or plan_set_true or plan_set_false)
+    if not (plan_set_true or plan_set_false or plan_missing or field_diffs or history_diffs or has_detail_sync_potential):
         print(f"\n✅ OB ↔ 飞书 today 状态 + today_history + 字段已对齐,无需更新")
         return
 
