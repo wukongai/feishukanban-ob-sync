@@ -322,6 +322,44 @@ cat > "$SNIPPET_FILE" <<EOF
       "runOnStartup": false
     },
     "runOnStartup": false
+  },
+  {
+    "id": "pull-current-task-choice",
+    "name": "📥 拉当前 task(单条 pull,类 git)",
+    "type": "Macro",
+    "command": true,
+    "macro": {
+      "name": "📥 拉当前 task(单条 pull,类 git)",
+      "id": "pull-current-task-macro-id",
+      "commands": [{
+        "name": "当前 task md → 拉飞书对应 record(v0.5.3)",
+        "type": "UserScript",
+        "id": "pull-current-task-userscript-cmd",
+        "path": "$SCRIPTS_DIR/userscripts/quickadd-拉当前task.js",
+        "settings": {}
+      }],
+      "runOnStartup": false
+    },
+    "runOnStartup": false
+  },
+  {
+    "id": "push-current-task-choice",
+    "name": "↗️ 推当前 task(单条 push,类 git)",
+    "type": "Macro",
+    "command": true,
+    "macro": {
+      "name": "↗️ 推当前 task(单条 push,类 git)",
+      "id": "push-current-task-macro-id",
+      "commands": [{
+        "name": "当前 task md → push 飞书(CREATE 或 UPDATE)(v0.5.3)",
+        "type": "UserScript",
+        "id": "push-current-task-userscript-cmd",
+        "path": "$SCRIPTS_DIR/userscripts/quickadd-推当前task.js",
+        "settings": {}
+      }],
+      "runOnStartup": false
+    },
+    "runOnStartup": false
   }
 ]
 EOF

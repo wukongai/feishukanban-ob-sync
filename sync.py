@@ -2477,6 +2477,164 @@ def push_task_md(md_path: Path, apply: bool = False, _silent_fail: bool = False)
     return {"success": True, "action": action, "record_id": record_id, "path": str(md_path)} if _silent_fail else None
 
 
+def pull_task_from_feishu(input_path_or_rid: str, apply: bool = False) -> None:
+    """v0.5.3(2026-05-29):单条拉 — 飞书指定 record → OB task md(对称 push_task_md)
+
+    用法:
+        python3 sync.py --pull-task /path/to/task.md       # dry-run(从 task md 读 feishu_record)
+        python3 sync.py --pull-task recXXX --apply          # 直接传 record_id
+
+    场景(用户原话"和 git 一样,只提交一条也不容易覆盖其他的"):
+    - 只想同步关心的 1 条 task,不动其他 21 条 today task
+    - 早上拉今日批量后,白天偶尔在飞书改某条字段,只拉这条回 OB
+
+    流程:
+    1. 解析输入(task md 路径或 record_id)→ 拿 record_id + path
+    2. 拉飞书 record → 跟 OB 端 frontmatter / H2 段做 diff
+    3. dry-run 显示 diff;apply 写 OB(同 pull-today 单条逻辑)
+
+    冲突策略对齐 pull-today:飞书覆盖 OB(PRESERVE_OB_IF_FS_EMPTY 防误清)
+    """
+    config = load_config()
+    vault_root = find_vault_root()
+
+    print(f"\n{'='*60}")
+    print(f"📥 pull-task: 单条拉 飞书 → OB")
+    if not apply:
+        print(f"📌 dry-run(--apply 才真写)")
+    print(f"{'='*60}\n")
+
+    # Step 1: 解析输入
+    target_rid = None
+    md_path = None
+    if input_path_or_rid.startswith("rec") and "/" not in input_path_or_rid:
+        # 直接是 record_id
+        target_rid = input_path_or_rid
+    else:
+        # task md 路径
+        p = Path(input_path_or_rid)
+        if not p.exists():
+            # 用 push_task_md 一样的 vault fallback
+            print(f"⚠️  路径不存在: {p},vault rglob 同名查找...")
+            candidates = [
+                c for c in vault_root.rglob(p.name)
+                if not any(part.startswith(".") for part in c.parts)
+            ]
+            if not candidates:
+                print(f"❌ vault 内未找到 {p.name}", file=sys.stderr)
+                sys.exit(1)
+            inbox_matches = [c for c in candidates if "04 Inbox" in c.parts]
+            p = inbox_matches[0] if inbox_matches else candidates[0]
+            print(f"✅ 找到: {p.relative_to(vault_root)}")
+        md_path = p
+        # 读 frontmatter 拿 feishu_record
+        try:
+            fm, _, _ = parse_frontmatter(p.read_text(encoding="utf-8"))
+            target_rid = fm.get("feishu_record") if fm else None
+        except Exception as e:
+            print(f"❌ 读 task md 失败: {e}", file=sys.stderr)
+            sys.exit(1)
+        if not target_rid:
+            print(f"❌ task md 无 feishu_record 字段(可能未 sync 飞书),无法 pull", file=sys.stderr)
+            sys.exit(1)
+
+    print(f"🎯 目标 record_id: {target_rid}")
+    if md_path:
+        print(f"📍 OB task md: {md_path.relative_to(vault_root)}")
+
+    # Step 2: 拉飞书 record
+    print(f"\n⏳ 拉飞书 record...")
+    record_result = feishu_get_record(target_rid, config)
+    if not record_result:
+        print(f"❌ 飞书 record 拉取失败", file=sys.stderr)
+        sys.exit(1)
+    record = record_result.get("record", {})
+    if not record:
+        print(f"❌ 飞书 record 为空", file=sys.stderr)
+        sys.exit(1)
+
+    # 构造 fields_meta + row(对齐 pull-today 的格式)
+    fields_meta = list(record.keys())
+    row = [record[f] for f in fields_meta]
+
+    # Step 3: 找 OB 对应 task md(如果输入是 record_id,扫 vault)
+    if md_path is None:
+        ob_index = _scan_ob_task_md_by_feishu_record(vault_root)
+        if target_rid in ob_index:
+            md_path = ob_index[target_rid]["path"]
+            print(f"📍 OB 端 task md: {md_path.relative_to(vault_root)}")
+        else:
+            print(f"\n⚠️  飞书有 OB 无,自动建 task md...")
+            ob_index_for_create = _scan_ob_task_md_by_feishu_record(vault_root)
+            if apply:
+                created = _create_task_md_from_feishu_record(
+                    target_rid, row, fields_meta, config, vault_root, ob_index=ob_index_for_create
+                )
+                if created:
+                    print(f"✅ 建: {created.relative_to(vault_root)}")
+                else:
+                    print(f"⚠️  跳过(已存在或同名冲突)")
+            else:
+                print(f"📌 dry-run: --apply 才真建")
+            return
+
+    # Step 4: 计算 diff(对齐 pull-today 的 _compute_field_diff)
+    ob_index_for_diff = _scan_ob_task_md_by_feishu_record(vault_root)
+    fs_fields = _extract_fields_from_feishu_row(row, fields_meta, config, ob_index=ob_index_for_diff)
+    fm_updates, fm_summary = _diff_frontmatter_with_feishu(md_path, fs_fields)
+    h2_updates, h2_summary = _diff_h2_sections_with_feishu(md_path, fs_fields)
+
+    # today_history compute(对齐 pull-today plan_skip)
+    today_iso = _now_with_tz(config).strftime("%Y-%m-%d")
+    history_diff = None
+    try:
+        fm_cur, _, _ = parse_frontmatter(md_path.read_text(encoding="utf-8"))
+        history = fm_cur.get("today_history", []) if fm_cur else []
+        if not isinstance(history, list):
+            history = []
+        if today_iso not in [str(h) for h in history]:
+            history_diff = history + [today_iso]
+    except Exception:
+        pass
+
+    if not fm_updates and not h2_updates and history_diff is None:
+        print(f"\n✅ OB ↔ 飞书 已对齐,无需更新")
+        return
+
+    print(f"\n📋 diff:")
+    if history_diff:
+        print(f"  📅 today_history += {today_iso}")
+    for field, ob_val, fs_val in fm_summary:
+        def _short(v, limit=35):
+            s = str(v).replace("\n", " / ")
+            return s if len(s) <= limit else s[: limit - 3] + "..."
+        print(f"  • {field}: {_short(ob_val)} → {_short(fs_val)}")
+    for h2_label, ob_val, fs_val in h2_summary:
+        def _short(v, limit=50):
+            s = str(v).replace("\n", " / ")
+            return s if len(s) <= limit else s[: limit - 3] + "..."
+        print(f"  • 📑 {h2_label}: {_short(ob_val)} → {_short(fs_val)}")
+
+    if not apply:
+        print(f"\n📌 dry-run 完成。--apply 真写 OB frontmatter + H2 段")
+        return
+
+    # Step 5: apply
+    print(f"\n🚀 开始 apply...")
+    final_updates = dict(fm_updates)
+    if history_diff:
+        final_updates["today_history"] = history_diff
+    if final_updates:
+        if update_md_frontmatter(md_path, final_updates):
+            print(f"  ✅ frontmatter 更新 {len(final_updates)} 字段")
+        else:
+            print(f"  ❌ frontmatter 更新失败")
+    for h2_title, new_content in h2_updates.items():
+        if update_h2_section_in_task_md(md_path, h2_title, new_content):
+            print(f"  ✅ H2 段更新: {h2_title}")
+    print(f"\n✅ pull-task 完成")
+
+
 def migrate_today_history_unquoted(apply: bool = False) -> None:
     """v0.4.0+ Step 3(2026-05-29):反向 migration — quoted ISO date 改回 unquoted
 
@@ -4321,6 +4479,8 @@ def main():
                         help="2026-05-26 上线:飞书「是否今日」=true → OB task md frontmatter today=true(双向对齐)")
     parser.add_argument("--push-all-today", action="store_true",
                         help="v0.4.0+ Step 3(2026-05-28):反向方向 — 批量推 OB today=true task md 到飞书 forward")
+    parser.add_argument("--pull-task",
+                        help="v0.5.3(2026-05-29):单条拉 — 飞书 record → OB(类 git 单条粒度,不动其他 task)。参数:task md 路径 或 record_id")
     parser.add_argument("--migrate-today-history", action="store_true",
                         help="v0.4.0+ Step 3(2026-05-28)一次性 migration — 把 today_history unquoted 改 quoted(修 dataview 不显示 bug)")
     parser.add_argument("--migrate-today-history-unquote", action="store_true",
@@ -4374,6 +4534,8 @@ def main():
         pull_today_from_feishu(apply=args.apply)
     elif args.push_all_today:
         push_all_today_task_md(apply=args.apply)
+    elif args.pull_task:
+        pull_task_from_feishu(args.pull_task, apply=args.apply)
     elif args.pull:
         pull_from_feishu(since_date=args.since, apply=args.apply)
     elif args.task_md:

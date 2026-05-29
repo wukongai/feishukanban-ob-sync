@@ -2,6 +2,76 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.5.3] - 2026-05-29 — 单条 pull/push(类 git 单条 commit)+ 修 SubDone 推不上 bug
+
+> **背景**:用户原话:"我会在本地 task 文档中更新执行状态,但是推到飞书之后执行状态更换成 subdone 状态没有在看板上变化" + "应该有一个单条拉单条推的功能,其实和 git 一样,只提交一条也不容易覆盖其他的"
+
+### 🐛 修 status SubDone bug
+
+用户本地 `config.yaml` 缺 `task_md_map`(只有老 inline 4 字符 `map`),`build_fields_payload` 走 task md 模式时找不到 `subdone → SubDone` 映射,回退到 inline char 映射(`[/]` → Doing)→ SubDone 语义丢失。
+
+修:`config.yaml` 加 `task_md_map`(`config.example.yaml` 一直是对的,用户私域 config 没同步)。
+
+```yaml
+status:
+  field_name: 执行状态
+  map: {...}                # journal inline 老接口
+  task_md_map:              # ⭐ 加这块
+    todo: Todo
+    doing: Doing
+    subdone: SubDone        # ← 关键
+    done: Done
+    block: Block
+    cancel: cancel
+    idea: Idea
+```
+
+实测 dry-run:status: subdone → payload `"执行状态": ["SubDone"]` ✅
+
+### 🆕 单条 pull / push(类 git 单条 commit 粒度)
+
+用户工作流:**早上拉今日 + 偶尔单条拉 + 晚上推今日,飞书纯看,本地干活**。
+对应 git 思路:批量 = 一天结尾 push 所有改动 / 单条 = 改了某条立刻 commit 单条。
+
+| 命令 | 用途 |
+|---|---|
+| `--pull-task <path 或 record_id>` | 单条 pull,飞书 → OB |
+| `--task-md <path>` | 单条 push,OB → 飞书(已有,等同单条 commit) |
+| `--pull-today` | 批量 pull,早上拉今日(已有) |
+| `--push-all-today` | 批量 push,晚上推今日(已有) |
+
+userscript 2 个新:
+- `📥 拉当前 task` — 拿当前打开 task md → `--pull-task <path> --apply`
+- `↗️ 推当前 task` — 拿当前打开 task md → `--task-md <path> --apply`
+
+实测:`--pull-task TA训练营.md` → 解析 record_id → 拉飞书 → diff → 应用(单条 5 秒搞定,不动其他 21 条 today task)。
+
+### 🛠 改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `sync.py` | 加 `pull_task_from_feishu` 函数 + `--pull-task` CLI |
+| `config.yaml` | 加 `task_md_map`(7 态映射)修 SubDone bug |
+| `obsidian-assets/userscripts/quickadd-拉当前task.js`(新)| Cmd+P 「📥 拉当前 task」|
+| `obsidian-assets/userscripts/quickadd-推当前task.js`(新)| Cmd+P 「↗️ 推当前 task」|
+| `install.sh` | choices JSON 加 2 个新 macro |
+
+### 工作流总结
+
+```
+🌅 早上(规划):
+   飞书 app 拖卡片排今日 → Cmd+P「📥 拉今日 todo」(批量)
+🖥 本地干活:
+   打开 task md → 改 status: doing → 写 ## 📦 交付 → 链接本地文件
+   完成时:Cmd+P「✅ 完成当前 task」(已有)
+   偶尔需要从飞书同步单条:Cmd+P「📥 拉当前 task」
+🌃 晚上(收尾):
+   Cmd+P「↗️ 推今日所有」(批量) 或 「↗️ 推当前 task」(单条)
+```
+
+冲突防御:飞书纯看(不在飞书操作),OB 单一真相源 → 几乎无冲突。
+偶尔在飞书拖动 status → 跑 `📥 拉当前 task` 同步回 OB。
+
 ## [v0.5.2] - 2026-05-29 — 删 userscript TZ 强制(让 v0.5.1 config.timezone 真生效)
 
 > **v0.5.1 留下的隐藏 bug**:sync.py 加了 `config.behavior.timezone: local` 选项,但 **4 个 userscript 仍在 `child_process.exec` 时强制 `TZ: "Asia/Shanghai"`**,环境变量覆盖了 config — 用户改 config 无效,sync.py 还是算北京时间。

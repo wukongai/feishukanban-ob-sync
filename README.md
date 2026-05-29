@@ -3,9 +3,13 @@
 > 📋 **Obsidian ↔ 飞书项目管理多维表 全闭环同步工具**。让你既享受 Obsidian 的 ADHD 友好「子弹笔记式任务流」,又拥有飞书的「项目看板可视化」,**两端永远一致**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.5.2-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.5.3-blue.svg)](CHANGELOG.md)
 
 ---
+
+## 🚀 v0.5.3 上线 — 单条 pull/push(类 git)+ 修 SubDone 推不上 bug(2026-05-29)
+
+加 `--pull-task <path>` 单条拉命令 + 2 个 userscript 「📥 拉当前 task」/「↗️ 推当前 task」,对应**早上拉今日 + 偶尔单条拉 + 晚上推今日**工作流(用户原话:类 git,单条粒度避免覆盖)。同步修 SubDone 推不上 bug(config.yaml 缺 `task_md_map`)。详见 [CHANGELOG v0.5.3](CHANGELOG.md#v053---2026-05-29)。
 
 ## 🚀 v0.5.2 上线 — 删 userscript TZ 强制(让 v0.5.1 config.timezone 真生效)(2026-05-29)
 
