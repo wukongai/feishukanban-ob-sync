@@ -2,6 +2,52 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.6.2] - 2026-05-30 — 修 scan 函数不支持 block list YAML 导致"取消今日"无法同步
+
+> **触发场景**:用户在飞书看板上取消任务的「是否今日」勾选,跑 Cmd+P「拉今日 todo」后,daily note 仍然显示这条 task,sync.py 不会自动删 OB 端 `today_history` 里的今日日期。
+
+### 🐛 根因
+
+[sync.py:4156-4192](sync.py#L4156-L4192) 的 `_scan_ob_task_md_by_feishu_record` 用手工 line-by-line parse,**只支持 inline `today_history: [a, b]`,不识别 block list 格式**:
+
+```yaml
+today_history:                # ← scan 读到这一行后面是空,抓不到 [...]
+  - 2026-05-29                # ← 这几行被忽略
+  - 2026-05-30
+```
+
+但 v0.6.1 之后 OB 端的 linter 会把 inline 格式 normalize 成 block list → scan 读 `today_history = []` → `history_has_today` 判断永远 False → [sync.py:4923-4932](sync.py#L4923-L4932) `plan_set_false` 触发条件失效 → "取消今日"场景永远不触发。
+
+### 🛠 修复
+
+[sync.py:4156-4180](sync.py#L4156-L4180) 改用 `parse_frontmatter`(走 PyYAML 完整解析,自带 v0.5.4 损坏抢救 fallback)统一抽 `feishu_record / today / status / today_history`:
+
+```py
+fm, _, _ = parse_frontmatter(text)
+if not fm:
+    continue
+rec_id = str(fm.get("feishu_record") or "").strip() or None
+today_val = bool(fm.get("today", False))
+status_val = str(fm.get("status", "todo") or "todo").lower()
+raw_hist = fm.get("today_history") or []
+today_history = [str(d) for d in raw_hist] if isinstance(raw_hist, list) else []
+```
+
+一次性兼容:
+- inline `today_history: [a, b]`(老格式)
+- block list `today_history:\n  - a\n  - b`(OB linter 默认格式)
+- 损坏混存(`[X]\n  - Y\n  - Z`)— 走 v0.5.4 抢救
+- date 对象 / str / 空 list — 类型容忍
+
+### 🔬 真 vault 验证
+
+跑 dry-run 立刻识别出 `设 today=false: 1 条`(用户在飞书取消的那条),apply 后:
+```
+✅ 2026-05-28-【布丁内容】ob中pdf转markdown...md: today → false (+ today_history -= 2026-05-30)
+```
+
+daily note dataview 用 `contains(today_history, this.file.day)` 判断,today_history 删 5/30 后立刻不再渲染这条。
+
 ## [v0.6.1] - 2026-05-29 — 执行明细段显示层升级 + 合并 v0.5.4 三个根本 bug 根治
 
 > **背景**:用户反馈"完成状态显示的是 done,人的阅读有点困难"。同时本次 commit **搭便车**合并了并行修复的 v0.5.4 三个根本 bug(`update_md_frontmatter` 不会清理 block list / `parse_frontmatter` 无损坏 fallback / 默认时区错位),让 `today_history` 跨天积累的死循环根治。

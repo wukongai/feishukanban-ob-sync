@@ -4159,37 +4159,28 @@ def _scan_ob_task_md_by_feishu_record(scan_root: Path) -> dict:
         except Exception:
             continue
 
-        # 简单 frontmatter parse(只读不动)
-        m = re.match(r"^---\r?\n(.*?)\r?\n---", text, re.DOTALL)
-        if not m:
+        # v0.6.2(2026-05-30)根治:改用 parse_frontmatter 统一解析(支持 inline + block list + 损坏 fallback)
+        # 旧手工 line-by-line parse 只支持 inline `today_history: [a, b]`,
+        # 不支持 OB linter normalize 后的 block list 形式:
+        #     today_history:
+        #       - 2026-05-29
+        #       - 2026-05-30
+        # 导致 scan 读不到 history → plan_set_false history_has_today 判断失效 →
+        # 用户在飞书取消今日勾选后 sync.py 不会自动删 OB history 5/30 → daily note 仍显示
+        # 改用 PyYAML 完整 parse(走 parse_frontmatter,自带 v0.5.4 损坏抢救)
+        fm, _, _ = parse_frontmatter(text)
+        if not fm:
             continue
-        fm_text = m.group(1)
 
-        rec_id = None
-        today_val = False
-        status_val = "todo"
-        today_history: list[str] = []
-        for line in fm_text.split("\n"):
-            line = line.rstrip()
-            if line.startswith("feishu_record:"):
-                val = line.split(":", 1)[1].strip().strip("'\"")
-                # 跳过空值 / 注释
-                if val and not val.startswith("#"):
-                    rec_id = val
-            elif line.startswith("today:"):
-                v = line.split(":", 1)[1].strip().strip("'\"").lower()
-                today_val = v in ("true", "yes", "1")
-            elif line.startswith("status:"):
-                v = line.split(":", 1)[1].strip().strip("'\"").lower()
-                if v and not v.startswith("#"):
-                    status_val = v
-            elif line.startswith("today_history:"):
-                # 解析 inline YAML list 形式:`today_history: [2026-05-26, 2026-05-27]`
-                v = line.split(":", 1)[1].strip()
-                if v.startswith("[") and v.endswith("]"):
-                    inner = v[1:-1].strip()
-                    if inner:
-                        today_history = [d.strip().strip("'\"") for d in inner.split(",")]
+        rec_id_raw = fm.get("feishu_record")
+        rec_id = str(rec_id_raw).strip() if rec_id_raw else None
+        if rec_id and rec_id.startswith("#"):
+            rec_id = None
+        today_val = bool(fm.get("today", False))
+        status_val = str(fm.get("status", "todo") or "todo").lower()
+        raw_hist = fm.get("today_history") or []
+        # date object / str 都转 ISO 字符串(YAML 自动 parse 日期为 datetime.date)
+        today_history: list[str] = [str(d) for d in raw_hist] if isinstance(raw_hist, list) else []
 
         if rec_id:
             if rec_id in index:
