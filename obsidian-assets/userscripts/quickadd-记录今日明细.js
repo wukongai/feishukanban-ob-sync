@@ -4,10 +4,12 @@
  * 触发方式: Cmd+P → 搜「记录今日明细」/「log-detail」 → 回车
  * 前置条件: current note 必须是 task md(04 Inbox/task/ 下,frontmatter 有 feishu_record)
  *
- * 行为(v1 - 2026-05-29,v0.6.0 加):
+ * 行为(v2 - 2026-05-29,v0.6.2 加 用时 + 完成度):
  * 1. 检查当前 task md(含 feishu_record)
  * 2. 弹 suggester 选执行状态(7 态:todo/doing/subdone/done/block/cancel/idea)
- * 3. inputPrompt 输入描述(可选,空 = 只记状态)
+ * 3. inputPrompt 输入描述(可选,空 = 只记状态)→ review=
+ * 3.5. inputPrompt 输入用时(可选,数字小时,空 = 不记)→ act=
+ * 3.6. suggester 选完成度(可选,首项「跳过」)→ done=(最小/标准/超额完成/阻碍/未启动)
  * 4. 写入 task md「## 📈 执行明细」段 — 今日行(同日覆盖)
  * 5. 调 sync.py --task-md --apply 推飞书子表(自动 CREATE 1 条 record)
  * 6. Notice 报告
@@ -15,6 +17,9 @@
  * 跟「完成 task」的区别:
  * - 完成 task = 终态记录(status: done 一次性)
  * - 记录今日明细 = 过程记录(每天可以加一条,描述当天的执行情况)
+ *
+ * v2(2026-05-29):加 ⏱️ 用时 + 🎯 完成度 两个可选 prompt(handoff 实施);
+ *   sync.py 侧无需改 — `_DETAIL_KEY_ALIASES` 已含 `act → actual_hours` / `done → completion`
  *
  * 设计参考 quickadd-完成task.js / quickadd-推当前task.js 同款 exec 模式
  */
@@ -52,7 +57,7 @@ module.exports = async function (params) {
       return;
     }
 
-    console.log("[记录今日明细 v1] task:", activeFile.path, "rec:", feishuRecord);
+    console.log("[记录今日明细 v2] task:", activeFile.path, "rec:", feishuRecord);
 
     // Step 2: 弹 suggester 选执行状态(v0.6.1 起用 emoji + 大写显示层,对齐 journal dataview)
     const STATUS_OPTIONS = [
@@ -80,16 +85,32 @@ module.exports = async function (params) {
       ""
     );
 
+    // Step 3.5:用时小时数(可选,数字 → act=)
+    const actRaw = await quickAddApi.inputPrompt(
+      "⏱️ 今日用时几小时?(可选,如 1.5,Enter 跳过)",
+      "1.5",
+      ""
+    );
+
+    // Step 3.6:完成度(可选,suggester → done=)
+    const COMPLETION_OPTIONS = ["标准完成", "最小完成", "超额完成", "阻碍", "未启动"];
+    const completionPick = await quickAddApi.suggester(
+      ["⏭️ 跳过(不记完成度)", ...COMPLETION_OPTIONS],
+      ["", ...COMPLETION_OPTIONS]
+    );
+
     // Step 4: 算今天日期(北京时间)
     const today = new Date(Date.now() + 8 * 3600 * 1000)
       .toISOString()
       .slice(0, 10);
 
-    // 构造新行
+    // 构造新行 — 多 key 拼接(空字段不写,跟 sync.py "空字段保护" 策略对齐)
+    const keyParts = [];
+    if (description && description.trim()) keyParts.push(`review=${description.trim()}`);
+    if (actRaw && actRaw.trim() && !isNaN(parseFloat(actRaw.trim()))) keyParts.push(`act=${parseFloat(actRaw.trim())}`);
+    if (completionPick && completionPick.trim()) keyParts.push(`done=${completionPick.trim()}`);
     let newLine = `- ${today} | ${statusPick}`;
-    if (description && description.trim()) {
-      newLine += ` | review=${description.trim()}`;
-    }
+    if (keyParts.length) newLine += ` | ${keyParts.join(" / ")}`;
 
     // Step 5: 写入 task md「## 📈 执行明细」段
     // - 段存在:删除同日老行 + 追加新行(同日覆盖语义,跟 sync.py 一致)
@@ -138,7 +159,7 @@ module.exports = async function (params) {
     const absPath = `${vaultRoot}/${activeFile.path}`;
     const syncCmd = `python3 "${syncScript.replace(/"/g, '\\"')}" --vault "${vaultRoot.replace(/"/g, '\\"')}" --task-md "${absPath.replace(/"/g, '\\"')}" --apply`;
 
-    console.log("[记录今日明细 v1] syncCmd:", syncCmd);
+    console.log("[记录今日明细 v2] syncCmd:", syncCmd);
 
     const userPaths = [
       `${process.env.HOME}/.local/bin`,
@@ -152,8 +173,8 @@ module.exports = async function (params) {
 
     try {
       const { stdout, stderr } = await execAsync(syncCmd, { timeout: 60000, env: execEnv });
-      console.log("[记录今日明细 v1] sync stdout:", stdout);
-      if (stderr) console.warn("[记录今日明细 v1] sync stderr:", stderr);
+      console.log("[记录今日明细 v2] sync stdout:", stdout);
+      if (stderr) console.warn("[记录今日明细 v2] sync stderr:", stderr);
 
       // 解析明细推送结果(v0.6.0 sync.py 输出 "CREATE X / UPDATE Y / SKIP Z" 行)
       const detailMatch = stdout.match(/CREATE (\d+) \/ UPDATE (\d+) \/ SKIP (\d+) \/ ERROR (\d+)/);
@@ -171,14 +192,14 @@ module.exports = async function (params) {
         );
       }
     } catch (e) {
-      console.error("[记录今日明细 v1] sync 失败:", e);
+      console.error("[记录今日明细 v2] sync 失败:", e);
       new Notice(
         `⚠️ 本地已写,飞书 sync 失败:\n${e.message || e}`,
         10000
       );
     }
   } catch (e) {
-    console.error("[记录今日明细 v1] 顶层异常:", e);
+    console.error("[记录今日明细 v2] 顶层异常:", e);
     new Notice(
       `❌ 脚本异常: ${e.message}\n打开 Console (Cmd+Opt+I) 看详情`,
       10000

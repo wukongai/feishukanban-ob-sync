@@ -2,6 +2,32 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.6.3] - 2026-05-29 — 「记录今日明细」UserScript v2:加 ⏱️ 用时 + 🎯 完成度 prompt
+
+> **背景**:v1 的 Cmd+P「📈 记录今日明细」只能记「状态 + 一句描述(→ `review=`)」,用户日常想顺手记「今天这个 task 花了几小时 + 完成到什么程度」,手敲 `act=1.5 / done=标准完成` 太麻烦。
+>
+> handoff 来源:[OB 端 handoff](docs/handoff/OB对接/2026-05-29-记录今日明细-加用时完成度字段-handoff.md)(OB CC 一度越界直接改本 userscript,被用户亮灯 → 走 handoff 由本仓库 CC 实施)。
+
+### 🆕 2 个可选 prompt
+
+- **Step 3.5** ⏱️ 今日用时几小时?(inputPrompt → `act=<数字>`,非数字 / 空 → 跳过)
+- **Step 3.6** 🎯 完成度?(suggester,首项「跳过」/ 标准完成 / 最小完成 / 超额完成 / 阻碍 / 未启动 → `done=<选项>`)
+
+产出行示例(全填):
+```
+- 2026-05-29 | 🔄 Doing | review=推 fix dry-run / act=1.5 / done=标准完成
+```
+
+空字段不写(对齐 sync.py "空字段保护" 策略),只填状态时仍是 `- 日期 | 状态`。
+
+### ✅ sync.py 侧无需改
+
+`_DETAIL_KEY_ALIASES`(v0.6.0)已含 `act → actual_hours` / `done → completion`,本次纯 UserScript 升级。
+
+### 🔧 部署
+
+userscript v2 已 commit;用户在 OB 端跑 `install.sh --force` 即可把 v2 装到 vault(`cp + sed` 注入 sync.py 路径)。QuickAdd choice 注册 OB 侧已就绪,无需重注册。
+
 ## [v0.6.2] - 2026-05-30 — 修 scan 函数不支持 block list YAML 导致"取消今日"无法同步
 
 > **触发场景**:用户在飞书看板上取消任务的「是否今日」勾选,跑 Cmd+P「拉今日 todo」后,daily note 仍然显示这条 task,sync.py 不会自动删 OB 端 `today_history` 里的今日日期。
