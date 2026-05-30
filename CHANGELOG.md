@@ -2,6 +2,39 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.6.4] - 2026-05-29 — fix:快记任务 P3 描述「非计划」→「低优先(低价值)」消歧
+
+> **背景**:用户使用快记任务发现 Cmd+P 流程的优先级菜单里 P3 仍显示「🔽 P3 非计划」 — 但 v0.3.6 早把"计划 vs 非计划"语义迁移到 `today_source` 字段(planned/unplanned),priority 字段只表达**价值/紧急度**。"P3 非计划"是 v0.4.2 state machine 重构时遗留的字符串,跟「🐿️ 今日非计划」段含义概念混淆,给 user 误导。
+>
+> 用户原话:"今日非计划和价值 P0 是两个不同的字段,但是现在添加的时候还是显示的是 P3 是非计划"
+
+### 🎯 改动(1 行)
+
+| 文件 | 行 | 前 | 后 |
+|---|---|---|---|
+| `obsidian-assets/userscripts/quickadd-快记任务-v2-task-md.js` | stepPriority L183 | 🔽 P3  非计划 | 🔽 P3  低优先(低价值) |
+
+### 🔬 语义对齐(v0.3.6 早已落地,本 fix 是 user-facing 字符串补登)
+
+| 字段 | 含义 | 取值 |
+|---|---|---|
+| `priority` | 任务**价值/紧急度** | P0 紧急重要 / P1 本周必做 / P2 有空就做 / P3 低优先(低价值) |
+| `today_source` | ADHD 自觉察的"计划 vs 非计划" | planned(早晨规划)/ unplanned(临时插入)/ 空 |
+| journal 段 | dataview 渲染时分段 | 「🎯 今日计划」(有 priority emoji)/「🐿️ 今日非计划」(无 priority emoji) |
+
+三者**正交**:priority 是价值,today_source 是来源,journal 段是渲染分类。"非计划"这个词只在 today_source / journal 段语境下成立,不应该当 priority 描述。
+
+### 🚫 不影响
+
+- 飞书侧「价值优先级」字段只存 P0/P1/P2/P3 缩写,描述词只是 OB 端 Cmd+P 菜单显示用,不影响数据
+- 老 task 不受影响
+
+### ⚠️ 用户侧需要做的事
+
+无 — 重启 Obsidian 让 QuickAdd 重新 require userscript 即可。
+
+---
+
 ## [v0.6.3] - 2026-05-29 — 「记录今日明细」UserScript v2:加 ⏱️ 用时 + 🎯 完成度 prompt
 
 > **背景**:v1 的 Cmd+P「📈 记录今日明细」只能记「状态 + 一句描述(→ `review=`)」,用户日常想顺手记「今天这个 task 花了几小时 + 完成到什么程度」,手敲 `act=1.5 / done=标准完成` 太麻烦。

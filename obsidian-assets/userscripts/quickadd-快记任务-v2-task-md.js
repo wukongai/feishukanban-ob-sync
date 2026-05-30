@@ -3,7 +3,7 @@
  *
  * 触发方式: Cmd+P → 搜「快记任务」 → 回车
  *
- * 行为(v0.4.2 - 2026-05-28 重构 state machine 支持「⬅ 回上一步」):
+ * 行为(v0.4.2 state machine 重构 + v0.6.4 fix:P3 描述「非计划」改「低优先(低价值)」消歧):
  * 0. Step 0:batch 调 sync.py --quickadd-options 拿活跃项目 / 最近 5 月 / 最近 5 周 / 最近 5 项目小类
  * 1. 优先级(🔺 P0 / ⏫ P1 / 🔼 P2 / 🔽 P3)
  * 2. ADHD 优先级(🚨 待抢救 / ⏰ 有 DDL / 🌱 自由待办 / ❌ 跳过)
@@ -180,7 +180,7 @@ function findPrevActive(idx, state) {
 
 async function stepPriority(state, qa, ctx) {
   const pick = await pickWithBack(qa,
-    ["🔺 P0  紧急重要", "⏫ P1  本周必做", "🔼 P2  有空就做", "🔽 P3  非计划"],
+    ["🔺 P0  紧急重要", "⏫ P1  本周必做", "🔼 P2  有空就做", "🔽 P3  低优先(低价值)"],
     ["P0", "P1", "P2", "P3"],
     ctx.canBack
   );
