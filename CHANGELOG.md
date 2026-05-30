@@ -48,6 +48,24 @@ today_history = [str(d) for d in raw_hist] if isinstance(raw_hist, list) else []
 
 daily note dataview 用 `contains(today_history, this.file.day)` 判断,today_history 删 5/30 后立刻不再渲染这条。
 
+### 🔁 全面审查:消除所有手工 YAML 解析
+
+用户原话:"现在已经全部补全了吗?你仔细再检查一次"。
+
+grep 全 sync.py 所有 `yaml.safe_load` / `re.match.*---` / `line.startswith` 找到 1 处真漏:
+
+**[sync.py:340-379](sync.py#L340-L379) `build_backlinks_index`(交付物反向索引扫描)**
+- 直接 `yaml.safe_load` 没走 parse_frontmatter,无损坏 fallback
+- 同样路径会触发:产物笔记 list 字段被 OB linter normalize 成 block list 后,如果有任何一次 update 走老 regex 破坏 YAML → 整个产物从索引跳过 → 反向找交付物失败
+- 修:改用 `parse_frontmatter(text)`(内部已经只截 frontmatter 段不 parse 全文,性能等价,自带 v0.5.4 抢救 fallback)
+
+**剩余 yaml.safe_load 4 处审查通过**:
+- `sync.py:77` 读 `config.yaml`(配置文件,不是 task md frontmatter,无需统一)
+- `sync.py:538/543` `parse_frontmatter` 自己(已有 fallback)
+- `sync.py:527` 注释
+
+**低风险但不动**:`migrate_today_history_unquoted/quoted` (`sync.py:3375 + 3466`) 用 string-level regex 处理 inline `today_history: [...]` 单行,跳过 block list。这俩是一次性历史 escape hatch,不在主流程,不修。
+
 ## [v0.6.1] - 2026-05-29 — 执行明细段显示层升级 + 合并 v0.5.4 三个根本 bug 根治
 
 > **背景**:用户反馈"完成状态显示的是 done,人的阅读有点困难"。同时本次 commit **搭便车**合并了并行修复的 v0.5.4 三个根本 bug(`update_md_frontmatter` 不会清理 block list / `parse_frontmatter` 无损坏 fallback / 默认时区错位),让 `today_history` 跨天积累的死循环根治。

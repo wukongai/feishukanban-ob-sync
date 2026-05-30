@@ -343,19 +343,13 @@ def build_backlinks_index(vault_root: Path, config: dict) -> dict:
             text = md.read_text(encoding="utf-8")
         except Exception:
             continue
-        # 只看头部 100 行的 frontmatter,避免读全文
-        head = "\n".join(text.split("\n")[:100])
-        if not head.startswith("---"):
+        if not text.startswith("---"):
             continue
-        # 抽 frontmatter
-        fm_match = re.match(r"^---\n(.*?)\n---", head, re.DOTALL)
-        if not fm_match:
-            continue
-        try:
-            fm = yaml.safe_load(fm_match.group(1))
-        except Exception:
-            continue
-        if not isinstance(fm, dict):
+        # v0.6.2(2026-05-30):走 parse_frontmatter 统一 YAML 解析。
+        # 内部已经只截 frontmatter 段(不 parse 全文),性能 OK,
+        # 自带 v0.5.4 损坏抢救 fallback(防御 list 字段被 inline + 孤立 block 混存)
+        fm, _, _ = parse_frontmatter(text)
+        if not fm:
             continue
         backlinks = fm.get(backlink_field)
         if not backlinks:
