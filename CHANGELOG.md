@@ -2,6 +2,41 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.6.6] - 2026-05-29 — fix:快记任务优先级菜单去时间维度描述 — priority 纯价值排序
+
+> **背景**:v0.6.4 把 P3 描述从「非计划」改为「低优先(低价值)」时,P0/P1/P2 的描述「紧急重要 / 本周必做 / 有空就做」仍带**时间维度**词,跟 priority 应表达的**价值维度**混淆。
+>
+> 用户原话:"在价值优先级后面的备注,你不要备注括号的,就是 P0,P1,P2,P3 既可以了,这是纯从产品角度讲的价值,现在用时间约束反而容易给我搞混了"。
+
+### 🎯 改动(1 行)
+
+| 文件 | 行 | 前 | 后 |
+|---|---|---|---|
+| `obsidian-assets/userscripts/quickadd-快记任务-v2-task-md.js` | stepPriority L183 | `🔺 P0 紧急重要 / ⏫ P1 本周必做 / 🔼 P2 有空就做 / 🔽 P3 低优先(低价值)` | `🔺 P0 / ⏫ P1 / 🔼 P2 / 🔽 P3` |
+
+### 🔬 维度澄清:为什么去描述
+
+priority 一栏要表达「这事**价值**多大 / 该不该做」,跟「**什么时候**做 / **多紧急**」是两个正交维度。混在一起会污染用户对 priority 的判断:
+
+| 维度 | 字段 | 取值示例 |
+|---|---|---|
+| **价值** | `priority` | P0 / P1 / P2 / P3 |
+| **时间紧急** | `due` / `adhd_priority` | 今天/明天/本周末 等 + 待抢救/有 DDL/自由待办 |
+| **计划/非计划** | `today_source` | planned / unplanned / 空 |
+
+用户对自己的 priority 系统已有清晰定义,菜单不需要再加"hint 描述"反客为主。
+
+### 🚫 不影响
+
+- 飞书侧「价值优先级」字段只存 P0/P1/P2/P3 缩写,描述词只是 OB 端菜单显示用
+- 老 task 不受影响
+
+### ⚠️ 用户侧需要做的事
+
+无 — 重启 Obsidian 让 QuickAdd 重新 require userscript 即可。
+
+---
+
 ## [v0.6.5] - 2026-05-29 — feat:快记任务 Step 7 加「计划/非计划」3 选 1(today_source 真落地)
 
 > **背景**:v0.3.6 加了 `today_source` 字段(planned / unplanned)用于 ADHD 自觉察「计划 vs 非计划」,但 Cmd+P 快记任务 userscript 一直**硬编码** `today=true → today_source: unplanned`,导致用户前一晚 / 早晨规划时用 Cmd+P 建 today=true 的 task 也被错标为 unplanned,**计划/非计划分流名存实亡**。
