@@ -2,6 +2,45 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.6.5] - 2026-05-29 — feat:快记任务 Step 7 加「计划/非计划」3 选 1(today_source 真落地)
+
+> **背景**:v0.3.6 加了 `today_source` 字段(planned / unplanned)用于 ADHD 自觉察「计划 vs 非计划」,但 Cmd+P 快记任务 userscript 一直**硬编码** `today=true → today_source: unplanned`,导致用户前一晚 / 早晨规划时用 Cmd+P 建 today=true 的 task 也被错标为 unplanned,**计划/非计划分流名存实亡**。
+>
+> 用户原话:"增加了计划和非计划的选择吗" → 没有,补登。
+
+### 🎯 改动:Step 7 从 2 选 1 改 3 选 1
+
+| 选项 | today | today_source | 含义 |
+|---|---|---|---|
+| 📥 进需求池 | false | (空) | 不进今日,后续在飞书勾今日 + pull-today |
+| ⭐ 今日 · 计划 | true | **planned** | 前一晚 / 早晨规划好的(对齐 sync.py --pull-today 拉飞书勾选语义) |
+| 🌀 今日 · 非计划 | true | **unplanned** | 临时插入(ADHD 自觉察用 — 看到 journal「🐿️ 今日非计划」段就知道这是中途插入的) |
+
+### 🔬 3 种语义场景全覆盖
+
+| 场景 | 当前行为(v0.6.5) |
+|---|---|
+| 1. 早晨 `sync.py --pull-today` 拉飞书勾选 | sync.py 写 `planned` ✅ |
+| 2. Cmd+P 临时插入 today=true | userscript 写 `unplanned`(用户选「🌀 今日 · 非计划」)✅ |
+| 3. Cmd+P 在前一晚 / 早晨规划时建 today=true | userscript 写 `planned`(用户选「⭐ 今日 · 计划」)✅ **本版本新支持** |
+
+### 🛠 改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `obsidian-assets/userscripts/quickadd-快记任务-v2-task-md.js` | stepIsToday:2 选 1 → 3 选 1;state 加 `todaySource` 字段;`todaySourceLine` 改用 `state.todaySource` 而非硬编码 unplanned;顶部行为注释加 v0.6.5 备注 |
+
+### 🚫 不影响
+
+- sync.py / 模板 / 飞书表结构 / config 全部不动 — 纯 userscript 内部改
+- 老 task 不受影响 — 历史 task md 的 today_source 字段已写死,不重新评估
+
+### ⚠️ 用户侧需要做的事
+
+无 — 重启 Obsidian 让 QuickAdd 重新 require userscript 即可。
+
+---
+
 ## [v0.6.4] - 2026-05-29 — fix:快记任务 P3 描述「非计划」→「低优先(低价值)」消歧
 
 > **背景**:用户使用快记任务发现 Cmd+P 流程的优先级菜单里 P3 仍显示「🔽 P3 非计划」 — 但 v0.3.6 早把"计划 vs 非计划"语义迁移到 `today_source` 字段(planned/unplanned),priority 字段只表达**价值/紧急度**。"P3 非计划"是 v0.4.2 state machine 重构时遗留的字符串,跟「🐿️ 今日非计划」段含义概念混淆,给 user 误导。

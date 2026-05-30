@@ -3,7 +3,7 @@
  *
  * 触发方式: Cmd+P → 搜「快记任务」 → 回车
  *
- * 行为(v0.4.2 state machine 重构 + v0.6.4 fix:P3 描述「非计划」改「低优先(低价值)」消歧):
+ * 行为(v0.4.2 state machine + v0.6.4 fix P3 消歧 + v0.6.5 Step 7 加「计划/非计划」3 选 1):
  * 0. Step 0:batch 调 sync.py --quickadd-options 拿活跃项目 / 最近 5 月 / 最近 5 周 / 最近 5 项目小类
  * 1. 优先级(🔺 P0 / ⏫ P1 / 🔼 P2 / 🔽 P3)
  * 2. ADHD 优先级(🚨 待抢救 / ⏰ 有 DDL / 🌱 自由待办 / ❌ 跳过)
@@ -16,7 +16,7 @@
  * 4. 截止日期 DDL(preset:今天/明天/本周末/下周末/本月底/手输/跳过)
  * 5. 执行月(飞书最近 5 个 enum,多选循环 / 默认=created 当月)
  * 6. 执行周(飞书最近 5 个 enum,多选循环 / 默认=created 当周)
- * 7. 是否今日(📥 需求池 / ⭐ 今日)
+ * 7. 是否今日 + today_source(📥 需求池 / ⭐ 今日·计划 / 🌀 今日·非计划)— v0.6.5 加 3 选 1
  * 8. 执行状态(默认 Todo / Doing / SubDone / Done / Block / cancel / Idea)
  * 9. 标题输入
  * 10. 创建 task md + 调 sync.py --task-md --apply 同步飞书
@@ -396,13 +396,19 @@ async function stepWeeks(state, qa, ctx) {
 }
 
 async function stepIsToday(state, qa, ctx) {
+  // v0.6.5:3 选 1,补登 today_source 字段语义(原硬编码 unplanned 是 bug,丢失计划/非计划分流)
   const pick = await pickWithBack(qa,
-    ["📥 进需求池(默认,后续在飞书勾今日)", "⭐ 今日(立即排进今日 journal)"],
-    ["false", "true"],
+    [
+      "📥 进需求池(默认,后续在飞书勾今日)",
+      "⭐ 今日 · 计划(前一晚 / 早晨规划好的)",
+      "🌀 今日 · 非计划(临时插入,ADHD 自觉察用)",
+    ],
+    ["false", "planned", "unplanned"],
     ctx.canBack
   );
   if (pick === CANCEL || pick === BACK) return pick;
-  state.isToday = pick === "true";
+  state.isToday = pick !== "false";
+  state.todaySource = pick === "false" ? null : pick;
   return null;
 }
 
@@ -468,6 +474,7 @@ async function runWizard(qaApi, qopts, Notice) {
     months: [],
     weeks: [],
     isToday: false,
+    todaySource: null,        // v0.6.5: planned / unplanned / null
     status: "todo",
     title: null,
   };
@@ -598,8 +605,8 @@ module.exports = async function (params) {
       ? `subcategory: [${state.subcategoryList.join(", ")}]`
       : `subcategory:`;
     const todayHistoryInit = state.isToday ? `[${dateContext}]` : `[]`;
-    // v0.3.6: today_source — 此 userscript 触发 = 当天临时建 → unplanned;today=false 时留空
-    const todaySourceLine = state.isToday ? `today_source: unplanned` : `today_source:`;
+    // v0.6.5: today_source 由 Step 7 用户选择(planned/unplanned),不再硬编码 unplanned
+    const todaySourceLine = state.todaySource ? `today_source: ${state.todaySource}` : `today_source:`;
 
     const content = `---
 priority: ${state.priority}
