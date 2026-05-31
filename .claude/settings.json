@@ -40,6 +40,7 @@
       "Bash(yq:*)",
       "Bash(head:*)",
       "Bash(tail:*)",
+      "Bash(cat:*)",
       "Bash(diff:*)",
       "Bash(sort:*)",
       "Bash(uniq:*)",
@@ -50,6 +51,9 @@
       "Bash(date:*)",
       "Bash(chmod +x:*)",
       "Bash(mkdir -p:*)",
+      "Bash(cp:*)",
+      "Bash(mv:*)",
+      "Bash(ln:*)",
 
       "Bash(gh pr:*)",
       "Bash(gh repo view:*)",

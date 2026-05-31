@@ -2,6 +2,159 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.6.7] - 2026-05-30 — feat:记录今日明细 UserScript v3 — 全字段 + 退回/跳过 + 预览 + 字段对齐 + 去 emoji + key 中文化
+
+> **背景**:v0.6.3 v2 wizard 只覆盖 4 字段(status / review / act / done),漏了**飞书子表里实际存在的** `plan`(计划/策略)、`est`(估时)2 个字段;且每步 inputPrompt 不支持「退回上一步」,只能 Esc 重来一遍。
+> 
+> 用户原话:"task 的执行明细中显示完整的子表内容,包括计划、估时、用时、完成度,执行复盘。把 cmd+p 快捷命令也加好,然后每个选项都有退回上一个和跳过的选择"。
+> 
+> v0.6.7 内 3 轮迭代连发,**用户实测反馈后定型**(字段顺序 / emoji 干扰编辑 / 预览看不见 三个 UX 问题)。
+
+### 🎯 改动 A:6 步 wizard 全字段 + 退回/跳过/取消
+
+| 字段 | v2(旧) | v3(新) | 飞书子表字段 |
+|---|---|---|---|
+| **status** 执行状态 | ✅ Step 1 | ✅ Step 1(必填) | 执行状态 |
+| **plan** 计划/策略 | ❌ 漏 | ✅ Step 2(可选) | 计划&策略 |
+| **est** 估时 | ❌ 漏 | ✅ Step 3(可选,数字) | 估时 |
+| **act** 用时 | ✅ Step 3 | ✅ Step 4(可选,数字) | 用时 |
+| **done** 完成度 | ✅ Step 4 | ✅ Step 5(可选,5 选项) | 完成度 |
+| **review** 执行/复盘 | ✅ Step 2 | ✅ Step 6(可选,长文本) | 执行&复盘 |
+| **预览** | ❌ 无 | ✅ Step 7(多行 display + 确认/退回/取消) | — |
+
+每个**可选字段**先弹 suggester 入口:`✏️ 输入 / ⏭️ 跳过 / ⏪ 退回 / ❌ 取消`。
+
+### 🎯 改动 B:字段顺序对齐飞书子表 schema(2nd-round fix)
+
+第一版 v0.6.7 把 STEPS 写成 `status → plan → review → est → act → done`(review 在第 2 位),用户拿到飞书子表字段截图反馈"顺序不对"——飞书子表**真实顺序是**:
+
+```
+执行状态 → 计划&策略 → 估时 → 用时 → 完成度 → 执行&复盘
+```
+
+review/复盘是**最长的文字字段,放末尾**。语义也对齐"事前(plan + est)→ 事中事后(act + done)→ 文字复盘(review)"的执行时序。
+
+修正 3 处:
+- `sync.py::_render_detail_line` KEY_ORDER
+- UserScript `STEPS` 数组
+- UserScript `buildLine` 拼装顺序
+
+### 🎯 改动 C:明细段去 emoji,纯文本易编辑(3rd-round fix)
+
+v0.6.1 把状态渲染成 `⬜ Todo` / `✅ Done` 是为了对齐 journal dataview;但用户实测发现明细段**需要事后手动修改**,emoji 被 Obsidian 渲染成 checkbox/icon **阻碍纯文本编辑**(截图所示`☐ Todo` 视觉化)。
+
+改:`_STATUS_DISPLAY` 全部用首字母大写英文(`Todo` / `Doing` / `Done` / `SubDone` / `Block` / `Cancel` / `Idea`)。
+
+- 解析端依然容忍 emoji + 纯文本 + 小写多种历史写法(`_normalize_status` 抽英文字母 lowercase 比对)
+- 老 task md 含 emoji 的明细段**下次 push 时自动 normalize**(`_render_detail_line` rewrite),不需要手动 migrate
+- UserScript 菜单 display 仍带 emoji 做视觉提示(`🔄 Doing — 正在做`),写入 task md 是纯文本 `Doing`
+
+效果对比:
+```
+v0.6.1: - 2026-05-30 | ⬜ Todo | plan=快速测试 / est=1
+v0.6.7: - 2026-05-30 | Todo | plan=快速测试 / est=1
+```
+
+### 🎯 改动 D:key 中文化(4th-round fix)
+
+用户反馈:"字段名用中文我更容易识别"。把 OB 端段格式从英文 key 改成中文:
+
+| 内部 enum | v0.6.6 前(英文)| v0.6.7(中文) | 飞书子表字段 |
+|---|---|---|---|
+| `plan` | `plan=` | **`计划=`** | 计划&策略 |
+| `estimate_hours` | `est=` | **`估时=`** | 估时 |
+| `actual_hours` | `act=` | **`用时=`** | 用时 |
+| `completion` | `done=` | **`完成度=`** | 完成度 |
+| `review` | `review=` | **`复盘=`** | 执行&复盘 |
+
+**双向兼容**(无 breaking change):
+- 解析端 `_DETAIL_KEY_ALIASES` 扩展中英 10 个 alias,任一写法都识别
+- 渲染端只输出中文 key — 老 task md 含英文 key 的明细段下次 push 自动 normalize 为中文
+- `key.strip().lower()` 对中文无影响(无大小写概念),仍可容忍 `Plan=` / `EST=` 等大小写混乱英文写法
+
+效果对比:
+```
+v0.6.6 前:- 2026-05-30 | Todo | plan=快速测试 / est=1 / done=未启动
+v0.6.7   :- 2026-05-30 | Todo | 计划=快速测试 / 估时=1 / 完成度=未启动
+```
+
+### 🎯 改动 E:Step 7「预览」改成可见的多行 display(3rd + 5th round fix)
+
+**3rd round:多行 display**
+
+第一版 v0.6.7 预览步用 suggester(3 选项确认/退回/取消)+ `console.log` 输出预览文本——但 **suggester 不显示 console**,用户看不到自己填了什么,无法验收。改成多行 suggester(每个已填字段一行)。
+
+**5th round bugfix:NOOP value 唯一化**
+
+实测发现:多行预览 5 行全部渲染成 `📋 2026-05-31 状态: Done`(第 0 行内容)——QuickAdd `suggester(display[], value[])` API 当多个 value 相同时(初版 5 个 NOOP 都是 `"__NOOP__"`),会用第一个 value 对应的 display 渲染所有匹配项。
+
+修法:每个 NOOP 给唯一 value(`__NOOP_header__` / `__NOOP_plan__` / `__NOOP_est__` / `__NOOP_act__` / `__NOOP_done__` / `__NOOP_review__` / `__NOOP_empty__` / `__NOOP_sep__`),重弹判断改 `pick.startsWith("__NOOP_")` prefix 匹配。
+
+正确效果:
+```
+📋 2026-05-31   状态: Done
+   📋 计划:   v0.6.7 中文 key 化
+   ⏰ 估时:   2 小时
+   ⏱  用时:   1.5 小时
+   🎯 完成度: 标准完成
+   📝 复盘:   实测 NOOP 重复 bug 已修
+─────────────────
+✅ 确认写入并 sync 飞书
+⏪ 退回上一步(改复盘)
+❌ 取消整个流程
+```
+
+第一版 v0.6.7 预览步用 suggester(3 选项确认/退回/取消)+ `console.log` 输出预览文本——但 **suggester 不显示 console**,用户看不到自己填了什么,无法验收。
+
+改成**多行 suggester**:
+- 每个已填字段一行(NOOP 不可选,选中重弹)
+- 末尾 3 个动作 `✅ 确认写入 / ⏪ 退回 / ❌ 取消`
+
+```
+📋 2026-05-30   状态: Done
+   📋 plan:   上线 v3 wizard
+   ⏰ est:    2 小时
+   ⏱  act:    1.5 小时
+   🎯 done:   标准完成
+   📝 review: 拆 step machine,加预览
+─────────────────
+✅ 确认写入并 sync 飞书
+⏪ 退回上一步(改 review)
+❌ 取消整个流程
+```
+
+### 🛠 技术实现要点
+
+state machine + while 循环 + index pointer:
+
+```js
+const STEPS = ["status", "plan", "est", "act", "done", "review", "preview"];
+let idx = 0;
+while (idx < STEPS.length) {
+  // 每步根据 nav 结果:idx++ / idx-- / return / break
+  // 预览的 NOOP 行选中后内部 while 重弹,不前进
+}
+```
+
+- 数字字段(est / act)做 `parseFloat` 校验,无效输入 Notice 警告 + 自动跳过
+- 字段值 trim 后才写,空字符串 = 跳过(不出现在新行)
+- 状态 menu emoji+text 双重展示,value 纯文本写入
+
+### ✅ 验收
+
+- `node --check` 语法 PASS
+- UserScript self-test 8 cases(全字段中文 key / 只 status / 跳过 计划 / **复盘 在末尾**回归 / trim / 5/30 截图 / 5/31 截图)→ 8/8 PASS
+- sync.py parse 双向兼容测试(全英老数据 / 混合中英 / 全中新数据)→ 3/3 PASS
+- sync.py `_render_detail_line` 输出:`- 2026-05-30 | Done | 计划=P / 估时=1 / 用时=2 / 完成度=标准完成 / 复盘=R` ✅
+
+### ⚠️ 用户侧需要做的事
+
+无 — Cmd+P 命令已在 v0.6.3 注册过,本次只升级脚本内容,重启 Obsidian 让 QuickAdd 重新 require userscript 即可生效。
+
+老 task md 含 emoji 的明细段(如 `⬜ Todo`)**下次 push 时自动 normalize**(因为 `_render_detail_line` 出纯文本会触发 rewrite),不需要手动改。
+
+---
+
 ## [v0.6.6] - 2026-05-29 — fix:快记任务优先级菜单去时间维度描述 — priority 纯价值排序
 
 > **背景**:v0.6.4 把 P3 描述从「非计划」改为「低优先(低价值)」时,P0/P1/P2 的描述「紧急重要 / 本周必做 / 有空就做」仍带**时间维度**词,跟 priority 应表达的**价值维度**混淆。

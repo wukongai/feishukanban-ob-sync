@@ -178,24 +178,26 @@ v0.2 推荐 4 个视图:
 
 ### OB 端表达
 
-task md 加「## 📈 执行明细」段:
+task md 加「## 📈 执行明细」段(v0.6.7 起 key 中文化 + 状态去 emoji):
 ```markdown
 ## 📈 执行明细
 
-- 2026-05-28 | doing | plan=推 push-all bug 修复 / review=跑了 dry-run / est=2 / act=1.5 / done=标准完成
-- 2026-05-29 | done | review=上线了 / act=3 / done=超额完成
+- 2026-05-28 | Doing | 计划=推 push-all bug 修复 / 估时=2 / 用时=1.5 / 完成度=标准完成 / 复盘=跑了 dry-run
+- 2026-05-29 | Done | 用时=3 / 完成度=超额完成 / 复盘=上线了
 ```
 
-- 格式:`- 日期 | 状态(OB 小写 7 enum) | key=val / key=val / ...`
+- 格式:`- 日期 | 状态(首字母大写英文)| key=val / key=val / ...`
 - 主键 = (任务, 日期);同日 OB 重写 → 飞书侧覆盖
-- key 全可选(plan / review / est / act / done),不写不推
-- 完成度 `done=` 直填中文(最小完成 / 标准完成 / 超额完成 / 阻碍 / 未启动)
+- key 全可选(计划 / 估时 / 用时 / 完成度 / 复盘),不写不推,顺序对齐飞书子表 schema
+- 完成度 `完成度=` 直填中文(最小完成 / 标准完成 / 超额完成 / 阻碍 / 未启动)
+- 兼容老 v0.6.0~v0.6.6 写法(`plan=` / `est=` / `act=` / `done=` / `review=` + emoji 状态如 `⬜ Todo`):
+  解析 OK,下次 push 自动 normalize 为中文 key + 纯文本状态
 
 ### 同步行为
 
 - **push**(OB → 飞书):`sync.py --task-md --apply` 自动跑 — diff 子表 → CREATE / UPDATE / SKIP
 - **pull**(飞书 → OB):`sync.py --pull-today --apply` 自动跑 — pre-fetch 子表全表,merge 写回 OB 段
-- **Cmd+P 快记**:`📈 记录今日明细` 3 步 wizard(选状态 → 输入描述 → 自动 push)
+- **Cmd+P 快记**:`📈 记录今日明细` 6 步 wizard(v0.6.7)— 状态 / 计划 / 估时 / 用时 / 完成度 / 复盘,每步可退回/跳过,末步预览
 
 config:见 [config.example.yaml](../config.example.yaml) `execution_detail` 段。
 

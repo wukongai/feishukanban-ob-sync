@@ -78,13 +78,18 @@ tags:
 
 
 ## 📈 执行明细
-<!-- v0.6.0 加 — 同步到飞书「执行明细」子表(daily execution log)。每行 1 条 daily 记录:
-     - YYYY-MM-DD | 状态 | plan=... / review=... / est=... / act=... / done=...
-     · 状态(v0.6.1 起用 emoji + 大写显示,对齐 journal dataview):
-         ⬜ Todo / 🔄 Doing / 🟧 SubDone / ✅ Done / 🚧 Block / ❌ cancel / 💡 Idea
-       (手写小写 enum 如 `doing` 也兼容,pull-today 会自动升级到显示形式)
+<!-- v0.6.0 加 — 同步到飞书「执行明细」子表(daily execution log)。每行 1 条 daily 记录。
+     v0.6.7(2026-05-30)起:key 中文化 + 状态去 emoji 易编辑。
+
+     格式(顺序对齐飞书子表 schema):
+       - YYYY-MM-DD | 状态 | 计划=... / 估时=... / 用时=... / 完成度=... / 复盘=...
+
+     · 状态(纯文本首字母大写,Cmd+P 菜单仍显示 emoji 做视觉提示):
+         Todo / Doing / SubDone / Done / Block / Cancel / Idea
+       (手写 ⬜ Todo / doing / TODO 等老写法均兼容,push 时自动 normalize)
      · key 全可选(不写不推);同一天写多行 → 后者覆盖前者
-     · 完成度(done=):最小完成 / 标准完成 / 超额完成 / 阻碍 / 未启动 -->
+     · 完成度(完成度=):最小完成 / 标准完成 / 超额完成 / 阻碍 / 未启动
+     · 老英文 key(plan/est/act/done/review) 仍兼容,push 时自动 rewrite 为中文 -->
 
 
 ## 📦 交付

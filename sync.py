@@ -1065,9 +1065,17 @@ def parse_journal(file_path: Path) -> list[dict]:
 # ============================================================
 
 # v0.6.0(2026-05-29):执行明细 key=val 简写 → 内部 key
-# OB 端写「plan=... / review=... / est=2 / act=1.5 / done=标准完成」
-# 内部转 plan / review / estimate_hours(float) / actual_hours(float) / completion
+# v0.6.7(2026-05-30):key 中文化(用户反馈"中文更容易识别"),英文 alias 保留向后兼容
+# OB 端写「计划=... / 估时=2 / 用时=1.5 / 完成度=标准完成 / 复盘=...」
+# 老 task md 含英文 key(plan/est/act/done/review)仍能解析,下次 push 自动 rewrite 为中文
 _DETAIL_KEY_ALIASES = {
+    # 中文 key(v0.6.7 主用,写入侧统一输出这套)
+    "计划": "plan",
+    "估时": "estimate_hours",
+    "用时": "actual_hours",
+    "完成度": "completion",
+    "复盘": "review",
+    # 英文 key(v0.6.0~v0.6.6 老数据 + 程序员习惯,解析向后兼容)
     "plan": "plan",
     "review": "review",
     "est": "estimate_hours",
@@ -1076,17 +1084,19 @@ _DETAIL_KEY_ALIASES = {
 }
 _DETAIL_NUMERIC_KEYS = {"estimate_hours", "actual_hours"}
 
-# v0.6.1(2026-05-29):执行明细段的状态显示层(对齐 journal dataview 视觉)
-# OB 内部 enum 全小写,渲染时用 display 形式(emoji + 首字母大写英文)
-# 解析时容忍 3 种写法:纯小写 / 首字母大写 / emoji+大写 → 全归一为小写
+# v0.6.7(2026-05-30):明细段渲染去 emoji,纯文本易编辑
+# 用户反馈:明细段是要事后**手动修改**的(不是一次性写入),emoji 会被 Obsidian 渲染成
+# checkbox/icon 阻碍编辑;改纯首字母大写英文(Todo/Done/Doing/SubDone/Block/Cancel/Idea)
+# 解析端依然容忍 emoji+纯文本+小写多种历史写法 → _normalize_status 抽英文字母 lowercase
+# 老 task md 含 emoji 的明细段下次 push 时自动 normalize(_render_detail_line rewrite)
 _STATUS_DISPLAY = {
-    "todo": "⬜ Todo",
-    "doing": "🔄 Doing",
-    "subdone": "🟧 SubDone",
-    "done": "✅ Done",
-    "block": "🚧 Block",
-    "cancel": "❌ cancel",
-    "idea": "💡 Idea",
+    "todo": "Todo",
+    "doing": "Doing",
+    "subdone": "SubDone",
+    "done": "Done",
+    "block": "Block",
+    "cancel": "Cancel",
+    "idea": "Idea",
 }
 _STATUS_INTERNAL_VALID = set(_STATUS_DISPLAY.keys())
 
@@ -1107,8 +1117,8 @@ def parse_execution_details(body_text: str) -> list[dict]:
 
     v0.6.0(2026-05-29)加 — daily execution log 子表数据源。
 
-    格式(每行):
-        - YYYY-MM-DD | 状态 | plan=... / review=... / est=2 / act=1.5 / done=标准完成
+    格式(每行,v0.6.7 起 key 中文化,解析仍兼容英文):
+        - YYYY-MM-DD | 状态 | 计划=... / 估时=2 / 用时=1.5 / 完成度=标准完成 / 复盘=...
 
     Returns: [{date, status, plan?, review?, estimate_hours?, actual_hours?, completion?}, ...]
              按日期升序排列。同日多行 → 后者覆盖前者(OB 端最新意图为准)。
@@ -2612,16 +2622,24 @@ def _feishu_detail_row_to_ob_dict(fdict: dict, config: dict) -> Optional[dict]:
 
 
 def _render_detail_line(detail: dict) -> str:
-    """OB detail dict → markdown 行 `- YYYY-MM-DD | 状态 | key=val / key=val / ...`。
-    key 顺序固定(plan / review / est / act / done),空字段不显示。
+    """OB detail dict → markdown 行 `- YYYY-MM-DD | 状态 | 计划=val / 估时=val / ...`。
+    key 顺序对齐飞书子表 schema(计划 → 估时 → 用时 → 完成度 → 复盘),空字段不显示。
     数字字段整数化(2.0 → 2)。
+
+    v0.6.7(2026-05-30):
+    - review 从第 2 位挪到末尾 — 飞书子表实际顺序是
+        执行状态 → 计划&策略 → 估时 → 用时 → 完成度 → 执行&复盘
+        语义对齐"事前 → 事中事后 → 文字复盘"
+    - key 中文化(用户反馈"中文更容易识别")—— 渲染输出中文 key,
+        解析端依然兼容英文 key(plan/est/act/done/review)+ 中文 key 双向写法
+        老 task md 含英文 key 的明细段下次 push 自动 normalize 为中文
     """
     KEY_ORDER = [
-        ("plan", "plan"),
-        ("review", "review"),
-        ("estimate_hours", "est"),
-        ("actual_hours", "act"),
-        ("completion", "done"),
+        ("plan", "计划"),
+        ("estimate_hours", "估时"),
+        ("actual_hours", "用时"),
+        ("completion", "完成度"),
+        ("review", "复盘"),
     ]
     parts = []
     for internal, short in KEY_ORDER:
@@ -2634,7 +2652,7 @@ def _render_detail_line(detail: dict) -> str:
             val_str = str(val).strip()
         parts.append(f"{short}={val_str}")
     kv_str = " / ".join(parts)
-    # v0.6.1:状态显示层 — emoji + 首字母大写英文(对齐 journal dataview)
+    # v0.6.7:状态纯文本(首字母大写),去 emoji 易编辑
     status_internal = detail.get("status", "todo")
     status_display = _STATUS_DISPLAY.get(status_internal, status_internal)
     base = f"- {detail['date']} | {status_display}"

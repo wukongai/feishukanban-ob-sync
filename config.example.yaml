@@ -269,16 +269,17 @@ task_md_fields:
 # 解决:原 task md frontmatter 只存 status 终极值,看不到"那天的状态"
 # OB 端用 task md 「## 📈 执行明细」段表达;飞书侧用主表「执行明细」link 字段关联子表
 #
-# 段格式(OB 端):
+# 段格式(OB 端,v0.6.7 起 key 中文化 + 状态去 emoji):
 #   ## 📈 执行明细
 #
-#   - 2026-05-28 | doing | plan=推 push-all bug 修复 / review=跑了 dry-run / est=2 / act=1.5 / done=标准完成
-#   - 2026-05-29 | done  | review=上线了 / act=3 / done=超额完成
+#   - 2026-05-28 | Doing | 计划=推 push-all bug 修复 / 估时=2 / 用时=1.5 / 完成度=标准完成 / 复盘=跑了 dry-run
+#   - 2026-05-29 | Done  | 用时=3 / 完成度=超额完成 / 复盘=上线了
 #
 # 规则:
-#   - 日期 | 状态(OB 小写 enum) | key=val / key=val / ...
+#   - 日期 | 状态(首字母大写英文)| key=val / key=val / ...(对齐子表 schema:计划→估时→用时→完成度→复盘)
 #   - 主键 = (task record_id, 日期);同日 OB 重写 → 飞书侧覆盖
 #   - 不写的 key 不推(空字段保护,跟主字段映射同款防御)
+#   - 兼容老英文 key(plan/est/act/done/review):解析 OK,下次 push 自动 normalize 为中文
 #
 # 留空 table_id '' 或注释整段 → 禁用此功能(向后兼容 v0.5.x)
 execution_detail:
@@ -302,15 +303,15 @@ execution_detail:
         cancel: cancel                    # 飞书侧手建小写,保留(避免 SDK 大小写敏感)
         idea: Idea
     plan:
-      field_name: 计划&策略                 # text — OB 端 `plan=...` 抽到这里
+      field_name: 计划&策略                 # text — OB 端 `计划=...`(老 `plan=` 仍兼容)
     review:
-      field_name: 执行&复盘                 # text — OB 端 `review=...` 抽到这里
+      field_name: 执行&复盘                 # text — OB 端 `复盘=...`(老 `review=` 仍兼容)
     estimate_hours:
-      field_name: 估时                     # number — OB 端 `est=...`
+      field_name: 估时                     # number — OB 端 `估时=...`(老 `est=` 仍兼容)
     actual_hours:
-      field_name: 用时                     # number — OB 端 `act=...`
+      field_name: 用时                     # number — OB 端 `用时=...`(老 `act=` 仍兼容)
     completion:
-      field_name: 完成度                   # select — OB 端 `done=...`(可选)
+      field_name: 完成度                   # select — OB 端 `完成度=...`(老 `done=` 仍兼容)
       # 飞书选项:最小完成 / 标准完成 / 超额完成 / 阻碍 / 未启动 — OB 直填中文,不做映射
 
 # === 反向同步(飞书 → OB) ===

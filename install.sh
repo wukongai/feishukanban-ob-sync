@@ -370,7 +370,7 @@ cat > "$SNIPPET_FILE" <<EOF
       "name": "📈 记录今日明细(daily execution log)",
       "id": "log-detail-macro-id",
       "commands": [{
-        "name": "记今天的执行状态 + 描述 → 飞书子表 record(v0.6.0)",
+        "name": "记今天的执行状态 + plan/review/est/act/done → 飞书子表(v0.6.7)",
         "type": "UserScript",
         "id": "log-detail-userscript-cmd",
         "path": "$SCRIPTS_DIR/userscripts/quickadd-记录今日明细.js",
