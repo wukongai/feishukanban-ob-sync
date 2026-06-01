@@ -3,9 +3,13 @@
 > 📋 **Obsidian ↔ 飞书项目管理多维表 全闭环同步工具**。让你既享受 Obsidian 的 ADHD 友好「子弹笔记式任务流」,又拥有飞书的「项目看板可视化」,**两端永远一致**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.6.7-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.7.0-blue.svg)](CHANGELOG.md)
 
 ---
+
+## 🚀 v0.7.0 上线 — 非交互 `--create-task`,外部项目一条命令写任务到飞书+OB(2026-06-01)
+
+封装为全局 skill「同步任务到飞书」,zhixing-game 等外部项目**只传业务参数**(标题 / 大类 / 状态 / 优先级 / 估时用时 / 交付 / 执行明细 / 用户故事 / 复盘…),工具内部生成规范 task md(完整 H2 骨架 + `today_history`)+ 飞书 **CREATE 新 record** + 回填 `feishu_record`/`feishu_url` + 推执行明细子表。**主 task 状态与当天明细行状态解耦**;默认 dry-run,`--apply` 才写,`--json` 给自动化 SOP 捕获 `record_id`。详见 [CHANGELOG v0.7.0](CHANGELOG.md)。
 
 ## 🚀 v0.6.0 上线 — 执行明细子表(daily execution log)双向 sync(2026-05-29)
 

@@ -2,6 +2,32 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.7.0] - 2026-05-31 — feat:非交互 `--create-task` 命令 — 外部项目一条命令写任务到飞书+OB
+
+> **背景**:zhixing-game 等外部项目需要在「任务扫尾」时,用**一条非交互命令**把任务同时写入飞书项目看板 + Obsidian vault,且**外部不碰字段 schema / task md 模板**(由本工具内部掌握)。
+
+### 🎯 新增 `python3 sync.py --create-task`
+
+- **外部只传业务参数**:`--title`(必填)/ `--category` / `--status` / `--today-source` / `--priority` / `--estimate-hours` / `--actual-hours` / `--done-date` / `--description` / `--delivery` / `--log-link` / `--detail`(可重复)/ `--user-story` / `--acceptance` / `--thinking` / `--retrospective`。
+- **工具内部负责**:业务参数 → 规范 OB task md(frontmatter 全字段 + 完整 H2 骨架) → 飞书 **CREATE 新 record** → 回填 `feishu_record`/`feishu_url` + 完成标记链接。
+- **执行明细 `--detail`(可重复)**:`YYYY-MM-DD | 状态 | 计划=… / 估时=… / 用时=… / 完成度=… / 复盘=…`,走现有 `parse_execution_details` + `_render_detail_line` 规范化,写 OB `## 📈 执行明细` 段(Dataview 数据源)+ apply 时推飞书执行明细子表。
+- **状态解耦**:主 task `--status` = 整个 task 状态(人定,扫尾通常 `doing`);执行明细行状态 = 当天那段状态(当天做完 `done`),两者独立。
+- **task md 简约(像人手写日志)**:正文**保留全部标准 H2 段骨架**(用户故事/验收条件/执行思路/执行概述/执行明细/交付/相关资料/复盘/完成标记),对齐飞书看板字段顺序;简约 = **去掉啰嗦的 HTML 注释**,有传值填值、没传值段标题独占一行干净留空(不塞占位文字);frontmatter 保留 task 标准全字段(OB base/dataview schema)。
+- **`today_history` 字段(关键)**:today=true 时 frontmatter 写 `today_history: [YYYY-MM-DD]`(含当天,unquoted inline list,格式对齐 vault 现有 task md)。OB journal 的 **Dataview 今日看板按此字段查询**(不是 `today` bool),v0.7.0 首版漏写导致今日看板渲染不出,真机 apply 时发现并补全。
+- **时区走 config**(默认 `Asia/Shanghai`):`created` + 文件名日期均为北京时间。
+- **默认 dry-run,`--apply` 才真写**;dry-run 用系统临时文件解析,**不污染 vault**(铁律 #2)。
+- **`--json`**:末尾输出机器可读 JSON(`success`/`record_id`/`url`/`task_md`),供外部扫尾 SOP 捕获;退出码 0/1。
+- **防覆盖**:目标 task md 已存在 → 报错退出,不覆盖(避免重复 CREATE);提示改用 `--task-md <path> --apply` 更新。
+
+### 🛠 实现(复用现成能力,未另起炉灶)
+
+- `_build_task_md_content_from_params`:外部参数 → task md 内容(复用 `_create_task_md_from_feishu_record` 模板骨架,数据源换成传参)。
+- `create_task_from_params`:dry-run 写临时文件 / apply 落 vault,两路均委托 `push_task_md`(OB md→飞书 CREATE+回填)跑同一条管线。
+
+### 📄 回执
+
+- `docs/handoff/zhixing-game对接/2026-05-31-create-task-非交互接口-回执.md`(CLI 完整调用示例 + 参数清单 + 扫尾 SOP 集成模板)。
+
 ## [v0.6.7] - 2026-05-30 — feat:记录今日明细 UserScript v3 — 全字段 + 退回/跳过 + 预览 + 字段对齐 + 去 emoji + key 中文化
 
 > **背景**:v0.6.3 v2 wizard 只覆盖 4 字段(status / review / act / done),漏了**飞书子表里实际存在的** `plan`(计划/策略)、`est`(估时)2 个字段;且每步 inputPrompt 不支持「退回上一步」,只能 Esc 重来一遍。

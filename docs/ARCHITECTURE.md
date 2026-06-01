@@ -46,7 +46,7 @@
 
 ---
 
-## 📋 三大工作流场景
+## 📋 四大工作流场景
 
 ### 场景 ① OB 创建 task → 自动同步飞书
 
@@ -119,6 +119,27 @@ Claudian:
 ```
 
 **铁律 #1 默认 5 步 SOP**:batch CREATE 多条 record 必须 dry-run + 用户审批。
+
+### 场景 ④ 外部项目扫尾 → 一条命令写任务到飞书+OB(v0.7.0)
+
+```
+外部项目(zhixing-game 等)任务扫尾
+   ↓
+全局 skill「同步任务到飞书」 / 直接调 sync.py --create-task
+   只传业务参数(title / category / status / priority / 估时用时 /
+   done-date / description / delivery / log-link / detail /
+   user-story / acceptance / thinking / retrospective)
+   ↓
+sync.py create_task_from_params():
+   ├─ _build_task_md_content_from_params(参数 → 规范 task md:
+   │    frontmatter 全字段 + today_history + 完整 H2 骨架,简约无注释)
+   ├─ dry-run:写临时文件解析看 diff(不污染 vault)
+   └─ apply:落 04 Inbox/task/ → push_task_md(CREATE + 回填 + 推执行明细子表)
+   ↓
+✅ 飞书新 record + OB task md + 执行明细子表;--json 回执含 record_id / url
+```
+
+**复用而非另起**:走 push_task_md(场景 ① 同一管线)+ `_create_task_md` 模板骨架,数据源换成外部传参。**状态解耦**:主 task status(整体,人定)≠ 执行明细行状态(当天)。默认 dry-run,`--apply` 才写。详见 `docs/handoff/zhixing-game对接/`。
 
 ---
 

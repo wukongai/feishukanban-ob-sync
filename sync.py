@@ -36,6 +36,7 @@ import os                        # chdir 到 vault(--vault 参数)
 import re                        # 解析 markdown task 行
 import subprocess                # 调 feishu-cli
 import sys                       # 退出码 + stderr
+import tempfile                  # --create-task dry-run 时把生成的 task md 写临时文件解析(不污染 vault)
 import urllib.parse              # Obsidian URL Scheme 编码(中文/空格)
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -3201,6 +3202,250 @@ def push_task_md(md_path: Path, apply: bool = False, _silent_fail: bool = False)
     return {"success": True, "action": action, "record_id": record_id, "path": str(md_path)} if _silent_fail else None
 
 
+def _build_task_md_content_from_params(args, config: dict) -> tuple:
+    """v0.7.0(2026-05-31):外部业务参数 → 规范 OB task md 内容字符串
+
+    复用 _create_task_md_from_feishu_record 的模板骨架,但数据源从「飞书 row」
+    换成「外部传参」。外部项目(zhixing-game 等)只传业务字段,字段 schema / 模板
+    结构由本工具内部掌握,外部不碰。
+
+    Args:
+        args: argparse Namespace(含 title / category / status / today_source /
+              priority / estimate_hours / actual_hours / done_date / description /
+              delivery / log_link / detail / user_story / acceptance / thinking /
+              retrospective)
+        config: 全局配置(用于时区 _now_with_tz)
+
+    Returns:
+        (content: str, safe_title: str, today_date: str)
+        - content: 完整 task md 文本(frontmatter 全字段 + 完整 H2 骨架)
+        - safe_title: 文件名安全化的标题(去掉 / \\ : 等非法字符)
+        - today_date: 北京时间今天 YYYY-MM-DD(用于文件名前缀 + 日志 wikilink)
+
+    设计(v0.7.0,2026-05-31 用户拍板):
+    - frontmatter:保留 task 标准全字段(留空也留)—— OB task.base / dataview 依赖此 schema
+    - 正文:**保留全部标准 H2 段骨架**(用户故事/验收条件/执行思路/执行概述/执行明细/
+      交付/相关资料/复盘/完成标记),对齐飞书看板字段顺序。**简约 = 去掉啰嗦的 HTML 注释,
+      像人手写的日志**;有传值的段填值,没传值的段干净留空(段标题在,内容待补),不塞占位文字。
+    - 执行明细:外部 --detail(可多条)走 parse_execution_details + _render_detail_line
+      规范化(中文 key / 状态首字母大写),保证与 OB 其他地方格式一致 → dataview 正确渲染
+    - 状态解耦:主 task status(整体,人定)≠ 明细行状态(当天 done,写在 --detail 里)
+    """
+    now = _now_with_tz(config)                      # 时区走 config(默认 Asia/Shanghai)
+    created_iso = now.strftime("%Y-%m-%dT%H:%M:%S")  # ISO 8601,无引号(对齐模板)
+    today_date = now.strftime("%Y-%m-%d")
+
+    def _s(v):
+        """取参数值 → 去首尾空白的 str;None → 空串"""
+        return str(v).strip() if v is not None else ""
+
+    title = _s(args.title)
+    safe_title = re.sub(r'[/\\*?:"<>|]', "_", title).strip()
+
+    status = _s(args.status) or "todo"              # 默认 todo;整体状态由调用方/人决定,不强行 done
+    priority = _s(args.priority)                    # P0/P1/P2/P3,空 = 不推
+    category = _s(args.category)                    # 大类,空 = 不推
+    today_source = _s(args.today_source)            # planned/unplanned,OB 侧 metadata
+    done_date = _s(args.done_date)                  # YYYY-MM-DD,整个 task 完成时才传
+    estimate_hours = _s(args.estimate_hours)
+    actual_hours = _s(args.actual_hours)
+    description = _s(args.description)              # → ## 📝 执行概述(简要说明)
+    delivery = _s(args.delivery)                    # → ## 📦 交付(⭐ 重点:交付文档链接)
+    log_link = _s(args.log_link)                    # → ## 🔗 相关资料(工作日志链接)
+    user_story = _s(args.user_story)               # → ## 👥 用户故事
+    acceptance = _s(args.acceptance)               # → ## ✅ 验收条件
+    thinking = _s(args.thinking)                   # → ## 💡 执行思路
+    retrospective = _s(args.retrospective)         # → ## 🪞 复盘
+
+    # today 语义:有 today_source(planned/unplanned)= 今日 task → today: true
+    # 无 today_source = 不在今日清单 → today: false
+    today_bool = "true" if today_source else "false"
+
+    # today_history(关键):OB journal 的 Dataview 今日看板**按此字段查询**(不是 today bool)。
+    # today=true → 含今日日期(unquoted inline list,格式对齐 vault 现有 task md);today=false → 留空
+    today_history_line = f"today_history: [{today_date}]" if today_source else "today_history:"
+
+    # 执行明细:外部 --detail(每条 = 不含前导 "- " 的明细行)
+    # 走 parse_execution_details + _render_detail_line 规范化,保证格式与 OB 一致(dataview 正确)
+    detail_lines = []
+    raw_details = getattr(args, "detail", None) or []
+    cleaned = [d.strip().lstrip("-").strip() for d in raw_details if d and d.strip()]
+    if cleaned:
+        section_text = "## 📈 执行明细\n" + "\n".join(f"- {d}" for d in cleaned) + "\n"
+        for d in parse_execution_details(section_text):
+            detail_lines.append(_render_detail_line(d))
+
+    def _fm(key: str, val: str) -> str:
+        """frontmatter 行:有值 `key: val`,无值 `key:`(留空,对齐模板风格)"""
+        return f"{key}: {val}" if val else f"{key}:"
+
+    # === frontmatter:保留 task 标准全字段(OB base/dataview schema,留空也留)===
+    frontmatter = f"""---
+{_fm("priority", priority)}
+status: {status}
+today: {today_bool}
+{today_history_line}
+{_fm("today_source", today_source)}
+created: {created_iso}
+{_fm("done_date", done_date)}
+{_fm("category", category)}
+subcategory:
+project_minor:
+adhd_priority:
+{_fm("estimate_hours", estimate_hours)}
+{_fm("actual_hours", actual_hours)}
+efficiency:
+quality:
+parent_project:
+parent_subproject:
+parent_task:
+parent_inspiration:
+日志: "[[journals/{today_date}]]"
+feishu_record:
+feishu_url:
+iteration_week:
+iteration_month:
+completion_month:
+tags:
+  - task
+  - external-created
+---"""
+
+    # === 正文:保留全部标准 H2 段骨架(对齐飞书看板字段顺序)===
+    # 简约 = 无 HTML 注释,像人手写日志;有值填值,无值段标题独占一行(干净留空,待补)
+    def _sec(heading: str, content_text: str) -> str:
+        """渲染一个 H2 段:有内容 → 标题 + 内容;无内容 → 仅标题(rstrip 去尾部空白)"""
+        return f"## {heading}\n{content_text}".rstrip()
+
+    parts = [
+        f"# {title}",
+        _sec("👥 用户故事", user_story),
+        _sec("✅ 验收条件", acceptance),
+        _sec("💡 执行思路", thinking),
+        _sec("📝 执行概述", description),
+        _sec("📈 执行明细", "\n".join(detail_lines)),
+        _sec("📦 交付", delivery),
+        _sec("🔗 相关资料", log_link),
+        _sec("🪞 复盘", retrospective),
+        # 完成标记段:dataview TASK 渲染 + CREATE 后 inject 飞书链接
+        _sec("✅ 完成标记", f"- [ ] {title}"),
+    ]
+    body = "\n\n".join(parts) + "\n"
+
+    content = frontmatter + "\n\n" + body
+    return content, safe_title, today_date
+
+
+def create_task_from_params(args, apply: bool = False, json_out: bool = False) -> None:
+    """v0.7.0(2026-05-31):非交互 --create-task — 外部项目一条命令把任务写入飞书+OB
+
+    供 zhixing-game 等外部项目「扫尾 SOP」用:外部只传业务参数,工具内部负责
+    生成规范 task md + 飞书 CREATE 新 record + 回填 feishu_record/url。
+
+    复用现成能力(不另起炉灶):
+    - _build_task_md_content_from_params:外部参数 → task md 内容
+    - push_task_md(3009):task md → 飞书 CREATE + 回填(parse → payload → upsert)
+
+    流程:
+      1. 参数 → 规范 task md 内容
+      2. 目标路径 04 Inbox/task/YYYY-MM-DD-<标题>.md(时区走 config)
+      3. dry-run(默认):写临时文件 → push_task_md(tmp, apply=False) 看 diff → 删临时文件
+         (不落 vault,遵守铁律 #2「不污染用户私域」)
+      4. --apply:写目标文件到 vault → push_task_md(target, apply=True) → CREATE + 回填
+
+    --json:在末尾打一行机器可读 JSON(success/record_id/url/task_md),供外部 SOP 捕获。
+    """
+    config = load_config()
+    vault_root = find_vault_root()
+
+    title = (args.title or "").strip()
+    if not title:
+        msg = "--create-task 必须传 --title"
+        if json_out:
+            print(json.dumps({"success": False, "error": msg}, ensure_ascii=False))
+        else:
+            print(f"❌ {msg}", file=sys.stderr)
+        sys.exit(1)
+
+    content, safe_title, today_date = _build_task_md_content_from_params(args, config)
+    target_path = vault_root / "04 Inbox" / "task" / f"{today_date}-{safe_title}.md"
+
+    print(f"\n{'=' * 60}")
+    print(f"🆕 create-task(外部业务参数 → OB task md + 飞书 CREATE)")
+    print(f"    标题: {title}")
+    print(f"    目标 task md: {target_path.relative_to(vault_root)}")
+    if not apply:
+        print(f"📌 dry-run(--apply 才真写:落 vault + 飞书 CREATE)")
+    print(f"{'=' * 60}")
+
+    # 铁律 #2:不默认覆盖已存在文件(避免重复 CREATE / 覆盖用户私域)
+    if target_path.exists():
+        msg = (f"目标 task md 已存在: {target_path.relative_to(vault_root)} —— "
+               f"避免重复 CREATE / 覆盖。如需更新已有 task 请用 `--task-md <path> --apply`")
+        if json_out:
+            print(json.dumps({"success": False, "error": msg, "task_md": str(target_path)},
+                             ensure_ascii=False))
+        else:
+            print(f"\n❌ {msg}", file=sys.stderr)
+        sys.exit(1)
+
+    # 先给用户看生成的 task md 全文(dry-run + apply 都打,透明)
+    print(f"\n--- 生成的 task md 内容预览 ---\n{content}\n--- 内容预览结束 ---")
+
+    if not apply:
+        # dry-run:写临时文件让 push_task_md 跑完整 parse → payload diff,再删临时文件
+        # (临时文件在系统 temp,不落 vault → 不污染用户私域)
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".md", prefix=f"create-task-{safe_title}-",
+                delete=False, encoding="utf-8",
+            ) as tf:
+                tf.write(content)
+                tmp_path = Path(tf.name)
+            result = push_task_md(tmp_path, apply=False, _silent_fail=True)
+        finally:
+            if tmp_path and tmp_path.exists():
+                tmp_path.unlink()
+        print(f"\n📌 dry-run 完成。确认无误后加 --apply 真写(落 {target_path.relative_to(vault_root)} + 飞书 CREATE)")
+        if json_out:
+            print(json.dumps({
+                "success": bool(result and result.get("success")),
+                "dry_run": True,
+                "action": "CREATE",
+                "task_md": str(target_path),
+            }, ensure_ascii=False))
+        return
+
+    # apply:落盘到 vault 真实位置,再委托 push_task_md 跑 CREATE + 回填
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(content, encoding="utf-8")
+    print(f"\n💾 已写 task md 到 vault: {target_path.relative_to(vault_root)}")
+
+    result = push_task_md(target_path, apply=True, _silent_fail=True)
+
+    success = bool(result and result.get("success"))
+    record_id = result.get("record_id") if result else None
+    record_url = build_record_url(record_id, config) if record_id else None
+
+    if json_out:
+        print(json.dumps({
+            "success": success,
+            "action": "CREATE",
+            "record_id": record_id,
+            "url": record_url,
+            "task_md": str(target_path),
+            "error": (result or {}).get("error"),
+        }, ensure_ascii=False))
+
+    if not success:
+        # 飞书 CREATE 失败:task md 已落盘(是合法文件),可事后 `--task-md <path> --apply` 重推
+        err = (result or {}).get("error", "未知错误")
+        print(f"\n❌ 飞书 CREATE 失败: {err}", file=sys.stderr)
+        print(f"   task md 已落盘,修复后可重推: --task-md \"{target_path}\" --apply", file=sys.stderr)
+        sys.exit(1)
+
+
 def pull_task_from_feishu(input_path_or_rid: str, apply: bool = False) -> None:
     """v0.5.3(2026-05-29):单条拉 — 飞书指定 record → OB task md(对称 push_task_md)
 
@@ -5278,6 +5523,30 @@ def main():
                         help="给 userscript 用:解析 OB 项目名(如 '00 布丁')→ 输出 JSON(含 override 命中 / 一级 record_id / 二级子 records)")
     parser.add_argument("--quickadd-options", action="store_true",
                         help="v0.3.5 给 Cmd+P 快记任务用:一次性拉 大类/小类/最近5月/最近5周 → JSON")
+    # v0.7.0(2026-05-31):非交互 --create-task — 外部项目一条命令写任务到飞书+OB
+    parser.add_argument("--create-task", action="store_true",
+                        help="v0.7.0:外部业务参数 → 生成 OB task md + 飞书 CREATE 新 record(默认 dry-run,--apply 才真写)")
+    parser.add_argument("--title", help="--create-task 任务标题(必填)")
+    parser.add_argument("--category", help="--create-task 项目大类(如 产品项目/杂务/技能工具/领域学习)")
+    parser.add_argument("--status", help="--create-task 状态:todo/doing/subdone/done/block/cancel/idea(默认 todo)")
+    parser.add_argument("--today-source", help="--create-task 今日来源:planned/unplanned;非空则 task md today=true")
+    parser.add_argument("--priority", help="--create-task 价值优先级:P0/P1/P2/P3")
+    parser.add_argument("--estimate-hours", help="--create-task 估时(数字,如 0.5/1/2)")
+    parser.add_argument("--actual-hours", help="--create-task 实际用时(数字)")
+    parser.add_argument("--done-date", help="--create-task 完成日期 YYYY-MM-DD")
+    parser.add_argument("--description", help="--create-task 执行概述(→ 飞书「执行概述」字段)")
+    parser.add_argument("--delivery", help="--create-task 交付内容(→ 飞书「交付」字段)")
+    parser.add_argument("--log-link", help="--create-task 工作日志/相关资料链接(→ 飞书「相关资料」字段)")
+    parser.add_argument("--detail", action="append",
+                        help="--create-task 执行明细行(可重复,每条 = 不含前导 - 的明细行):"
+                             "'YYYY-MM-DD | 状态 | 计划=… / 估时=… / 用时=… / 完成度=… / 复盘=…';"
+                             "推飞书执行明细子表 + 写 OB『## 📈 执行明细』段(状态独立于主 task status)")
+    parser.add_argument("--user-story", help="--create-task 用户故事(→ 飞书「用户故事」+ OB『## 👥 用户故事』段)")
+    parser.add_argument("--acceptance", help="--create-task 验收条件(→ 飞书「验收条件」+ OB『## ✅ 验收条件』段)")
+    parser.add_argument("--thinking", help="--create-task 执行思路(→ 飞书「执行思路」+ OB『## 💡 执行思路』段)")
+    parser.add_argument("--retrospective", help="--create-task 复盘(→ 飞书「复盘」+ OB『## 🪞 复盘』段)")
+    parser.add_argument("--json", action="store_true",
+                        help="--create-task 末尾输出机器可读 JSON(success/record_id/url/task_md),供外部 SOP 捕获")
     args = parser.parse_args()
 
     # --vault: 显式切到 vault 根目录,让所有相对路径(args.path / Path(".") / find_vault_root 的 cwd 起点)正确解析
@@ -5313,6 +5582,10 @@ def main():
 
     if args.migrate_today_history_unquote:
         migrate_today_history_unquoted(apply=args.apply)
+        return
+
+    if args.create_task:
+        create_task_from_params(args, apply=args.apply, json_out=args.json)
         return
 
     if args.pull_today:
