@@ -3256,6 +3256,8 @@ def _build_task_md_content_from_params(args, config: dict) -> tuple:
     acceptance = _s(args.acceptance)               # → ## ✅ 验收条件
     thinking = _s(args.thinking)                   # → ## 💡 执行思路
     retrospective = _s(args.retrospective)         # → ## 🪞 复盘
+    parent_task = _s(getattr(args, "parent_task", ""))  # 父任务 stem/[[stem]] → frontmatter parent_task
+    parent_project = _s(getattr(args, "parent_project", ""))  # 所属产品项目 → frontmatter parent_project
 
     # today 语义:有 today_source(planned/unplanned)= 今日 task → today: true
     # 无 today_source = 不在今日清单 → today: false
@@ -3279,6 +3281,21 @@ def _build_task_md_content_from_params(args, config: dict) -> tuple:
         """frontmatter 行:有值 `key: val`,无值 `key:`(留空,对齐模板风格)"""
         return f"{key}: {val}" if val else f"{key}:"
 
+    # parent_task 规范成 "[[<stem>]]" wikilink(传裸 stem 自动包 [[]],传 [[stem]] 原样):
+    # apply 时 push_task_md 会 _strip_wikilink 去 [[]] → resolve_parent_task_record_id 查 vault → 写飞书「相关任务」link
+    if parent_task:
+        _pt_inner = parent_task.strip().lstrip("[").rstrip("]").strip()
+        parent_task_line = f'parent_task: "[[{_pt_inner}]]"'
+    else:
+        parent_task_line = "parent_task:"
+
+    # parent_project 同理:有值规范成 "[[<项目名>]]";apply 时 push_task_md 解析为飞书「产品项目」link/select
+    if parent_project:
+        _pp_inner = parent_project.strip().lstrip("[").rstrip("]").strip()
+        parent_project_line = f'parent_project: "[[{_pp_inner}]]"'
+    else:
+        parent_project_line = "parent_project:"
+
     # === frontmatter:保留 task 标准全字段(OB base/dataview schema,留空也留)===
     frontmatter = f"""---
 {_fm("priority", priority)}
@@ -3296,9 +3313,9 @@ adhd_priority:
 {_fm("actual_hours", actual_hours)}
 efficiency:
 quality:
-parent_project:
+{parent_project_line}
 parent_subproject:
-parent_task:
+{parent_task_line}
 parent_inspiration:
 日志: "[[journals/{today_date}]]"
 feishu_record:
@@ -5545,6 +5562,14 @@ def main():
     parser.add_argument("--acceptance", help="--create-task 验收条件(→ 飞书「验收条件」+ OB『## ✅ 验收条件』段)")
     parser.add_argument("--thinking", help="--create-task 执行思路(→ 飞书「执行思路」+ OB『## 💡 执行思路』段)")
     parser.add_argument("--retrospective", help="--create-task 复盘(→ 飞书「复盘」+ OB『## 🪞 复盘』段)")
+    parser.add_argument("--parent-task",
+                        help="--create-task 父任务(传父 task md 文件名 stem 或 [[stem]]):写入 OB frontmatter "
+                             "parent_task,apply 时由 push_task_md 解析为飞书「相关任务」link。"
+                             "前提:父 task 已 sync(有 feishu_record),否则该字段跳过(不阻断其他字段)")
+    parser.add_argument("--parent-project",
+                        help="--create-task 所属产品项目(传项目名或 [[项目名]]):写入 OB frontmatter "
+                             "parent_project,apply 时由 push_task_md 解析为飞书「产品项目」link/select。"
+                             "前提:飞书关联表存在该项目,否则该字段跳过(不阻断其他字段)")
     parser.add_argument("--json", action="store_true",
                         help="--create-task 末尾输出机器可读 JSON(success/record_id/url/task_md),供外部 SOP 捕获")
     args = parser.parse_args()

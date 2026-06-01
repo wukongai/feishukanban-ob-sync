@@ -2,6 +2,25 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.7.1] - 2026-06-01 — feat:`--create-task` 加 `--parent-task` / `--parent-project` — 一条命令建带父子关系 / 项目归属的任务
+
+> **背景**:v0.7.0 的 `--create-task` 不支持设置父任务 / 所属产品项目。外部项目要建「父任务 + N 子任务」结构、或把任务归到某产品项目时,只能事后手动改 frontmatter 再 push。2026-06-01 dogfood「中文守卫 hook 扫尾」实战需求触发补全。
+
+### 🎯 新增 2 个可选参数
+
+- **`--parent-task <stem 或 [[stem]]>`**:写入 OB frontmatter `parent_task`,apply 时由 `push_task_md` 解析为飞书「相关任务」link(自关联本表)。前提:父 task 已 sync(有 `feishu_record`),否则该字段跳过(不阻断其他字段)。
+- **`--parent-project <项目名 或 [[项目名]]>`**:写入 frontmatter `parent_project`,apply 时解析为飞书「产品项目」link/select。前提:飞书关联表存在该项目,否则跳过。
+
+### 🛠 实现(最小改动,复用现成管线)
+
+- 仅改 `_build_task_md_content_from_params`:把两个参数规范成 `"[[<inner>]]"` wikilink,写入 frontmatter 对应行(原为硬编码留空)。
+- **不碰 CREATE / payload 逻辑**:apply 仍委托 `push_task_md`,它本就解析 `parent_task` / `parent_project` frontmatter → resolve record_id → 写飞书 link。
+- 向后兼容:不传两参数时 frontmatter 行保持留空,行为与 v0.7.0 完全一致。
+
+### ✅ 真机验证(2026-06-01)
+
+- dogfood「中文守卫 hook 扫尾」:建 1 父(SubDone)+ 3 子(2 Done + 1 Todo),3 个子任务的「相关任务」link 全部正确指向父 record;4 个 task 均挂「产品项目 ＞ AI+自媒体」。
+
 ## [v0.7.0] - 2026-05-31 — feat:非交互 `--create-task` 命令 — 外部项目一条命令写任务到飞书+OB
 
 > **背景**:zhixing-game 等外部项目需要在「任务扫尾」时,用**一条非交互命令**把任务同时写入飞书项目看板 + Obsidian vault,且**外部不碰字段 schema / task md 模板**(由本工具内部掌握)。
