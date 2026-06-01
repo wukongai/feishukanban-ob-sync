@@ -3282,7 +3282,7 @@ def _build_task_md_content_from_params(args, config: dict) -> tuple:
         return f"{key}: {val}" if val else f"{key}:"
 
     # parent_task 规范成 "[[<stem>]]" wikilink(传裸 stem 自动包 [[]],传 [[stem]] 原样):
-    # apply 时 push_task_md 会 _strip_wikilink 去 [[]] → resolve_parent_task_record_id 查 vault → 写飞书「相关任务」link
+    # apply 时 push_task_md 会 _strip_wikilink 去 [[]] → resolve_parent_task_record_id 查 vault → 写飞书「父任务」单向 link
     if parent_task:
         _pt_inner = parent_task.strip().lstrip("[").rstrip("]").strip()
         parent_task_line = f'parent_task: "[[{_pt_inner}]]"'
@@ -4623,10 +4623,11 @@ def _extract_fields_from_feishu_row(row, fields_meta, config, ob_index: Optional
     # actual_hours(用时):飞书 number → 跟 estimate_hours 同 stringify
     actual_hours_raw = _get("用时")
     actual_hours = str(actual_hours_raw) if actual_hours_raw not in (None, "") else ""
-    # parent_task(飞书侧字段名「相关任务」,2026-05-28 修):飞书 link 字段 → 取首 record_id → 反查 ob_index → wikilink
+    # parent_task(飞书侧字段名「父任务」,2026-06-01 修:从「相关任务」改为「父任务」单向 link):
+    # 飞书 link 字段 → 取首 record_id → 反查 ob_index → wikilink
     # ob_index 无对应 record_id(可能父 task 未被 pull / 不存在)→ 留空字符串(不写注释)
     parent_task = ""
-    parent_rec_id = _link_first_id(_get("相关任务"))
+    parent_rec_id = _link_first_id(_get("父任务"))
     if parent_rec_id and ob_index and parent_rec_id in ob_index:
         parent_path = ob_index[parent_rec_id]["path"]
         parent_task = f"[[{parent_path.stem}]]"
@@ -5564,7 +5565,7 @@ def main():
     parser.add_argument("--retrospective", help="--create-task 复盘(→ 飞书「复盘」+ OB『## 🪞 复盘』段)")
     parser.add_argument("--parent-task",
                         help="--create-task 父任务(传父 task md 文件名 stem 或 [[stem]]):写入 OB frontmatter "
-                             "parent_task,apply 时由 push_task_md 解析为飞书「相关任务」link。"
+                             "parent_task,apply 时由 push_task_md 解析为飞书「父任务」单向 link。"
                              "前提:父 task 已 sync(有 feishu_record),否则该字段跳过(不阻断其他字段)")
     parser.add_argument("--parent-project",
                         help="--create-task 所属产品项目(传项目名或 [[项目名]]):写入 OB frontmatter "

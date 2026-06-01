@@ -8,7 +8,7 @@
 
 ### 🎯 新增 2 个可选参数
 
-- **`--parent-task <stem 或 [[stem]]>`**:写入 OB frontmatter `parent_task`,apply 时由 `push_task_md` 解析为飞书「相关任务」link(自关联本表)。前提:父 task 已 sync(有 `feishu_record`),否则该字段跳过(不阻断其他字段)。
+- **`--parent-task <stem 或 [[stem]]>`**:写入 OB frontmatter `parent_task`,apply 时由 `push_task_md` 解析为飞书**「父任务」单向 link**(子→父层级,自关联本表)。前提:父 task 已 sync(有 `feishu_record`),否则该字段跳过(不阻断其他字段)。
 - **`--parent-project <项目名 或 [[项目名]]>`**:写入 frontmatter `parent_project`,apply 时解析为飞书「产品项目」link/select。前提:飞书关联表存在该项目,否则跳过。
 
 ### 🛠 实现(最小改动,复用现成管线)
@@ -19,7 +19,14 @@
 
 ### ✅ 真机验证(2026-06-01)
 
-- dogfood「中文守卫 hook 扫尾」:建 1 父(SubDone)+ 3 子(2 Done + 1 Todo),3 个子任务的「相关任务」link 全部正确指向父 record;4 个 task 均挂「产品项目 ＞ AI+自媒体」。
+- dogfood「中文守卫 hook 扫尾」:建 1 父(SubDone)+ 3 子(2 Done + 1 Todo),3 个子任务的**「父任务」link** 全部正确指向父 record;4 个 task 均挂「产品项目 ＞ AI+自媒体」。
+
+### 🐛 映射修正(2026-06-01,同日)
+
+> 首版(本节上方)误把 `parent_task` 映射到飞书**「相关任务」**字段(双向、无方向)。审核时发现飞书表另有独立的**「父任务」单向 link**(`fldKVMyCk3`,子→父有方向)才是 WBS 父子层级的正确载体;「相关任务」(`fldm6h6LjN` 双向)留作同级横向关联(如同一父下的兄弟任务互相参考)。
+
+- **改正映射**:`task_md_fields.parent_task.field_name` 相关任务→父任务;反向同步 `_extract_fields_from_feishu_row` 硬编码 `_get("相关任务")`→`_get("父任务")`;config.example / feishu-schema / skill 文档同步。
+- **迁移数据**:把已 apply 的 3 个子任务(中文守卫 hook 那组)的父子关系重推到「父任务」字段(保留「相关任务」旧值,用户决策)。
 
 ## [v0.7.0] - 2026-05-31 — feat:非交互 `--create-task` 命令 — 外部项目一条命令写任务到飞书+OB
 

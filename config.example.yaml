@@ -195,16 +195,17 @@ task_md_fields:
   actual_hours:
     field_name: 用时                # number — null = 跳过
 
-  # parent_task(父任务/相关任务):task md frontmatter `parent_task: "[[<父 task 文件名>]]"`
-  # → 飞书「相关任务」link 字段(自关联到本表,task 拆分关系)
-  # ⚠️ 飞书表的字段名是「相关任务」(双向 link,飞书会自动反向显示"子任务"),不是「父任务」
+  # parent_task(父任务):task md frontmatter `parent_task: "[[<父 task 文件名>]]"`
+  # → 飞书「父任务」link 字段(单向 子→父,自关联到本表,WBS 任务拆解层级)
+  # ⚠️ 2026-06-01 改正:飞书有「父任务」(单向,扛父子层级)和「相关任务」(双向,扛同级关联)两个字段
+  #    parent_task 走「父任务」才有方向;「相关任务」留给同级横向关联
   # sync.py 流程:
   #   1. wikilink 解析 → 取 stem(如 "2026-05-28-test1")
   #   2. vault `04 Inbox/task/<stem>.md` 直接找,失败 fallback rglob 该目录
   #   3. 读其 frontmatter.feishu_record → 飞书 link 字段写 [rec_id](数组形式)
   #   4. 父 task 无 feishu_record / 找不到 → warning + 跳过该字段(其他字段不阻断)
   parent_task:
-    field_name: 相关任务            # link 双向(自关联本表)— null = 跳过
+    field_name: 父任务              # link 单向(子→父,自关联本表)— null = 跳过
 
   # delivery(交付正文段):task md「## 📦 交付」H2 段内容 → 飞书「交付」text
   # ⭐ 用户视角"最重要字段";反向 pull-today 也拉回此段
@@ -353,7 +354,7 @@ reverse:
     # + _REVERSE_SYNC_H2_WHITELIST(正文 H2 段 2 个)
     quality_field: 完成质量
     actual_hours_field: 用时
-    parent_task_field: 相关任务      # 飞书表实际字段名,非「父任务」
+    parent_task_field: 父任务        # 飞书「父任务」单向 link(子→父层级)
     delivery_field: 交付
     user_story_field: 用户故事
 

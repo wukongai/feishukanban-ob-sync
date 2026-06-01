@@ -43,8 +43,11 @@ feishu-cli bitable field create --base-token $BASE --table-id $TABLE --config '{
 # v0.5.0(2026-05-28)新增 5 字段:OB ↔ 飞书 1:1 闭环
 feishu-cli bitable field create --base-token $BASE --table-id $TABLE --config '{"field_name":"完成质量","type":"select","property":{"options":[{"name":"高"},{"name":"中"},{"name":"低"}]}}'
 feishu-cli bitable field create --base-token $BASE --table-id $TABLE --config '{"field_name":"用时","type":"number","property":{"formatter":"0.0"}}'
-# 相关任务 link 字段自关联到本表(选当前表为 link_table,飞书会自动反向显示"子任务")
-# ⚠️ 飞书表实际字段名是「相关任务」(双向 link),不是「父任务」 — v0.5.0 Step 2 一手 API 验证
+# 2026-06-01 改正:飞书有两个自关联 link 字段,用途不同 —
+#   「父任务」= 单向 link(子→父,有方向),扛 WBS 父子层级 → parent_task 映射到这个
+#   「相关任务」= 双向 link(无方向),扛同级横向关联(如同一父下的兄弟任务互相参考),暂未映射
+# ⚠️ 「父任务」单向:cli 默认建双向,需在飞书 UI 字段设置里关掉"双向关联"开关
+feishu-cli bitable field create --base-token $BASE --table-id $TABLE --config '{"field_name":"父任务","type":"link","property":{"table_id":"<本表 table_id>"}}'
 feishu-cli bitable field create --base-token $BASE --table-id $TABLE --config '{"field_name":"相关任务","type":"link","property":{"table_id":"<本表 table_id>"}}'
 feishu-cli bitable field create --base-token $BASE --table-id $TABLE --config '{"field_name":"交付","type":"text"}'
 feishu-cli bitable field create --base-token $BASE --table-id $TABLE --config '{"field_name":"用户故事","type":"text"}'
@@ -52,7 +55,7 @@ feishu-cli bitable field create --base-token $BASE --table-id $TABLE --config '{
 
 ⚠️ **v0.5.0 字段说明**:
 - 「完成质量」/「用时」:完成 task 时回填,反向 pull-today 也会拉回 OB(`quality` / `actual_hours` frontmatter)
-- 「父任务」:link 自关联本表;forward 时 sync.py 会从 OB `parent_task: "[[<父 task 文件名>]]"` 查 vault → 反查父 task 的 `feishu_record` → 写 link;父 task 未 sync 时跳过该字段(不阻断其他字段)
+- 「父任务」(**单向 link,子→父**):forward 时 sync.py 从 OB `parent_task: "[[<父 task 文件名>]]"` 查 vault → 反查父 task 的 `feishu_record` → 写「父任务」link;父 task 未 sync 时跳过该字段(不阻断其他字段)。2026-06-01 起从「相关任务」改正到「父任务」(单向才有父子方向)
 - 「交付」(v0.4 区别于 v0.1 的同名字段):正文 H2 段同步,**双向**(forward 推 task md「## 📦 交付」段 → 飞书 text 字段;reverse 飞书 → OB 段;飞书侧空 → 保留 OB 防御误清)
 - 「用户故事」:同上,产品类 task 的「作为 X,我希望 Y,以便 Z」句式
 
@@ -89,7 +92,8 @@ feishu-cli bitable field create --base-token $BASE --table-id $TABLE --config '{
 | **v0.5.0 5 字段补全**(2026-05-28 — OB ↔ 飞书 1:1 闭环) |
 | 20 | 完成质量 | select(单)| ⚠️ | 高/中/低,完成 task 时回填 | `task_md_fields.quality` |
 | 21 | 用时 | number | ⚠️ | 实际花费小时数,完成 task 时回填 | `task_md_fields.actual_hours` |
-| 22 | **相关任务**(不是「父任务」!) | link 双向(自关联本表)| ⚠️ | task 拆分关系,wikilink ↔ record_id 双向解析;飞书自动反向显示"子任务" | `task_md_fields.parent_task` → `field_name: 相关任务` |
+| 22 | **父任务** | link 单向(子→父,自关联本表)| ⚠️ | WBS 父子层级(有方向),wikilink ↔ record_id 解析 | `task_md_fields.parent_task` → `field_name: 父任务` |
+| 22b | 相关任务 | link 双向(自关联本表)| — | 同级横向关联(扁平,无方向);2026-06-01 起不再扛父子,暂未映射 | (留作同级关联) |
 | 23 | 交付 | text | ⚠️ | ⭐ 抽自 task md「## 📦 交付」H2 段,**双向同步** | `task_md_fields.delivery` |
 | 24 | 用户故事 | text | ⚠️ | 抽自 task md「## 👥 用户故事」H2 段,双向同步 | `task_md_fields.user_story` |
 | **可选未实现 3 个** |
