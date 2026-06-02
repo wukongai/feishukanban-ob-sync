@@ -46,6 +46,27 @@
 
 ---
 
+## 📌 关键防御机制 + 历史保真
+
+### sync.py 限流退避(v0.7.4)
+
+`run_cli`(所有 feishu-cli 调用的统一入口)遇飞书 base/v3 `code=5000 + msg=空` 自动退避重试:`5s / 15s / 45s × 3 次`,总最长 65s;非限流错误立即抛(行为不变)。dry-run 不调 CLI 不受影响。识别函数 `_is_ratelimit_5000(stderr)` 严格按"`code=5000` 且 `msg=` 后为空 / `(空)` / `（空）`"判定,有 msg 内容的 5000(真实业务错误)不触发重试。
+
+### 今日历史保真(v0.3.0 → v0.7.3 → v0.7.5)
+
+OB 日志「🎯 今日计划 / 🐿️ 今日非计划」按天渲染,要求即便后续日子改动也不污染历史快照。逐次加固:
+
+- **`today_history` 事件流(v0.3.0)**:list,append-only,记录每天进入 today 的轨迹;比 `today: true/false` 单字段能"时间穿越"
+- **`today_source_history` 按天来源(v0.7.3)**:list,与 `today_history` 一一对应,`today_source_history[i]` = `today_history[i]` 那天的来源(planned / unplanned)。`plan_set_true` 只 append、`plan_set_false` 不清空 → 历史日 Dataview 渲染按天查不再被后续 `plan_set` 覆盖
+- **`getDaySource` 启发式 fallback(v0.7.5,vault 端 dataviewjs)**:救 v0.7.2 之前已损坏数据(`today_source` 已被 `plan_set_false` 清空 / 被 `--pull-today` 覆盖)的历史显示。3 级优先:
+  1. `today_source_history[idx]` 存在非空 → 用(v0.7.3 主路径,新数据 100% 准)
+  2. `created` 那天 == dateISO 且 dateISO 在 `today_history` → 视为 `unplanned`(Cmd+P 快记任务特征)
+  3. fallback 旧 `today_source`(兜底)
+
+> 边缘 case:用户手动把昨天创建的 task 拖到今日并意图为 unplanned(`created < dateISO`)—— 启发式判不出,需手改 task md 的 `today_source_history` 字段。
+
+---
+
 ## 📋 四大工作流场景
 
 ### 场景 ① OB 创建 task → 自动同步飞书
@@ -151,6 +172,7 @@ sync.py create_task_from_params():
 | `status` (todo/doing/subdone/done/block/cancel/idea) | 执行状态 | select |
 | `today` (true/false) | 是否今日 | checkbox |
 | `today_source` (planned/unplanned/空) | (OB 私域,不映射飞书) | — |
+| `today_source_history` (list,v0.7.3+) | (OB 私域,与 `today_history` 一一对应的按天来源快照,只追加) | — |
 | `created` (ISO 8601) | (不映射,OB 私域) | — |
 | `done_date` (YYYY-MM-DD) | 完成时间 | datetime |
 | `due` (YYYY-MM-DD) | 截止日期 | datetime |

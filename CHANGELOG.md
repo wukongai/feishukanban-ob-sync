@@ -2,6 +2,22 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.7.6] - 2026-06-02 — docs:ARCHITECTURE.md 补 v0.7.3/4/5 设计文档(铁律 #5)
+
+> **背景**:v0.7.3/4/5 三连发后核查文档同步,发现 `docs/ARCHITECTURE.md` 漏改——按项目铁律 #5「改 sync.py 行为 → 改 ARCHITECTURE」属硬性遗漏。本 patch 仅补文档,不改代码。
+
+### 🛠 补两块
+
+- **frontmatter 字段表加 `today_source_history`**(v0.7.3):标 OB 私域 / 与 `today_history` 一一对应的按天来源快照 / 只追加
+- **新增「📌 关键防御机制 + 历史保真」章节**:集中说明
+  - `run_cli` 限流退避(v0.7.4):退避策略 + `_is_ratelimit_5000` 严格识别规则
+  - `today_history` / `today_source_history` 演进(v0.3.0 → v0.7.3):历史快照不被后续覆盖
+  - `getDaySource` 启发式 fallback(v0.7.5):3 级优先 + 边缘 case 提示
+
+### 🔄 兼容性
+
+文档纯增量,无 breaking。
+
 ## [v0.7.5] - 2026-06-02 — fix:OB 日志 getDaySource 启发式 fallback — 救已损坏历史的渲染
 
 > **背景**:v0.7.3 把 dataviewjs 改成查 `today_source_history`,但打开 6-01 日志发现「今日非计划」区块仍为空——23 个 6-01 创建的 task 全部漂到「今日计划」。诊断:这些 task 的 `today_source` 字段早在 v0.7.2 之前就被 `plan_set_false` 清空(17 个)/ 被 `--pull-today` 覆盖为 planned(5 个),原 unplanned 信息**不可逆丢失**;新字段 `today_source_history` 还没数据,fallback 回旧字段仍是错的。
