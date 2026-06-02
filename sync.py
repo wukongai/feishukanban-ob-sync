@@ -1513,6 +1513,7 @@ def build_link_table_index(link_table_id: str, name_field: str, config: dict) ->
             "bitable", "record", "list",
             "--base-token", base_token,
             "--table-id", link_table_id,
+            "--limit", "200",   # 对齐 _extract_link_table_records;默认值不稳定会漏末尾记录
         ])
     except Exception as e:
         print(f"⚠️  拉 link 关联表 {link_table_id} 失败,parent_project 同步跳过: {e}")
@@ -3267,6 +3268,11 @@ def _build_task_md_content_from_params(args, config: dict) -> tuple:
     # today=true → 含今日日期(unquoted inline list,格式对齐 vault 现有 task md);today=false → 留空
     today_history_line = f"today_history: [{today_date}]" if today_source else "today_history:"
 
+    # v0.7.2:today_source_history 与 today_history 一一对应,首条记录即创建时的来源
+    today_source_history_line = (
+        f"today_source_history: [{today_source}]" if today_source else "today_source_history:"
+    )
+
     # 执行明细:外部 --detail(每条 = 不含前导 "- " 的明细行)
     # 走 parse_execution_details + _render_detail_line 规范化,保证格式与 OB 一致(dataview 正确)
     detail_lines = []
@@ -3303,6 +3309,7 @@ status: {status}
 today: {today_bool}
 {today_history_line}
 {_fm("today_source", today_source)}
+{today_source_history_line}
 created: {created_iso}
 {_fm("done_date", done_date)}
 {_fm("category", category)}
@@ -4491,7 +4498,7 @@ def _extract_fields_from_feishu_row(row, fields_meta, config, ob_index: Optional
     """v0.3.7: 从飞书 row 抽出 OB frontmatter 同步字段 dict
 
     与 _create_task_md_from_feishu_record(plan_missing 反向建)+ pull-today 反向 diff sync 共享。
-    不含 today / today_history / today_source(today 逻辑独立)
+    不含 today / today_history / today_source / today_source_history(today 逻辑独立,纯 OB metadata)
     不含 feishu_record / feishu_url / created / 日志(不应反向覆盖)
     v0.4.0(2026-05-28)起含正文 H2 段(delivery / user_story);仍不含其他 H2 段
     (acceptance / thinking / resources / retrospective / execution_summary 暂保持单向 OB→飞书)
@@ -5050,6 +5057,7 @@ status: {status}
 today: true
 today_history: [{today_date}]
 today_source: planned
+today_source_history: [planned]
 created: {created_line}
 due: {due}
 done_date: {done_date}
@@ -5363,21 +5371,36 @@ def pull_today_from_feishu(apply: bool = False) -> None:
 
     for rid, title, p in plan_set_true:
         # 读现有 today_history,append 当日(去重)
+        # v0.7.2:同步读 today_source_history,按天追加 "planned"
         try:
             fm_cur, _, _ = parse_frontmatter(p.read_text(encoding="utf-8"))
             history = fm_cur.get("today_history", []) if fm_cur else []
             if not isinstance(history, list):
                 history = []
+            src_history = fm_cur.get("today_source_history", []) if fm_cur else []
+            if not isinstance(src_history, list):
+                src_history = []
         except Exception:
             history = []
+            src_history = []
         if today_date_iso not in history:
             history.append(today_date_iso)
+        # v0.7.2:today_source_history 与 today_history 长度对齐,今天补 "planned"
+        # 老 task 可能没 src_history 或长度落后,一次补齐到 len(history)-1,再 append "planned"
+        while len(src_history) < len(history) - 1:
+            src_history.append("")
+        if len(src_history) < len(history):
+            src_history.append("planned")
+        else:
+            # 已对齐:今天位置覆盖为 planned(场景:同一天先 unplanned 后 pull-today 改 planned)
+            src_history[len(history) - 1] = "planned"
         # v0.3.6: today_source 区分计划/非计划(ADHD 自觉察)
         # pull-today 触发 set today=true = 早晨规划好的拉来 → planned
         base = {
             "today": True,
             "today_history": history,
-            "today_source": "planned",
+            "today_source": "planned",           # 保留旧字段(最近一次来源)
+            "today_source_history": src_history, # v0.7.2 新字段(按天快照)
         }
         # v0.3.7: 合并飞书字段 diff
         final = _merge_with_field_diff(rid, base)
@@ -5466,8 +5489,9 @@ def pull_today_from_feishu(apply: bool = False) -> None:
         base = {"today": False}
         if history_changed:
             base["today_history"] = new_history
-        # v0.3.6: 对称清 today_source(不在今日 = 无来源标记)
-        base["today_source"] = ""
+        # v0.7.2:不再清空 today_source / today_source_history
+        # 旧逻辑(v0.3.6)清 today_source = "" 会让历史日 Dataview 失真(把 unplanned 当 planned 渲染)
+        # 现:today_source 保留为最后一次来源记录,today_source_history 不动(历史按天快照只追加)
         # v0.3.7: 合并飞书字段 diff
         final = _merge_with_field_diff(rid, base)
         field_changed = rid in field_diffs

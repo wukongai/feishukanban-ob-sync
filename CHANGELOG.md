@@ -2,6 +2,52 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.7.3] - 2026-06-02 — fix:OB 日志「今日非计划」历史失真 — today_source_history 按天快照
+
+> **背景**:v0.7.2 修了「今日需求池」的历史失真,但「今日计划 vs 非计划」分类仍会随后续 `--pull-today` 漂移。回看 6-01 日志,原本正确归类为非计划的任务在 6-02 跑完 pull-today 后**全部漂移到今日计划区块**——根因是 `today_source` 是单个全局字段,但需要按天快照。
+
+### 🛠 修复:新增 `today_source_history` 字段(OB-only)
+
+- 与 `today_history` 一一对应,**按天记录**当天的 source(`planned` / `unplanned`)
+- `today_history[i]` 对应 `today_source_history[i]`,只追加不回溯改 → 历史日 Dataview 渲染时按天查,不再被后续日子覆盖
+- `today_source`(旧字段)继续保留,语义改为"**最近一次**来源"(向后兼容)
+
+### 🛠 sync.py 改动
+
+- **`plan_set_true`**:append `today_source_history` 与 `today_history` 长度对齐,今天位置补 `planned`(同一天先 unplanned 后 pull-today 改 planned 的场景也覆盖)
+- **`plan_set_false`**:**不再清空** `today_source`(旧 v0.3.6 逻辑会清成 `""`,导致历史日 Dataview 失真),`today_source_history` 也不动
+- **`--create-task`**:新建时同步写 `today_source_history: [<source>]`
+- **plan_missing 反向建**(飞书 → OB 补 task md):同步写 `today_source_history: [planned]`
+- **反向同步**(`_extract_fields_from_feishu_row`):新字段标注为 OB-only,不参与飞书同步
+
+### 🛠 task 模板 + 文档
+
+- `obsidian-assets/templates/task-template.md`:加 `today_source_history` 字段行 + 设计注释
+- `docs/feishu-schema.md`:新增「OB-only 元数据字段」段,说明 `today_source` / `today_source_history` 语义与维护时机
+
+### 🔄 兼容性
+
+- **不需要 migration**:老 task md 没新字段,Dataview fallback 旧 `today_source`(行为不变);新字段从下次 `plan_set_true` 触发开始累积
+- **OB 日志 Dataview 渲染逻辑**:需要在 vault 端配套更新「今日计划 / 今日非计划」两区块的 dataviewjs(历史日改用 `today_source_history` 按天查),不在本仓库内,通过 reverse handoff 交付
+
+## [v0.7.2] - 2026-06-02 — fix:OB 日志「今日需求池」历史失真 — DQL→dataviewjs 快照
+
+> **背景**:「今日需求池」用简单 DQL 查实时字段（`today != true` / `status != done`），任务后续被拉入今日或完成后，历史日志的需求池里它就消失，历史失真。与今日计划/非计划区块不对称（后两者早已用 `today_history` 快照渲染）。
+
+### 🛠 修复
+
+- **把「今日需求池」从 DQL 升级为 dataviewjs**，与上方两区块对称：
+  - **当天**：仍用实时 `today` / `status` 过滤（体验不变）
+  - **历史日**：改用 `today_history` 快照判断——`created` 是那天 + `today_history` 不含那天 = 确认是需求池，两个字段都不可变，历史永不失真
+- **改动范围**：
+  - `03 Resources/素材库/模版/日志模版 5.0 1.md`（模板，影响今后新建日志）
+  - `journals/2026-05-30.md`、`2026-05-31.md`、`2026-06-01.md`、`2026-06-02.md`（已有历史日志原地回填）
+- **向后兼容**：没有 `today_history` 字段的老 task → 新代码 `inHistory` 返回 false → 正确显示在需求池（不会漏掉）
+
+### ⚠️ 遗留（v0.7.3 跟进）
+
+`today_source` 字段仍是全局单值，`--pull-today` 的 `plan_set_true` / `plan_set_false` 会覆盖/清空它，导致「今日计划 vs 非计划」历史分类失真。Handoff 见 `docs/handoff/2026-06-02-today_source_history-修复非计划历史失真.md`。
+
 ## [v0.7.1] - 2026-06-01 — feat:`--create-task` 加 `--parent-task` / `--parent-project` — 一条命令建带父子关系 / 项目归属的任务
 
 > **背景**:v0.7.0 的 `--create-task` 不支持设置父任务 / 所属产品项目。外部项目要建「父任务 + N 子任务」结构、或把任务归到某产品项目时,只能事后手动改 frontmatter 再 push。2026-06-01 dogfood「中文守卫 hook 扫尾」实战需求触发补全。
