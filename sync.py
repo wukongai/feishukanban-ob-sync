@@ -1407,6 +1407,42 @@ def parse_cli_output(stdout: str) -> dict:
         return {"_raw": stdout}
 
 
+# v0.7.7(2026-06-02):软段空壳守卫 — strict 模式下拦截五段全空的 task md 进飞书。
+# 五段 = task md 模板的 H2 软段(用户故事 / 验收条件 / 执行思路 / 执行概述 / 复盘)。
+#
+# 默认行为(宽松):空壳放行 + warning,保持 OB Cmd+P 菜单"快速建骨架后续手工补"的工作流不被打扰
+#   — 用户用「快记任务」菜单建 task 默认就是空壳骨架,菜单路径不要硬拦。
+# strict 模式(--strict-soft-sections):五段全空 → push_task_md 拒推 + 提示用户补。
+#   设计目标:走 Claude/skill 路径时(SKILL.md 在 apply 命令里强制加此 flag),
+#   严格校验内容完整性,避免 Claude 偷懒推空壳上飞书。
+#
+# 仅作用于 task md 路径(`_task_md_mode=True`),老 inline journal 路径不动。
+# 根因 handoff:docs/handoff/2026-06-01-5000限流根因+skill修复.md
+_SOFT_SECTIONS = [
+    ("user_story", "用户故事"),
+    ("acceptance", "验收条件"),
+    ("thinking", "执行思路"),
+    ("execution_summary", "执行概述"),
+    ("retrospective_text", "复盘"),
+]
+
+
+def _check_empty_soft_sections(task: dict) -> list[str]:
+    """返回 task dict 中"标题在但内容空"的软段中文名列表。
+
+    仅对 task md 路径(`task["_task_md_mode"] == True`)生效;
+    老 inline journal 路径直接返回 [](无 H2 段概念,不阻断)。
+    """
+    if not task.get("_task_md_mode"):
+        return []
+    empty = []
+    for key, label in _SOFT_SECTIONS:
+        value = task.get(key)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            empty.append(label)
+    return empty
+
+
 # 飞书 base/v3 限流退避:遇到 code=5000 + msg 空 → 5s/15s/45s 退避重试,最多 3 次
 # 有 msg 内容 = 真实业务错误(字段非法/权限不足等),立即抛不重试
 _RETRY_MAX = 3
@@ -3041,7 +3077,8 @@ def push_journal(file_path: Path, apply: bool = False, only_completed: bool = Fa
     print(f"{'='*60}\n")
 
 
-def push_task_md(md_path: Path, apply: bool = False, _silent_fail: bool = False) -> Optional[dict]:
+def push_task_md(md_path: Path, apply: bool = False, _silent_fail: bool = False,
+                 strict_soft: bool = False) -> Optional[dict]:
     """单 task md 推送到飞书(CREATE/UPDATE) — 2026-05-25 上线
 
     用法:python3 sync.py --task-md path/to/task.md [--apply]
@@ -3146,6 +3183,23 @@ def push_task_md(md_path: Path, apply: bool = False, _silent_fail: bool = False)
 
     fields = build_fields_payload(task, config, VAULT_ROOT, existing_delivery="")
     print(f"\n    Payload: {json.dumps(fields, ensure_ascii=False, indent=6)[:800]}")
+
+    # v0.7.7(2026-06-02):软段空壳守卫 — strict 模式下五段全空拒推(skill 路径专用)。
+    # 默认宽松:空壳只 print 警告,继续推 — 保 OB Cmd+P 菜单"快速建骨架后续手工补"工作流。
+    # 走 Claude/skill 时 SKILL.md 在命令里强制加 --strict-soft-sections,这条路径下空壳被严格拦截。
+    empty_segs = _check_empty_soft_sections(task)
+    if empty_segs and len(empty_segs) == 5 and strict_soft:
+        return _fail(
+            f"⛔ 拒推空壳(strict 模式):五段全空({' / '.join(empty_segs)})。\n"
+            f"   触发场景:走 Claude/skill 路径,SOP 要求写入完整内容。\n"
+            f"   修复:补 1-2 段(用户故事/验收条件/执行思路/执行概述/复盘 任选)再推,\n"
+            f"   或去掉 --strict-soft-sections 走宽松模式(菜单路径的默认行为)。",
+            action=action,
+        )
+    if empty_segs:
+        suffix = " [strict 模式 = 已拒推]" if strict_soft and len(empty_segs) == 5 else " — 宽松模式允许继续推"
+        print(f"    ⚠️  软段 {len(empty_segs)}/5 段为空:{', '.join(empty_segs)}{suffix}",
+              file=sys.stderr)
 
     # v0.6.0(2026-05-29):执行明细预览(dry-run + apply 都打)
     ob_details = task.get("execution_details", [])
@@ -3460,7 +3514,8 @@ def create_task_from_params(args, apply: bool = False, json_out: bool = False) -
             ) as tf:
                 tf.write(content)
                 tmp_path = Path(tf.name)
-            result = push_task_md(tmp_path, apply=False, _silent_fail=True)
+            result = push_task_md(tmp_path, apply=False, _silent_fail=True,
+                                  strict_soft=getattr(args, "strict_soft_sections", False))
         finally:
             if tmp_path and tmp_path.exists():
                 tmp_path.unlink()
@@ -3479,7 +3534,8 @@ def create_task_from_params(args, apply: bool = False, json_out: bool = False) -
     target_path.write_text(content, encoding="utf-8")
     print(f"\n💾 已写 task md 到 vault: {target_path.relative_to(vault_root)}")
 
-    result = push_task_md(target_path, apply=True, _silent_fail=True)
+    result = push_task_md(target_path, apply=True, _silent_fail=True,
+                          strict_soft=getattr(args, "strict_soft_sections", False))
 
     success = bool(result and result.get("success"))
     record_id = result.get("record_id") if result else None
@@ -3862,7 +3918,7 @@ def migrate_today_history_quoted(apply: bool = False) -> None:
     print(f"{'='*60}\n")
 
 
-def push_all_today_task_md(apply: bool = False) -> None:
+def push_all_today_task_md(apply: bool = False, strict_soft: bool = False) -> None:
     """v0.4.0+ Step 3(2026-05-28):批量推 OB today=true task md 到飞书(forward 方向)
 
     用法:
@@ -3939,7 +3995,7 @@ def push_all_today_task_md(apply: bool = False) -> None:
             print(f"📍 {p.relative_to(vault_root)}{' [取消今日]' if is_cancel else ''}")
         except Exception:
             print(f"📍 {p}{' [取消今日]' if is_cancel else ''}")
-        result = push_task_md(p, apply=apply, _silent_fail=True)
+        result = push_task_md(p, apply=apply, _silent_fail=True, strict_soft=strict_soft)
         if result is None:
             # 不应该到这里(_silent_fail=True 必返 dict)
             fail_count += 1
@@ -5630,6 +5686,11 @@ def main():
                              "前提:飞书关联表存在该项目,否则该字段跳过(不阻断其他字段)")
     parser.add_argument("--json", action="store_true",
                         help="--create-task 末尾输出机器可读 JSON(success/record_id/url/task_md),供外部 SOP 捕获")
+    parser.add_argument("--strict-soft-sections", action="store_true",
+                        help="v0.7.7:启用软段空壳守卫 — 五段(用户故事/验收条件/执行思路/执行概述/复盘)"
+                             "全空时拒推飞书。默认宽松(空壳只警告不阻断,保 OB Cmd+P 菜单"
+                             "「快速建骨架后续手工补」工作流);走 Claude/skill 路径时由 SKILL.md "
+                             "强制加此 flag,严格校验内容完整性,避免空壳进飞书。")
     args = parser.parse_args()
 
     # --vault: 显式切到 vault 根目录,让所有相对路径(args.path / Path(".") / find_vault_root 的 cwd 起点)正确解析
@@ -5674,13 +5735,14 @@ def main():
     if args.pull_today:
         pull_today_from_feishu(apply=args.apply)
     elif args.push_all_today:
-        push_all_today_task_md(apply=args.apply)
+        push_all_today_task_md(apply=args.apply, strict_soft=args.strict_soft_sections)
     elif args.pull_task:
         pull_task_from_feishu(args.pull_task, apply=args.apply)
     elif args.pull:
         pull_from_feishu(since_date=args.since, apply=args.apply)
     elif args.task_md:
-        push_task_md(Path(args.task_md), apply=args.apply)
+        push_task_md(Path(args.task_md), apply=args.apply,
+                     strict_soft=args.strict_soft_sections)
     elif args.path:
         push_journal(Path(args.path), apply=args.apply, only_completed=args.only_completed)
     else:

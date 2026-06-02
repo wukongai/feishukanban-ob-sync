@@ -2,6 +2,59 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.7.7] - 2026-06-02 — feat:软段空壳守卫(strict 模式)— skill 路径严格、菜单路径宽松
+
+> **背景**:2026-06-01 用户 dogfood 同步飞书 task 时发现飞书 record 缺四个软段(用户故事/验收条件/执行思路/复盘),根因是 OB Cmd+P「快记任务」建空壳后被 Claude/skill 推到飞书时**没补五段就推**。早期设计想"底层一刀切默认严格阻断空壳",但与用户既有工作流冲突——**菜单本就是「快速建骨架,后续手工补」的两段式流程**,默认严格会误伤菜单路径的空壳骨架。最终设计:**默认宽松、skill 显式严格**(由 SKILL.md 在 apply 命令里强制加 `--strict-soft-sections`),菜单路径不动,skill 路径必严。根因 handoff:`docs/handoff/2026-06-01-5000限流根因+skill修复.md`。
+>
+> **设计目标**:让 OB Cmd+P 菜单(快记任务 / 批量推今日 / 完成 task 等)**永远允许空**——这些 UserScript 是"快速建骨架"工具,用户后续在 OB 编辑器里手工补;让 Claude/skill 路径**严格阻断五段全空**——skill SOP 要求"写入完整内容到飞书"。
+
+### 🛠 sync.py:`push_task_md` 加 strict-mode 软段空壳守卫
+
+- 新增 `_SOFT_SECTIONS` 常量 + `_check_empty_soft_sections(task)` helper:扫 task dict 五段(`user_story` / `acceptance` / `thinking` / `execution_summary` / `retrospective_text`),返回为空的段中文名 list。仅对 task md 路径(`_task_md_mode=True`)生效,老 inline journal 路径返回 [] 不阻断。
+- `push_task_md` 在 `build_fields_payload` 之后插守卫:
+  - **五段全空 + `strict_soft=True`** → `_fail` 阻断,提示用户补 1-2 段或去掉 flag
+  - **五段全空 + `strict_soft=False`(默认)** → ⚠️ warning(stderr)+ 继续推(菜单路径预期行为)
+  - **部分空(1-4 段)** → 仅 warning,继续推(两种模式都允许部分空)
+  - **零空** → 静默放行
+- `push_task_md` 新增参数 `strict_soft: bool = False`(默认宽松),所有调用点(CLI main / `create_task_from_params` / `push_all_today_task_md` 循环)透传
+
+### 🆕 CLI flag:`--strict-soft-sections`
+
+显式开启 strict 模式 — 五段全空时拒推。默认不传 = 宽松(只警告)。
+
+```bash
+# 菜单/手敲场景(默认宽松):空壳只 warning,继续推 — 兼容 OB Cmd+P 快记任务建骨架后续手工补的工作流
+python3 sync.py --task-md path/to/task.md --apply
+
+# skill 场景(显式严格,SKILL.md 已强制):五段全空 → 拒推 + 提示
+python3 sync.py --task-md path/to/task.md --apply --strict-soft-sections
+```
+
+### 🛠 SKILL.md(`~/.claude/skills/同步任务到飞书/SKILL.md`):apply 命令强制加 flag
+
+- A2(意图 ①/③ 新建)的 apply 命令末尾加 `--strict-soft-sections`
+- B3(意图 ② 更新已有)的 apply 命令末尾加 `--strict-soft-sections`
+- C2(批量编排父子)所有 apply 命令加 `--strict-soft-sections`
+- apply 前自检清单加一条:**「`--strict-soft-sections` 已带?」**
+
+### 🔄 覆盖入口表(v0.7.7 实际行为)
+
+| 入口 | 默认 flag | 五段全空 | 部分空 |
+|---|---|---|---|
+| Claude `/同步任务到飞书` skill 主动调 sync.py | `--strict-soft-sections`(SKILL.md 强制) | ⛔ 拒推 + 提示补 | ⚠️ warning,继续推 |
+| OB Cmd+P「快记任务」→ sync.py | 无 flag | ⚠️ warning,继续推 | ⚠️ warning,继续推 |
+| OB Cmd+P「批量推今日」→ sync.py | 无 flag | ⚠️ warning,继续推 | ⚠️ warning,继续推 |
+| OB Cmd+P「完成 task」/「记录今日明细」等 | 无 flag | ⚠️ warning,继续推 | ⚠️ warning,继续推 |
+| 外部项目走 skill `--create-task` | `--strict-soft-sections`(SKILL.md 强制) | ⛔ 拒推 | ⚠️ warning,继续推 |
+| 手敲 `python3 sync.py --task-md …`(无 flag) | 无 flag | ⚠️ warning,继续推 | ⚠️ warning,继续推 |
+
+### 🔄 兼容性
+
+- **完全向后兼容**:默认行为不变(不加 flag = 老行为,空壳照推 + warning),不会误伤任何 UserScript 或外部脚本。
+- **新增能力**:加 `--strict-soft-sections` 时启用守卫(skill 路径主动用)。
+- 老 inline journal 路径(`_task_md_mode` 不存在)完全不受影响。
+- dry-run 也跑守卫(strict 模式下给用户最早机会知道空壳,不必等 apply)。
+
 ## [v0.7.6] - 2026-06-02 — docs:ARCHITECTURE.md 补 v0.7.3/4/5 设计文档(铁律 #5)
 
 > **背景**:v0.7.3/4/5 三连发后核查文档同步,发现 `docs/ARCHITECTURE.md` 漏改——按项目铁律 #5「改 sync.py 行为 → 改 ARCHITECTURE」属硬性遗漏。本 patch 仅补文档,不改代码。

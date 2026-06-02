@@ -65,6 +65,17 @@ OB 日志「🎯 今日计划 / 🐿️ 今日非计划」按天渲染,要求即
 
 > 边缘 case:用户手动把昨天创建的 task 拖到今日并意图为 unplanned(`created < dateISO`)—— 启发式判不出,需手改 task md 的 `today_source_history` 字段。
 
+### 软段空壳守卫 — strict 模式(v0.7.7)
+
+`push_task_md` 在调飞书 upsert 前对五段(用户故事 / 验收条件 / 执行思路 / 执行概述 / 复盘)做空段扫描:
+
+- **默认宽松**(`strict_soft=False`):五段全空 → ⚠️ warning + 继续推 / 部分空 → warning / 零空 → 静默。**OB Cmd+P 菜单路径(快记任务 / 批量推今日 / 完成 task 等所有 UserScript)走此路径** —— 兼容用户"快速建骨架后续手工补"的两段式工作流。
+- **strict 模式**(`--strict-soft-sections`):五段全空 → ⛔ `_fail` 拒推 + 提示用户补。**Claude/skill 路径走此模式**(由 `~/.claude/skills/同步任务到飞书/SKILL.md` 在 A2 / B3 / C2 的 apply 命令里强制加 flag)—— 兜底 Claude 漏补软段就推。
+
+辨识标记:仅对 `task["_task_md_mode"]=True`(parse_task_md 路径)生效;老 inline journal 路径无 H2 段概念,不触发守卫。Helper `_check_empty_soft_sections(task)` 返回空段中文名 list,守卫逻辑通过 list 长度 + `strict_soft` 联合决策。
+
+> **设计原则**:用 flag 区分调用方意图,而不是用调用者类型(sync.py 不知道调用者是 UserScript 还是 skill)。flag 缺省 = 调用方放弃严格校验(菜单的默认意图);flag 显式 = 调用方主张严格(skill 的默认意图)。
+
 ---
 
 ## 📋 四大工作流场景
