@@ -36,6 +36,9 @@
  *
  * v2(2026-05-29):加 ⏱️ 用时 + 🎯 完成度
  * v3(2026-05-30,v0.6.7):加 📋 plan + ⏰ est + 每步退回/跳过 + 预览
+ * v3.1(2026-06-02,v0.7.8):写明细同时推进 frontmatter.status — 让 dataview「当日状态」
+ *   跨日也对齐当前意图。修前 bug:昨天记 Doing 明细,今天日志仍显示 ⬜ Todo(frontmatter
+ *   未动,dayDetail 当天找不到明细 → fallback 终极)。语义:明细 = 当前终极意图。
  */
 
 module.exports = async function (params) {
@@ -288,10 +291,32 @@ module.exports = async function (params) {
       newContent = content.replace(marker, newSection + marker);
     }
 
+    // v0.7.8(2026-06-02):顺手推进 frontmatter.status — 让 dataview「当日状态」跨日也对齐当前意图
+    // 修前 bug:2026-06-01 记 Doing 明细但 frontmatter.status 没动,2026-06-02 看日志 dayDetail()
+    //          找不到当天明细行 → fallback 终极 → 显示 ⬜ Todo(用户认知冲突:「明明 Doing 了」)
+    // 语义:每次记今日明细 = 当前「终极意图」,所选 status → frontmatter.status(小写 enum)
+    // 飞书侧:sync.py push 时读 frontmatter.status 映射飞书 record status,会一并被推上去
+    const newStatusLower = data.status.toLowerCase();
+    const fmStatusRegex = /^(---\r?\n[\s\S]*?\nstatus:)[ \t]*([^\n]*)/m;
+    const oldFmMatch = newContent.match(fmStatusRegex);
+    const oldStatusLower = oldFmMatch ? oldFmMatch[2].trim().toLowerCase() : "";
+    let statusAdvanced = false;
+    if (oldFmMatch) {
+      if (oldStatusLower !== newStatusLower) {
+        newContent = newContent.replace(fmStatusRegex, `$1 ${newStatusLower}`);
+        statusAdvanced = true;
+      }
+    } else {
+      console.warn("[记录今日明细 v3] frontmatter 没有 status 字段,跳过推进");
+    }
+
     await app.vault.modify(activeFile, newContent);
+    const advanceHint = statusAdvanced
+      ? `\n📌 终极状态推进:${oldStatusLower || "(空)"} → ${newStatusLower}`
+      : "";
     new Notice(
-      `✅ 已写本地: ${today} | ${data.status}\n🔄 正在 sync 飞书子表...(3-8 秒)`,
-      4000
+      `✅ 已写本地: ${today} | ${data.status}${advanceHint}\n🔄 正在 sync 飞书子表...(3-8 秒)`,
+      4500
     );
 
     // 调 sync.py --task-md --apply

@@ -2,6 +2,53 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.7.8] - 2026-06-02 — fix:「记录今日明细」同步推进 frontmatter.status — 修跨日 dataview「当日状态」回退 bug
+
+> **背景**:用户 2026-06-01 用 Cmd+P「记录今日明细」把任务记成 Doing,2026-06-02 打开当天日志却看到该任务显示 ⬜ Todo / 终极 ⬜ Todo,认知冲突「明明 Doing 了」。dogfood 发现 UserScript 只写「## 📈 执行明细」段,**从来不动 frontmatter.status**,导致 task md 的"终极状态"始终停在 Todo。
+>
+> **根因链**:
+> 1. 「记录今日明细」UserScript 设计初衷:明细 = 当天工作状态,终极 = 任务整体状态,两套独立
+> 2. dataviewjs `dayDetail()` 严格按 `curISO` 查当天明细行;**今天没明细 → fallback `frontmatter.status`**(`day = normDay(d?.status) || fin`)
+> 3. 06-01 写了 Doing 明细,06-02 没记当天明细 → fallback 终极 = Todo → 「当日状态」也是 Todo
+> 4. 跨日完全断裂:昨天 Doing,今天看就是 Todo(除非你今天再记一次)
+>
+> **设计选择**:执行明细 = 当前「终极意图」语义(不再独立)。每次记今日明细 = 推进 frontmatter.status 到该状态。
+> 用户拍板原话:**「这一次记录将把终极状态推进为 X」是想要的行为**。代价:回退 Todo 也会回退终极,但用户可控(不选 Todo 就不会回退)。
+
+### 🛠 `obsidian-assets/userscripts/quickadd-记录今日明细.js`:v3.1 同步推进 frontmatter.status
+
+- 在 `await app.vault.modify(activeFile, newContent)` 之前插入推进逻辑:
+  - 用 regex `/^(---\r?\n[\s\S]*?\nstatus:)[ \t]*([^\n]*)/m` 匹配 frontmatter 顶段 status 行(只在前导 `---` 块内,不会误伤正文)
+  - 把 status 值替换为 `data.status.toLowerCase()`(`Doing` → `doing`,7 态全对齐 sync.py `_STATUS_INTERNAL_VALID`)
+  - 检测 old vs new,只有真正变化时设 `statusAdvanced = true`,在 Notice 多打一行提示
+- Notice 升级:`✅ 已写本地: 06-02 | Doing` + 额外一行 `📌 终极状态推进:todo → doing`(仅状态真变时显示)
+- 飞书侧:sync.py push 时读 `fm_status` 直接映射飞书 record status(`build_fields_payload` 的 7 态直接映射),所以此次改动会让飞书 record 状态也跟着推进 — 看板状态对齐,不需要额外手工同步
+
+### 📐 设计原则自检(8 条)
+
+- 解耦 ✅:只改 UserScript 一处,sync.py 不动,dataviewjs 不动
+- 可扩展 ✅:推进逻辑是简单 regex,加新 status 值不影响
+- 灵活修改 ✅:回滚 = 删 14 行新增代码,无副作用
+- 渐进披露 ✅:Notice 「📌 终极状态推进」仅在真有变化时显示,无变化时静默
+- 鲁棒性 ✅:frontmatter 无 status 字段 → `console.warn` + 继续(不阻断流程)
+- 人可读 ✅:注释含 v0.7.8 修前 bug + 语义说明
+- 高复用 ⚠️:推进逻辑是「记录今日明细」专属,未抽 helper(单点用,不必)
+- 工程化 ✅:CHANGELOG + 顶部脚本注释 v3.1 同步更新(铁律 #5)
+
+### 📦 用户安装/升级
+
+- vault 内 userscripts 是 symlink 到 repo → 拉新版 repo 即生效
+- QuickAdd 需要**重启 Obsidian**(或 reload plugin)才会重新加载脚本
+- 升级后:任何已存在的 task md 的 frontmatter.status 不会自动同步过去 — 下次记当天明细时才会推进
+
+### 🧪 验证
+
+- 真实 vault 测:打开一条 todo task → Cmd+P 记录今日明细 → 选 Doing → 写本地后看 frontmatter `status: doing` ✅,Notice 显示「📌 终极状态推进:todo → doing」✅,飞书 record 状态变 Doing ✅
+- 边界:已经 doing 的 task 再记 doing 明细 → frontmatter 不变,Notice 不显示推进行 ✅
+- 边界:doing 的 task 记 Block → frontmatter 变 block,Notice 显示「doing → block」✅(允许回退,语义对齐用户拍板的「每次都是当前终极意图」)
+
+---
+
 ## [v0.7.7] - 2026-06-02 — feat:软段空壳守卫(strict 模式)— skill 路径严格、菜单路径宽松
 
 > **背景**:2026-06-01 用户 dogfood 同步飞书 task 时发现飞书 record 缺四个软段(用户故事/验收条件/执行思路/复盘),根因是 OB Cmd+P「快记任务」建空壳后被 Claude/skill 推到飞书时**没补五段就推**。早期设计想"底层一刀切默认严格阻断空壳",但与用户既有工作流冲突——**菜单本就是「快速建骨架,后续手工补」的两段式流程**,默认严格会误伤菜单路径的空壳骨架。最终设计:**默认宽松、skill 显式严格**(由 SKILL.md 在 apply 命令里强制加 `--strict-soft-sections`),菜单路径不动,skill 路径必严。根因 handoff:`docs/handoff/2026-06-01-5000限流根因+skill修复.md`。
