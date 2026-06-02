@@ -3,7 +3,7 @@
 > 📋 **Obsidian ↔ 飞书项目管理多维表 全闭环同步工具**。让你既享受 Obsidian 的 ADHD 友好「子弹笔记式任务流」,又拥有飞书的「项目看板可视化」,**两端永远一致**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.7.4-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.7.5-blue.svg)](CHANGELOG.md)
 
 ---
 

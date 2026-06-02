@@ -2,6 +2,35 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.7.5] - 2026-06-02 — fix:OB 日志 getDaySource 启发式 fallback — 救已损坏历史的渲染
+
+> **背景**:v0.7.3 把 dataviewjs 改成查 `today_source_history`,但打开 6-01 日志发现「今日非计划」区块仍为空——23 个 6-01 创建的 task 全部漂到「今日计划」。诊断:这些 task 的 `today_source` 字段早在 v0.7.2 之前就被 `plan_set_false` 清空(17 个)/ 被 `--pull-today` 覆盖为 planned(5 个),原 unplanned 信息**不可逆丢失**;新字段 `today_source_history` 还没数据,fallback 回旧字段仍是错的。
+
+### 🛠 dataviewjs 启发式 fallback(vault 端,不改 task md 数据)
+
+`getDaySource(p, dateISO)` 新增第二优先级 fallback:
+- **第 1 优先**:`today_source_history[idx]` 存在非空 → 用这个值(v0.7.3 主路径,新数据 100% 准确)
+- **第 2 优先(新)**:`created` 那天 == dateISO 且 dateISO 在 `today_history` → 视为 `unplanned`(启发式;Cmd+P 快记任务的典型特征:当天建当天 today=true)
+- **第 3 优先(兜底)**:fallback 旧 `today_source`(无可推断时的最后一招)
+
+### 🔄 覆盖效果
+
+| 场景 | 修复? |
+|---|---|
+| **新数据**(v0.7.3 起 sync.py 生成):走 today_source_history 主路径 | ✅ 100% 准确 |
+| **历史 Cmd+P 快记任务**(绝大多数):启发式准确判 unplanned | ✅ 准确 |
+| **历史 pull-today 拉来的 task**(created 早于查询日):fallback today_source = "planned" | ✅ 准确 |
+| **边缘 case**:手动把昨天创建的 task 拖到今日并意图 unplanned(`created < dateISO`) | ⚠️ 启发式判不出,需手改 `today_source_history` |
+
+### 🛠 影响范围(均在 vault 端)
+
+- `03 Resources/素材库/模版/日志模版 5.0 1.md`(模板,今后新建日志默认)
+- `journals/2026-05-30.md` / `5-31.md` / `6-01.md` / `6-02.md`(4 份历史日志原地补)
+
+### 🛠 仓库内
+
+仅 CHANGELOG 增本节(dataviewjs 改动不在 obsidian-assets 范围,日志模板用户自维护);README badge bump v0.7.5。
+
 ## [v0.7.4] - 2026-06-02 — fix:飞书 base/v3 `code=5000` 限流自动退避重试
 
 > **背景**:飞书多维表格 base/v3 API 在密集连续写请求后会触发限流,表现为 `code=5000 + msg 为空`(有 msg 内容 = 真实业务错误,不应重试)。2026-06-02 实测:间隔 30 秒后同请求恢复成功。当前 sync.py 无任何重试,限流直接 raise,用户需手动重跑。根因详见 `docs/handoff/2026-06-01-5000限流根因+skill修复.md`。
