@@ -2,6 +2,56 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.7.9] - 2026-06-02 — fix:select 字段全 schema 校验 + 友好报错 + `--strict-select` flag
+
+> **事故复现(2026-06-02)**:OB CC 走 skill `/同步任务到飞书` 推 task md,frontmatter `project_minor: [CC 工程化, 数据分析]`(OB CC 根据任务特征生成的标签),sync.py 直接当 multi-select 传飞书,触发 `code=800010401 invalid_request` 宽泛报错,无字段信息,二分排查 ~15 分钟才定位:① 「项目小类」实际 `multiple=false` 单选(代码注释「multi-select」错误);② 两个值都不在飞书白名单(7 项:训练营/干货/智能体/claudecode/skill/Codex/软硬件)。
+>
+> **根因**:`build_fields_payload` 对所有 task md select 字段(category / subcategory / project_minor / adhd_priority / priority_str / efficiency / quality)直接把 frontmatter 值传飞书,从不主动校验。只有 `iteration_week / iteration_month` 走 `best_match_enum`(2026-05-18 加)。
+>
+> **设计目标**:dry-run 阶段主动拉飞书 schema 校验所有 select 字段,失败给清晰建议(白名单 + 相似项 + 后台加选项 + 改 frontmatter 三个修复路径);加 `--strict-select` flag 与 `--strict-soft-sections` 平行,skill 路径默认严格、菜单路径默认宽松。
+
+### 🛠 sync.py:`fetch_table_schema` + `validate_select_value` + `build_fields_payload` 校验集成
+
+- 新增 `fetch_table_schema(config) -> dict | None`(line 1556 区段):调 `feishu-cli bitable field list` 拉表 schema 组织成 `{field_name: {id, type, multiple, options[str]}}`,模块级 `_FIELD_OPTIONS_CACHE` 按 `(base_token, table_id)` 缓存,同进程内只跑一次累积流程
+- **多轮累积修 cli 分页 bug**:实测 `feishu-cli bitable field list` 每次只返 20 条但 `total=31`,且每次随机抽样(服务端无 `page_token` 参数,cli 不暴露分页) — 单次调用 schema 永远不全。`_SCHEMA_FETCH_MAX_ROUNDS=15` 上限内累积合并(by field_id 去重),达 `total` 或连续 3 轮无新进展即停。残缺时打 warn 但不阻断(可能误报"字段不在 schema",用户对照配置判断)
+- 新增 `validate_select_value(field_name, value, schema) -> (validated_list | None, warnings, has_invalid)`(line 1638 区段):统一处理白名单 + 单/多选语义。单选传多值 → 截第一个 + warn;白名单外值 → fuzzy 找相似项作建议 + 列白名单 + 后台加选项建议;不在 schema → 跳过 + warn(可能配置错或 schema 拉取不全);非 select 类型(text/link/...)→ 透传不动;schema 为 None(cli 失败)→ 降级旧行为不校验
+- `build_fields_payload`(line 2471 task_md_mode 分支)改造:所有 select 字段(`_TASK_MD_SELECT_OB_KEYS`:subcategory / project_minor / adhd_priority / priority_str / category / efficiency / quality)统一过 `validate_select_value`;不再硬编码 list 包裹。校验产物 `_select_warnings / _select_dropped_invalid / _select_schema_loaded` 挂到 task dict(side-channel,沿用 `_delivery_items_merged` 模式),`push_task_md` dry-run 输出读取并打印
+- `push_task_md`(line 3184 区段):dry-run 阶段在 payload 之后插入「🔍 校验 select 字段」section,逐条 ✅/⚠️ 并末尾汇总跳过字段;strict 模式拒推消息列 3 个修复路径(改 frontmatter / 后台加选项 / 去掉 strict)
+- argparse 新增 `--strict-select`(默认 False)+ 全链路透传到 `push_task_md / push_all_today_task_md / create_task_from_params`,与 `--strict-soft-sections` 平行
+- sync.py:1330 + config.yaml 项目小类注释修正「multi-select」→「单选(multiple=false),单/多由 schema 动态判断」+ 列 7 项白名单作可读参考
+
+### 🔒 默认行为兼容性
+
+- 默认宽松模式:select 字段值合法 → payload 跟旧版完全一致;白名单外值 → 该字段被跳过(不写飞书),其他字段照常 sync(不再撞飞书 `invalid_request` 宽泛报错)
+- 新 flag `--strict-select` 默认 False — 现有 Cmd+P 菜单工作流不受影响
+- cli 拉 schema 失败 → 自动降级旧行为(不校验)+ stderr warn,对齐 `behavior.fail_fast=false`
+- inline journal 模式(`push_journal`)不走 task_md select 校验分支,行为完全不变
+
+### 📐 设计原则自检(8 条)
+
+- 解耦 ✅:`fetch_table_schema` / `validate_select_value` 独立函数,build_fields_payload 用一次,push_task_md dry-run 读一次。不动 parse_task_md / best_match_enum
+- 可扩展 ✅:加新 select 字段 → `_TASK_MD_SELECT_OB_KEYS` 元组加一项,build_fields_payload 自动走校验
+- 灵活修改 ✅:回滚 = 删 validate_select_value 调用 + 还原 build_fields_payload 一处分支 + 删 argparse 一行
+- 渐进披露 ✅:dry-run 默认只一行「全部通过 ✅」;失败时展开建议;strict 模式才拒推
+- 鲁棒性 ✅:cli 失败 / schema 残缺都降级不阻断;cache miss 多轮累积有上限保护;`_silent_fail` 模式(批量推)拒推不影响其他 task
+- 人可读 ✅:warning 三段式(列白名单 / 相似项建议 / 后台加选项);拒推 3 个修复路径用户能直接照做
+- 高复用 ✅:fetch_table_schema 是通用 helper,未来其他需要查 schema 的功能可复用
+- 工程化 ✅:CHANGELOG + 反向回执 + sync.py:1330 + config.yaml 注释 + 4 用例反测
+
+### 🧪 反测(4 用例,真实 vault 跑通)
+
+1. **正向**:`project_minor: [claudecode]` + 全字段合法 → dry-run「🔍 全部通过 ✅」+ payload 含 7 个字段 + exit 0 ✅
+2. **白名单外+默认宽松**:`project_minor: [CC 工程化, 数据分析]` → dry-run 标 ⚠️ 单选多值 + ⚠️ 不在白名单 + 列建议 + 字段跳过 + 其他字段照样 sync + exit 0 ✅
+3. **白名单外+strict**:同 case2 + `--strict-select` → ⛔ 拒推 + 3 修复路径 + exit 1 ✅
+4. **单选传多值合法**:`project_minor: [claudecode, skill]` → ⚠️ 截第一个 + payload 写 `[claudecode]` + 不拒推 + exit 0 ✅
+
+### 🔁 OB 端待办(handoff 回执项)
+
+- OB CC 收回执后改 `~/.claude/skills/同步任务到飞书/SKILL.md`「apply 前自检清单」加一条:**所有走 skill 路径的 apply 命令在 `--apply` 旁强制加 `--strict-select`**(与 `--strict-soft-sections` 同位置),让 Claude/skill 路径下白名单外值直接拒推,避免 silent 丢字段
+- 反向回执:`docs/handoff/OB对接/2026-06-02-sync-py-select字段校验增强-完成回执.md`
+
+---
+
 ## [v0.7.8] - 2026-06-02 — fix:「记录今日明细」同步推进 frontmatter.status — 修跨日 dataview「当日状态」回退 bug
 
 > **背景**:用户 2026-06-01 用 Cmd+P「记录今日明细」把任务记成 Doing,2026-06-02 打开当天日志却看到该任务显示 ⬜ Todo / 终极 ⬜ Todo,认知冲突「明明 Doing 了」。dogfood 发现 UserScript 只写「## 📈 执行明细」段,**从来不动 frontmatter.status**,导致 task md 的"终极状态"始终停在 Todo。

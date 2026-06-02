@@ -1327,8 +1327,11 @@ def parse_task_md(md_path: Path, config: dict) -> Optional[dict]:
         "priority_str": fm.get("priority"),
         "category": fm.get("category"),
         "subcategory": fm.get("subcategory"),
-        # v0.3.8: project_minor(项目小类,task 表 multi-select)— 任务内容细分类型
-        # frontmatter 写 list,sync.py 推飞书「项目小类」字段;Cmd+P 快记任务弹最近 5 条
+        # v0.3.8: project_minor(项目小类)— 任务内容细分类型
+        # ⚠️ v0.7.9(2026-06-02)修正:实测飞书侧 multiple=false 单选(早期注释「multi-select」错误)
+        # frontmatter 仍写 YAML list(给 OB Cmd+P 弹最近 5 条用),build_fields_payload 时由
+        # validate_select_value 据 schema 动态判断:单选传多值 → 截一个 + warn;不在白名单 → 跳过
+        # 「项目小类」白名单(2026-06-02):训练营 / 干货 / 智能体 / claudecode / skill / Codex / 软硬件
         "project_minor": _ensure_list(fm.get("project_minor")),
         "adhd_priority": fm.get("adhd_priority"),
         "estimate_hours": fm.get("estimate_hours"),
@@ -1551,6 +1554,201 @@ def best_match_enum(field_id: str, query: str, config: dict) -> Optional[str]:
         print(f"⚠️  cli search-options 失败 field_id={field_id} query={query}: {e}")
         _ENUM_MATCH_CACHE[cache_key] = None
         return None
+
+
+# v0.7.9(2026-06-02):select 字段全 schema 缓存(配合 fetch_table_schema + validate_select_value)
+# key = (base_token, table_id), value = {field_name: {id, type, multiple, options[str]}} 或 None
+# 整张 schema 一次拉、所有字段共用;cli 失败时缓存 None,调用方降级为不校验。
+# 跟 _ENUM_MATCH_CACHE 互补:_ENUM 走单字段单候选词 fuzzy(iteration_week 历史方案),
+# _FIELD_OPTIONS 走全表 schema(任意 select 字段统一白名单校验)。
+_FIELD_OPTIONS_CACHE: dict[tuple[str, str], Optional[dict]] = {}
+
+# task_md_fields 里所有 select 类型字段的 OB key —— 跟 build_fields_payload line 2328 同步维护
+# (新加 select 字段时,这里和 build_fields_payload 的 if 分支同时加)
+_TASK_MD_SELECT_OB_KEYS = (
+    "subcategory", "project_minor", "adhd_priority",
+    "priority_str", "category", "efficiency", "quality",
+)
+
+
+# v0.7.9 实证:`feishu-cli bitable field list` 每次只返 20 条但 total=31,且返回集合随机
+# (服务端无显式分页参数,cli 不暴露 page_token)→ 单次调用 schema 永远不全
+# 应对:循环调用累积合并,直到 schema 长度 ≥ total 或达到上限
+# 经验值:10 轮内基本能 cover 31 字段表(随机抽样问题);超过仍缺则接受残缺 schema
+_SCHEMA_FETCH_MAX_ROUNDS = 15
+
+
+def fetch_table_schema(config: dict) -> Optional[dict]:
+    """拉飞书主表 field 全 schema,返回 {field_name: {id, type, multiple, options[str]}}
+
+    v0.7.9(2026-06-02)上线 —— 配合 select 字段白名单校验。事故复现:
+    project_minor: [CC 工程化, 数据分析] → 飞书 code=800010401 invalid_request 宽泛报错。
+
+    实施细节(2026-06-02 反测发现):
+        feishu-cli bitable field list 单次只返 20 条(table 共 31 字段,total 字段宣称),
+        且每次返回的子集**随机**,没有 page_token / page_size 参数可指定。
+        → 循环多轮调用 + merge fields by id 累积,直到 len(schema) >= total 或 达 N 轮上限。
+        命中 cache 后,首次 sync 也只跑一次累积流程(cache miss 时摊销)。
+
+    Returns:
+        schema dict;cli 失败/网络异常返回 None(调用方降级为不校验)。
+        若达上限仍未 cover total → 返回残缺 schema + stderr warn(校验"误报"概率存在,
+        但 strict 模式拒推前 dropped 字段名会列出来,用户可对照判断是误报还是真错)。
+
+    边界:
+        - cli 头部「Access Token 已过期,正在刷新...」等进度文本由 parse_cli_output 处理
+        - link / text / number / checkbox / datetime 等非 select 字段也在 schema 里,
+          options 为 [],multiple 字段可能缺失(置 False)
+        - 同进程内 (base_token, table_id) 命中一次 cache,后续 O(1) 复用
+    """
+    base_token = config["feishu"]["base_token"]
+    table_id = config["feishu"]["table_id"]
+    cache_key = (base_token, table_id)
+    if cache_key in _FIELD_OPTIONS_CACHE:
+        return _FIELD_OPTIONS_CACHE[cache_key]
+
+    try:
+        schema: dict = {}
+        seen_ids: set = set()
+        expected_total: Optional[int] = None
+        rounds_no_progress = 0
+        for round_idx in range(_SCHEMA_FETCH_MAX_ROUNDS):
+            result = run_cli([
+                "bitable", "field", "list",
+                "--base-token", base_token,
+                "--table-id", table_id,
+            ])
+            fields = result.get("fields", [])
+            if not isinstance(fields, list):
+                raise RuntimeError(f"field list 响应缺 fields[],实际 keys={list(result.keys())}")
+            total = result.get("total")
+            if isinstance(total, int) and total > 0:
+                expected_total = total
+            before = len(schema)
+            for f in fields:
+                fid = f.get("id")
+                name = f.get("name")
+                if not name or not fid or fid in seen_ids:
+                    continue
+                seen_ids.add(fid)
+                options = [o.get("name") for o in (f.get("options") or []) if o.get("name")]
+                schema[name] = {
+                    "id": fid,
+                    "type": f.get("type"),
+                    "multiple": bool(f.get("multiple", False)),
+                    "options": options,
+                }
+            # 命中目标(累积 >= 总数) → 停
+            if expected_total and len(schema) >= expected_total:
+                break
+            # 连续 3 轮无新字段 → 服务端真的没更多了,停(防 cli 长期重复返同样子集)
+            if len(schema) == before:
+                rounds_no_progress += 1
+                if rounds_no_progress >= 3:
+                    break
+            else:
+                rounds_no_progress = 0
+        if expected_total and len(schema) < expected_total:
+            print(
+                f"⚠️  飞书 field list 多轮拉取仍缺 {expected_total - len(schema)}/{expected_total} 字段"
+                f"(cli 单次只返 20 条 + 随机抽样限制) — 已配置 select 字段若在缺漏区会被误报「不在 schema」,"
+                f"请对照配置确认", file=sys.stderr,
+            )
+        _FIELD_OPTIONS_CACHE[cache_key] = schema
+        return schema
+    except Exception as e:
+        print(f"⚠️  拉飞书表 schema 失败,select 字段降级为不校验: {e}", file=sys.stderr)
+        _FIELD_OPTIONS_CACHE[cache_key] = None
+        return None
+
+
+def validate_select_value(
+    field_name: str, value, schema: Optional[dict]
+) -> tuple[Optional[list], list[str], bool]:
+    """对 select 字段的值做白名单 + 单/多选语义校验
+
+    v0.7.9(2026-06-02)上线 —— 在 build_fields_payload 写 payload 前主动拦截
+    白名单外值,避免飞书 code=800010401 invalid_request 宽泛报错。
+
+    Args:
+        field_name: 飞书字段名(如「项目小类」)
+        value: task dict 里的原值(str / list[str] / None)
+        schema: fetch_table_schema 返回值;None 表示 cli 失败 → 降级不校验
+
+    Returns:
+        (validated_list, warnings, has_invalid)
+        - validated_list: 校验后写飞书的值(list 包裹,飞书 API 单/多选都接受 list);
+          None = 整字段跳过(空值 / 全部非法 / 不在 schema)
+        - warnings: 每条一句的人话提示,直接打到 dry-run 输出
+        - has_invalid: 是否有白名单外值(strict 模式触发拒推时用)
+
+    边界:
+        - schema=None(cli 失败) → 透传 list 包裹,不校验,无 warning
+        - 非 select 类型(text/number/link/...)→ 透传不动,不校验
+        - 单选传多值 → 截第一个 + warn
+        - 单选传 1 个白名单外值 → 跳过整字段 + warn(返回 None)
+        - 多选混合合法/非法 → 写合法值 + warn(返回 valid list,丢非法)
+    """
+    if schema is None:
+        if value is None or value == "":
+            return None, [], False
+        return (value if isinstance(value, list) else [value]), [], False
+
+    field_schema = schema.get(field_name)
+    if not field_schema:
+        return None, [f"字段「{field_name}」不在飞书 schema(配置错或后台已删) — 跳过"], False
+
+    if field_schema.get("type") != "select":
+        if value is None or value == "":
+            return None, [], False
+        return (value if isinstance(value, list) else [value]), [], False
+
+    multiple = field_schema.get("multiple", False)
+    whitelist = field_schema.get("options", [])
+
+    if isinstance(value, list):
+        values = [str(v).strip() for v in value if v is not None and str(v).strip()]
+    elif value is None or value == "":
+        return None, [], False
+    else:
+        values = [str(value).strip()]
+    if not values:
+        return None, [], False
+
+    warnings: list[str] = []
+
+    if not multiple and len(values) > 1:
+        warnings.append(
+            f"单选字段「{field_name}」传了 {len(values)} 个值 {values} → 只保留第一个「{values[0]}」"
+        )
+        values = values[:1]
+
+    valid = [v for v in values if v in whitelist]
+    invalid = [v for v in values if v not in whitelist]
+
+    if invalid:
+        suggestions = []
+        for bad in invalid:
+            bad_lc = bad.lower()
+            close = [opt for opt in whitelist
+                     if bad_lc in opt.lower() or opt.lower() in bad_lc]
+            if close:
+                suggestions.append(f"「{bad}」相似项:{', '.join(close[:3])}")
+        wl_preview = " / ".join(whitelist[:10])
+        if len(whitelist) > 10:
+            wl_preview += f" ...(共 {len(whitelist)} 项)"
+        lines = [
+            f"字段「{field_name}」{len(invalid)} 个值不在白名单:{invalid}",
+            f"        白名单:{wl_preview}",
+        ]
+        if suggestions:
+            lines.append(f"        建议 1:改 frontmatter 用现有选项 — {' / '.join(suggestions)}")
+        lines.append(f"        建议 2:去飞书后台「{field_name}」字段加 {invalid} 选项后重跑")
+        warnings.append("\n     ".join(lines))
+
+    if not valid:
+        return None, warnings, True
+    return valid, warnings, bool(invalid)
 
 
 # 模块级:link 关联表的 名字→record_id 索引缓存,key=link_table_id
@@ -2313,6 +2511,12 @@ def build_fields_payload(task: dict, config: dict, vault_root: Path, existing_de
     #         retrospective_text / execution_summary
     if task.get("_task_md_mode"):
         task_md_cfg = config.get("task_md_fields", {})
+        # v0.7.9(2026-06-02):select 字段白名单校验 — 一次拉飞书 schema,所有 select 共用
+        # 失败(cli 异常 / 网络)→ schema=None,validate_select_value 自动降级为不校验(老行为)
+        # warnings + dropped 挂到 task,供 push_task_md dry-run 输出 + strict-select 拒推用
+        select_schema = fetch_table_schema(config)
+        select_warnings: list[str] = []  # 给 dry-run 打印的全部消息(成功 + 警告)
+        select_dropped_invalid: list[str] = []  # 因白名单外值被跳过的字段,strict 用
         for ob_key, fcfg in task_md_cfg.items():
             field_name = fcfg.get("field_name")
             if not field_name:
@@ -2323,11 +2527,18 @@ def build_fields_payload(task: dict, config: dict, vault_root: Path, existing_de
             # 飞书侧所有 select 字段(单/多选)都要 list 包裹(v0.3.9 实证:cli list 返回 ['P0'] 这种格式)
             # 历史 record 验证:价值优先级 ['P0'] / 执行状态 ['Todo'] / 项目小类 ['claudecode'] 全是 list
             # OB frontmatter 写单 str 也兼容(自动包 list),写 list 也兼容(直接用)
-            # v0.3.8: subcategory / project_minor;v0.3.9 补:priority_str / category / adhd_priority / efficiency
-            # v0.4.0(2026-05-28):quality(高/中/低 单选)
-            if ob_key in ("subcategory", "project_minor", "adhd_priority",
-                          "priority_str", "category", "efficiency", "quality"):
-                out[field_name] = value if isinstance(value, list) else [value]
+            # v0.7.9(2026-06-02):全部走 validate_select_value 校验(白名单 + 单/多选语义)
+            if ob_key in _TASK_MD_SELECT_OB_KEYS:
+                validated, warns, has_invalid = validate_select_value(
+                    field_name, value, select_schema
+                )
+                if warns:
+                    select_warnings.extend(warns)
+                if validated is None:
+                    if has_invalid:
+                        select_dropped_invalid.append(field_name)
+                    continue
+                out[field_name] = validated
             # number 字段
             # v0.4.0(2026-05-28):actual_hours(用时,跟 estimate_hours 同 float)
             elif ob_key in ("estimate_hours", "actual_hours"):
@@ -2366,6 +2577,11 @@ def build_fields_payload(task: dict, config: dict, vault_root: Path, existing_de
             # 其他全部当 text / select(单) 处理
             else:
                 out[field_name] = str(value)
+        # v0.7.9(2026-06-02):把 select 校验产物挂回 task,供 push_task_md dry-run 输出
+        # 和 --strict-select 拒推用(参考 _delivery_items_merged 的同款 side-channel 模式)
+        task["_select_warnings"] = select_warnings
+        task["_select_dropped_invalid"] = select_dropped_invalid
+        task["_select_schema_loaded"] = select_schema is not None
 
     return out
 
@@ -3078,7 +3294,7 @@ def push_journal(file_path: Path, apply: bool = False, only_completed: bool = Fa
 
 
 def push_task_md(md_path: Path, apply: bool = False, _silent_fail: bool = False,
-                 strict_soft: bool = False) -> Optional[dict]:
+                 strict_soft: bool = False, strict_select: bool = False) -> Optional[dict]:
     """单 task md 推送到飞书(CREATE/UPDATE) — 2026-05-25 上线
 
     用法:python3 sync.py --task-md path/to/task.md [--apply]
@@ -3183,6 +3399,43 @@ def push_task_md(md_path: Path, apply: bool = False, _silent_fail: bool = False,
 
     fields = build_fields_payload(task, config, VAULT_ROOT, existing_delivery="")
     print(f"\n    Payload: {json.dumps(fields, ensure_ascii=False, indent=6)[:800]}")
+
+    # v0.7.9(2026-06-02):select 字段白名单校验输出(配合 _select_warnings / _select_dropped_invalid)
+    # 来源:build_fields_payload 内调 validate_select_value 后挂到 task 上(参考 _delivery_items_merged 的 side-channel 模式)
+    # 失败/警告统一在 dry-run + apply 都打,strict 模式额外触发拒推
+    select_warnings = task.get("_select_warnings") or []
+    dropped_invalid = task.get("_select_dropped_invalid") or []
+    schema_loaded = task.get("_select_schema_loaded", False)
+    if schema_loaded:
+        if select_warnings:
+            print(f"\n    🔍 校验 select 字段:{len(select_warnings)} 条警告")
+            for w in select_warnings:
+                print(f"     ⚠️  {w}")
+            if dropped_invalid:
+                print(
+                    f"\n    ⚠️  {len(dropped_invalid)} 个 select 字段因值不在白名单被跳过(其他字段照常 sync):"
+                    f" {', '.join(dropped_invalid)}"
+                )
+                if not strict_select:
+                    print(f"        提示:加 --strict-select 后这些字段将触发拒推(skill 路径默认启用)")
+        else:
+            print(f"\n    🔍 校验 select 字段:全部通过 ✅")
+    else:
+        # cli 拉 schema 失败 → 已在 fetch_table_schema 内 stderr warn,这里不重复打
+        pass
+
+    # v0.7.9(2026-06-02):strict-select 拒推 — skill 路径强制启用,菜单路径默认宽松
+    # 触发条件:任意 select 字段有白名单外值导致字段被跳过
+    if strict_select and dropped_invalid:
+        msg_lines = [
+            f"⛔ 拒推(--strict-select):{len(dropped_invalid)} 个 select 字段值不在飞书白名单",
+            f"   字段:{', '.join(dropped_invalid)}",
+            "   修复路径(任选其一):",
+            "   ① 改 frontmatter 用现有白名单选项(看上方「相似项」建议)",
+            "   ② 去飞书后台对应字段添加缺失选项后重跑",
+            "   ③ 去掉 --strict-select 走宽松模式 — 字段跳过但其他字段照常 sync(菜单路径的默认行为)",
+        ]
+        return _fail("\n".join(msg_lines), action=action)
 
     # v0.7.7(2026-06-02):软段空壳守卫 — strict 模式下五段全空拒推(skill 路径专用)。
     # 默认宽松:空壳只 print 警告,继续推 — 保 OB Cmd+P 菜单"快速建骨架后续手工补"工作流。
@@ -3515,7 +3768,8 @@ def create_task_from_params(args, apply: bool = False, json_out: bool = False) -
                 tf.write(content)
                 tmp_path = Path(tf.name)
             result = push_task_md(tmp_path, apply=False, _silent_fail=True,
-                                  strict_soft=getattr(args, "strict_soft_sections", False))
+                                  strict_soft=getattr(args, "strict_soft_sections", False),
+                                  strict_select=getattr(args, "strict_select", False))
         finally:
             if tmp_path and tmp_path.exists():
                 tmp_path.unlink()
@@ -3535,7 +3789,8 @@ def create_task_from_params(args, apply: bool = False, json_out: bool = False) -
     print(f"\n💾 已写 task md 到 vault: {target_path.relative_to(vault_root)}")
 
     result = push_task_md(target_path, apply=True, _silent_fail=True,
-                          strict_soft=getattr(args, "strict_soft_sections", False))
+                          strict_soft=getattr(args, "strict_soft_sections", False),
+                          strict_select=getattr(args, "strict_select", False))
 
     success = bool(result and result.get("success"))
     record_id = result.get("record_id") if result else None
@@ -3918,7 +4173,8 @@ def migrate_today_history_quoted(apply: bool = False) -> None:
     print(f"{'='*60}\n")
 
 
-def push_all_today_task_md(apply: bool = False, strict_soft: bool = False) -> None:
+def push_all_today_task_md(apply: bool = False, strict_soft: bool = False,
+                            strict_select: bool = False) -> None:
     """v0.4.0+ Step 3(2026-05-28):批量推 OB today=true task md 到飞书(forward 方向)
 
     用法:
@@ -3995,7 +4251,8 @@ def push_all_today_task_md(apply: bool = False, strict_soft: bool = False) -> No
             print(f"📍 {p.relative_to(vault_root)}{' [取消今日]' if is_cancel else ''}")
         except Exception:
             print(f"📍 {p}{' [取消今日]' if is_cancel else ''}")
-        result = push_task_md(p, apply=apply, _silent_fail=True, strict_soft=strict_soft)
+        result = push_task_md(p, apply=apply, _silent_fail=True,
+                              strict_soft=strict_soft, strict_select=strict_select)
         if result is None:
             # 不应该到这里(_silent_fail=True 必返 dict)
             fail_count += 1
@@ -5691,6 +5948,13 @@ def main():
                              "全空时拒推飞书。默认宽松(空壳只警告不阻断,保 OB Cmd+P 菜单"
                              "「快速建骨架后续手工补」工作流);走 Claude/skill 路径时由 SKILL.md "
                              "强制加此 flag,严格校验内容完整性,避免空壳进飞书。")
+    parser.add_argument("--strict-select", action="store_true",
+                        help="v0.7.9:启用 select 字段白名单严格校验 — 任意 select 字段(项目小类/"
+                             "大类/小类/ADHD优先级/价值优先级/完成质量/完成效率)值不在飞书白名单时"
+                             "拒推整条 task,exit 1。默认宽松(跳过非法字段,其他字段照常 sync);"
+                             "走 Claude/skill 路径时由 SKILL.md 强制加此 flag,避免 frontmatter "
+                             "笔误悄悄丢字段或撞飞书 code=800010401 invalid_request 宽泛报错。"
+                             "跟 --strict-soft-sections 平行设计。")
     args = parser.parse_args()
 
     # --vault: 显式切到 vault 根目录,让所有相对路径(args.path / Path(".") / find_vault_root 的 cwd 起点)正确解析
@@ -5735,14 +5999,16 @@ def main():
     if args.pull_today:
         pull_today_from_feishu(apply=args.apply)
     elif args.push_all_today:
-        push_all_today_task_md(apply=args.apply, strict_soft=args.strict_soft_sections)
+        push_all_today_task_md(apply=args.apply, strict_soft=args.strict_soft_sections,
+                                strict_select=args.strict_select)
     elif args.pull_task:
         pull_task_from_feishu(args.pull_task, apply=args.apply)
     elif args.pull:
         pull_from_feishu(since_date=args.since, apply=args.apply)
     elif args.task_md:
         push_task_md(Path(args.task_md), apply=args.apply,
-                     strict_soft=args.strict_soft_sections)
+                     strict_soft=args.strict_soft_sections,
+                     strict_select=args.strict_select)
     elif args.path:
         push_journal(Path(args.path), apply=args.apply, only_completed=args.only_completed)
     else:
