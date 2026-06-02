@@ -2,6 +2,29 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.7.4] - 2026-06-02 — fix:飞书 base/v3 `code=5000` 限流自动退避重试
+
+> **背景**:飞书多维表格 base/v3 API 在密集连续写请求后会触发限流,表现为 `code=5000 + msg 为空`(有 msg 内容 = 真实业务错误,不应重试)。2026-06-02 实测:间隔 30 秒后同请求恢复成功。当前 sync.py 无任何重试,限流直接 raise,用户需手动重跑。根因详见 `docs/handoff/2026-06-01-5000限流根因+skill修复.md`。
+
+### 🛠 修复:`run_cli` 加指数退避重试
+
+- 新增 `_is_ratelimit_5000(stderr)`:按行扫 stderr,只在「含 `code=5000` 且 `msg=` 后为空 / `(空)` / `（空）`」时返回 True;其他 5000(msg 非空 = 真实业务错误)不触发重试
+- 新增常量 `_RETRY_MAX = 3` / `_RETRY_BACKOFF = [5, 15, 45]`(秒)
+- `run_cli` 改为 for 循环:returncode != 0 → 命中限流且未达上限 → stderr 打 `⏳ 飞书限流(code=5000),Ns 后重试(i/3)...` → `time.sleep(wait)` → 继续;其他失败立即 raise(行为不变)
+- 总最长等待 65s(5+15+45),三次仍失败 → raise 让用户知道
+- dry-run 不调 CLI,行为不变
+
+### 🛠 改动位置
+
+- `sync.py` L38:加 `import time`
+- `sync.py` L1409 前:加 `_RETRY_MAX` / `_RETRY_BACKOFF` 常量 + `_is_ratelimit_5000()` 函数
+- `sync.py` `run_cli`:线性 subprocess 改为带退避的 for 循环
+
+### 🔄 兼容性
+
+- 全局生效:所有飞书 cli 调用(`feishu_upsert_record` / `pull-today` / `--create-task` / enum 匹配等)都过 `run_cli`,无需逐处改
+- 非限流错误零行为变化,只是给「限流场景」补了重试
+
 ## [v0.7.3] - 2026-06-02 — fix:OB 日志「今日非计划」历史失真 — today_source_history 按天快照
 
 > **背景**:v0.7.2 修了「今日需求池」的历史失真,但「今日计划 vs 非计划」分类仍会随后续 `--pull-today` 漂移。回看 6-01 日志,原本正确归类为非计划的任务在 6-02 跑完 pull-today 后**全部漂移到今日计划区块**——根因是 `today_source` 是单个全局字段,但需要按天快照。

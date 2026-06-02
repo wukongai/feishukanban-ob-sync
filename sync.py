@@ -37,6 +37,7 @@ import re                        # 解析 markdown task 行
 import subprocess                # 调 feishu-cli
 import sys                       # 退出码 + stderr
 import tempfile                  # --create-task dry-run 时把生成的 task md 写临时文件解析(不污染 vault)
+import time                      # 飞书 base/v3 code=5000 限流退避重试
 import urllib.parse              # Obsidian URL Scheme 编码(中文/空格)
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1406,17 +1407,49 @@ def parse_cli_output(stdout: str) -> dict:
         return {"_raw": stdout}
 
 
+# 飞书 base/v3 限流退避:遇到 code=5000 + msg 空 → 5s/15s/45s 退避重试,最多 3 次
+# 有 msg 内容 = 真实业务错误(字段非法/权限不足等),立即抛不重试
+_RETRY_MAX = 3
+_RETRY_BACKOFF = [5, 15, 45]
+
+
+def _is_ratelimit_5000(stderr: str) -> bool:
+    """识别飞书 base/v3 限流特征:含 code=5000 那一行的 msg= 后面为空(或显式「(空)」)"""
+    for line in stderr.splitlines():
+        if "code=5000" not in line:
+            continue
+        idx = line.find("msg=")
+        if idx == -1:
+            continue
+        tail = line[idx + 4:].strip()
+        if tail == "" or tail in ("(空)", "（空）"):
+            return True
+    return False
+
+
 def run_cli(args: list[str], stdin: Optional[str] = None) -> dict:
-    """统一调用 feishu-cli,返回解析后的 JSON。失败抛异常"""
+    """统一调用 feishu-cli,返回解析后的 JSON。失败抛异常。
+
+    限流自动重试:遇到 code=5000 + msg 空 → 退避 5s/15s/45s 重试,最多 3 次。
+    其他错误(含 msg 非空的 code=5000)立即抛,不重试。
+    """
     cmd = ["feishu-cli"] + args
-    proc = subprocess.run(
-        cmd,
-        input=stdin,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    if proc.returncode != 0:
+    proc = None
+    for attempt in range(_RETRY_MAX + 1):
+        proc = subprocess.run(
+            cmd,
+            input=stdin,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        if proc.returncode == 0:
+            break
+        if _is_ratelimit_5000(proc.stderr) and attempt < _RETRY_MAX:
+            wait = _RETRY_BACKOFF[attempt]
+            print(f"  ⏳ 飞书限流(code=5000),{wait}s 后重试({attempt + 1}/{_RETRY_MAX})...", file=sys.stderr)
+            time.sleep(wait)
+            continue
         raise RuntimeError(f"cli 失败:\n  命令: {' '.join(cmd)}\n  stderr: {proc.stderr}\n  stdout: {proc.stdout}")
     parsed = parse_cli_output(proc.stdout)
     if "_raw" not in parsed:
