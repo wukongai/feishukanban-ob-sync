@@ -3585,6 +3585,7 @@ def _build_task_md_content_from_params(args, config: dict) -> tuple:
 
     status = _s(args.status) or "todo"              # 默认 todo;整体状态由调用方/人决定,不强行 done
     priority = _s(args.priority)                    # P0/P1/P2/P3,空 = 不推
+    adhd_priority = _s(getattr(args, "adhd_priority", ""))  # v0.7.10:待抢救/有 DDL/自由待办,空 = 留空
     category = _s(args.category)                    # 大类,空 = 不推
     today_source = _s(args.today_source)            # planned/unplanned,OB 侧 metadata
     done_date = _s(args.done_date)                  # YYYY-MM-DD,整个 task 完成时才传
@@ -3655,7 +3656,7 @@ created: {created_iso}
 {_fm("category", category)}
 subcategory:
 project_minor:
-adhd_priority:
+{_fm("adhd_priority", adhd_priority)}
 {_fm("estimate_hours", estimate_hours)}
 {_fm("actual_hours", actual_hours)}
 efficiency:
@@ -5919,6 +5920,12 @@ def main():
     parser.add_argument("--status", help="--create-task 状态:todo/doing/subdone/done/block/cancel/idea(默认 todo)")
     parser.add_argument("--today-source", help="--create-task 今日来源:planned/unplanned;非空则 task md today=true")
     parser.add_argument("--priority", help="--create-task 价值优先级:P0/P1/P2/P3")
+    parser.add_argument("--adhd-priority",
+                        help="--create-task ADHD 优先级(飞书「ADHD优先级」select 字段):"
+                             "待抢救 / 有 DDL / 自由待办。与 --priority(纯价值维度)正交 — "
+                             "ADHD 维度反映「今天能不能下手 / 焦虑级别」,quickadd-快记任务 已交互收集,"
+                             "本 flag 给非交互 --create-task / skill 路径补齐。"
+                             "白名单外值默认宽松跳过 + warn,加 --strict-select 则拒推。")
     parser.add_argument("--estimate-hours", help="--create-task 估时(数字,如 0.5/1/2)")
     parser.add_argument("--actual-hours", help="--create-task 实际用时(数字)")
     parser.add_argument("--done-date", help="--create-task 完成日期 YYYY-MM-DD")

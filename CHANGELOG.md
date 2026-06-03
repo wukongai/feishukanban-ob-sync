@@ -2,6 +2,42 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.7.10] - 2026-06-02 — feat:`--create-task` 补 `--adhd-priority` flag(对齐 quickadd 交互维度)
+
+> **触发**:用户问「CLI 不支持 `--adhd-priority` 吗?」— dogfood 发现 quickadd-快记任务-v2 早就交互收集了 ADHD 优先级(`待抢救/有 DDL/自由待办`)写进 task md frontmatter,但 v0.7.0 的非交互 `--create-task` 一键模式漏了这个 flag,外部业务 / `/同步任务到飞书` skill 路径建任务时 `adhd_priority` 永远留空。
+>
+> **设计目标**:补齐两条入口的字段对等性 — quickadd(交互)和 `--create-task`(非交互)对同一份 task md schema 应该都能写全。adhd 维度与 priority(纯价值)正交,反映「今天能不能下手 / 焦虑级别」,对 ADHD 用户用 base 视图按 ADHD 维度筛任务很关键。
+
+### 🛠 sync.py
+
+- argparse 新增 `--adhd-priority`(line 5922 区段,紧贴 `--priority` 后):接受 `待抢救/有 DDL/自由待办` 三个值,空 = 留空
+- `create_task_from_params`(line 3588 区段)取 `args.adhd_priority` → frontmatter 模板 `adhd_priority:` 行有值就写、无值留空(对齐 `_fm` helper 风格)
+- 白名单校验复用 v0.7.9 `validate_select_value` — 非法值默认宽松跳过 + warn,`--strict-select` 拒推。本次**不新增**校验逻辑
+
+### 🔒 默认行为兼容性
+
+- 不传 `--adhd-priority` → 行为完全等于 v0.7.9(frontmatter `adhd_priority:` 留空)
+- quickadd-快记任务-v2 / `--task-md` UPDATE 路径不受影响(本来就直接写 frontmatter,不经过 `--create-task`)
+- 飞书表 schema 不变(`ADHD优先级` 字段早已存在,白名单 3 项不动)
+
+### 📐 设计原则自检(8 条)
+
+- 解耦 ✅:只动 argparse + 一个 `_s` 取值 + 一行 frontmatter 模板,不动 `build_fields_payload` / `validate_select_value`
+- 可扩展 ✅:沿用 `_fm` helper 与现有 `--priority` 完全对称,未来补其他 select 字段(quality / efficiency)照同一模式 3 行
+- 灵活修改 ✅:回滚 = 删 argparse 1 段 + `_s` 1 行 + frontmatter 1 行
+- 渐进披露 ✅:help 文案点明「与 priority 正交」+ 列白名单 3 项 + 指 quickadd 同源,新人直接看 `--help` 即可上手
+- 鲁棒性 ✅:`getattr(args, "adhd_priority", "")` 兜底未来旧版调用方;非法值走 v0.7.9 schema 校验链
+- 人可读 ✅:_fm 模板风格保持(有值 `key: val`,无值 `key:`)
+- 高复用 ✅:CLI 与 quickadd 共用同一份 task md schema,两条入口字段对等
+- 工程化 ✅:CHANGELOG + README badge + 真实 vault dry-run 反测
+
+### 🧪 反测(真实 vault,dry-run)
+
+- `python3 sync.py --vault /OB --create-task --title "测试 adhd flag" --adhd-priority "有 DDL"` → frontmatter `adhd_priority: 有 DDL` ✅ + payload select 校验通过 ✅
+- 不传 `--adhd-priority` → frontmatter `adhd_priority:` 留空 ✅(回归 v0.7.9 行为)
+
+---
+
 ## [v0.7.9] - 2026-06-02 — fix:select 字段全 schema 校验 + 友好报错 + `--strict-select` flag
 
 > **事故复现(2026-06-02)**:OB CC 走 skill `/同步任务到飞书` 推 task md,frontmatter `project_minor: [CC 工程化, 数据分析]`(OB CC 根据任务特征生成的标签),sync.py 直接当 multi-select 传飞书,触发 `code=800010401 invalid_request` 宽泛报错,无字段信息,二分排查 ~15 分钟才定位:① 「项目小类」实际 `multiple=false` 单选(代码注释「multi-select」错误);② 两个值都不在飞书白名单(7 项:训练营/干货/智能体/claudecode/skill/Codex/软硬件)。
