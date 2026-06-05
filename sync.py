@@ -3065,7 +3065,8 @@ def pull_execution_details_for_task(task_record_id: str, md_path: Path,
     # v0.6.1:对比 task md 原文段(未经 parse-render)vs 新渲染,捕捉显示层升级
     # 仅 dict 相等不够 — OB 原文可能写小写 "doing",飞书拉回 parse 后也是 "doing"
     # dict 相等,但渲染出 "🔄 Doing" 跟原文 "doing" 不同 → 需要 rewrite
-    m_old = re.search(r'^## +📈 +执行明细\s*\n(.*?)(?=\n## +|\Z)', body, re.MULTILINE | re.DOTALL)
+    # v0.7.11:header 用 [ \t]*\r?\n 限水平空白(原 \s*\n 的 \s 含 \n 会贪婪吃换行 → body 吞下一段)
+    m_old = re.search(r'^## +📈 +执行明细[ \t]*\r?\n(.*?)(?=\n## +|\Z)', body, re.MULTILINE | re.DOTALL)
     old_data_lines = []
     if m_old:
         for line in m_old.group(1).splitlines():
@@ -5136,9 +5137,12 @@ def update_h2_section_in_task_md(file_path: Path, h2_title: str, new_content: st
     # new_content 末尾 strip 避免插入多余空行(后续我们主动加分隔)
     new_content_clean = new_content.strip()
 
-    # 段查找:^## <title>\s*$\r?\n + 内容(到下一个 ## 或文件末尾)
+    # 段查找:^## <title>[ \t]*\r?\n + 内容(到下一个 ## 或文件末尾)
+    # v0.7.11(2026-06-04):原 \s*$\r?\n 的 \s* 含 \n 贪婪吃换行 + multiline $ 几乎随处匹配
+    #   → 空段后面的整段(交付 / 相关资料 / 复盘)会被吞进 body,replace 时被一起删
+    #   → 改用 [ \t]*\r?\n 严格水平空白
     pattern = re.compile(
-        rf"^({re.escape(h2_title)})\s*$\r?\n(.*?)(?=\n## +|\Z)",
+        rf"^({re.escape(h2_title)})[ \t]*\r?\n(.*?)(?=\n## +|\Z)",
         re.MULTILINE | re.DOTALL,
     )
     match = pattern.search(text)
@@ -5446,6 +5450,9 @@ tags:
 
 ## 📝 执行概述
 {execution_summary_body}
+
+## 📈 执行明细
+
 
 ## 📦 交付
 {delivery_body}

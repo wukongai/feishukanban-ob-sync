@@ -2,6 +2,85 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.7.11] - 2026-06-04 — fix:quickadd / sync.py 6 月初 dogfood 修复包(3 路独立 fix)
+
+> **背景**:6 月初连续 dogfood 暴露 3 个独立 bug,统一归到一次 patch release(都是表层 fix,无 breaking change)。
+
+### Fix 1:quickadd-快记任务-v2「执行月 / 执行周」补「❌ 跳过 / 不填」选项
+
+> **触发**:用户反馈「快捷命令创建任务时,执行月和执行周是可以跳过的,现在不能跳过」。dogfood 发现这两步永远传非 null 的 default(当月 / 当周字符串),触发 `selectMultiOrDefault` 的「有 default 分支」,首项只显示「⏭ 用默认」一个选项 —— 没有跳过出口,与 ADHD 优先级 / DDL 等「真正可跳过」字段不一致。
+>
+> **设计目标**:让用户对「执行月 / 执行周」拥有真正三态 —— 用默认 / 选具体值 / 跳过(留空)。
+
+🛠 **quickadd-快记任务-v2-task-md.js**
+
+- `selectMultiOrDefault` helper(line ~86 区段)首项区改造:`defaultValue !== null` 时同时展示「⏭ 用默认(<值>)」+「❌ 跳过 / 不填(<label>)」两个首项
+- 新增 `__SKIP__` 标记返回 `[]`(下游 `monthsLine/weeksLine` 早已 cover `length === 0` → 写空 frontmatter)
+
+### Fix 2:段定位正则 `\s*\n` 贪婪吃换行 → 改 `[ \t]*\r?\n`
+
+> **触发**:6 个老 task md 出现「📈 执行明细」新行被追加到「📦 交付」段后、段顺序错乱。根因:正则 `^## +📈 +执行明细\s*\n(...)(?=\n## +|\Z)` 中 `\s*` 含 `\n` + lookahead 末尾 `\n*$`(JS multiline `$` 几乎随处匹配)→ body 贪婪吃过下一段 header,replace 时把后面整段一起删/移。
+>
+> **设计目标**:把 header 后空白严格收紧到水平空白(`[ \t]*\r?\n`),body 终止 lookahead 严格用 `\n## +`,不要 `\n*$` fallback。
+
+🛠 **quickadd-记录今日明细.js / sync.py**
+
+- `sectionRegex` 改用 `^(## +📈 +执行明细[ \t]*\r?\n)([\s\S]*?)(?=\n## )`(quickadd 端)
+- `pull_execution_details_for_task` / `update_h2_section_in_task_md` 同步改正则(sync.py 端)
+- quickadd-记录今日明细 fallback 锚点改用「## 📦 交付」(模板规定执行明细在交付前)、缺时退回「## ✅ 完成标记」—— 旧版直接用完成标记锚点 → 新段被插到所有段之后违反模板顺序
+- `create_task_from_params` 模板加 `## 📈 执行明细` 空段(对齐其他 H2 段)
+
+### Fix 3:subcategory 分隔符 `/` → `-`(根治 OB journal dataview wikilink 渲染失败)
+
+> **触发**:截图反馈「选择杂务时落地出现错误,无法查看本地 task 连接路径」。journal `🎯 今日计划` 段显示 task `【杂务-财务】中信信用卡逾期支付+4月社保逾期支付` 时,wikilink `[[04 Inbox/task/.../...|本地]]` 渲染成原始文本,整段被斜体包裹。
+>
+> **根因**:
+> - `quickadd-快记任务-v2` line 314 用 `【${state.category}/${state.subcategoryList.join("/")}】` 拼 titlePrefix(选 subcategory 时拼 `【杂务/财务】`)
+> - line 643 `safeTitle = titleTrimmed.replace(/[\\\/:*?"<>|]/g, "_")` 把 `/` sanitize 成 `_` → 文件名变 `【杂务_财务】...md`
+> - journal dataviewjs (`日志模版 5.0 1.md`) 渲染 task 行:`${title} · ... · [[${p.file.path}|本地]] · ...`,title (`p.file.name` 去日期前缀) 含 1 个 `_`,wikilink path 含同样的 `_` → 同一 markdown 字符串里 2 个 `_` 配对成 emphasis → 把 `[[` 吞进 emphasis 标记 → wikilink 解析失败显示原文
+> - 历史只有「产品项目」分支(用 `parentName` 不带 `/`),v0.7.x 引入「杂务 / 技能工具 / 领域学习」+ subcategory 手输才暴露
+>
+> **设计目标**:换分隔符到 `-`(不被 sanitize 替换,不触发 markdown emphasis),根除 `_` 从 sanitize 渗入文件名的路径。`-` 跟现有日期前缀 `YYYY-MM-DD-` 风格也一致。
+
+🛠 **quickadd-快记任务-v2-task-md.js**
+
+- line 314:`【${state.category}/${state.subcategoryList.join("/")}】` → `【${state.category}-${state.subcategoryList.join("-")}】`
+- 行内注释解释 sanitize 触发链 + markdown emphasis 配对原理
+
+🆕 **scripts/migrate_title_prefix_dash.py** — 一次性 migration 脚本
+
+- 扫 `04 Inbox/task/*.md`(排除 .bak)→ `【...】` 块内 `_` → `-` 改名 + 文件内 H1 / 完成标记段 `/` 和 `_` 同步改 `-`(body 不动,frontmatter 不动)
+- 默认 dry-run,`--apply` 实际执行;`--vault` 接 vault 根
+- 一次性,migration 完后保留作历史记录;新建任务靠 v0.7.11 quickadd 改动天然不再触发
+
+### 📋 dogfood vault 状态(2026-06-04 已 apply)
+
+3 个历史 task md 已通过 migration 脚本改名 + 改内文:
+
+- `2026-05-30-【OB】【训练营_自媒体选题】Obsidian webcliper插件介绍安装.md` → `【OB】【训练营-自媒体选题】...`
+- `2026-06-05-【杂务_财务】中信信用卡逾期支付+4月社保逾期支付.md` → `【杂务-财务】...`
+- `2026-06-05-【领域学习_OB+CC】下载CCtalk看购买的OB+AI的课程.md` → `【领域学习-OB+CC】...`
+
+### 🔒 默认行为兼容性
+
+- 飞书表 schema 不变(只动 OB 端文件名 + Markdown 文本)
+- frontmatter `category / subcategory` 字段值不变(单一类名本就无 `/` 或 `_`)
+- 没有 wikilink 反向引用(grep 过 vault 全量,无其他 md 引用旧 stem)
+- quickadd 单条 CREATE 自动 sync.py --apply 行为不变;UPDATE / 批量同步 5 步 SOP 不变
+
+### 📐 设计原则自检(8 条 · 综合 fix 包)
+
+- 解耦 ✅:3 个 fix 各自独立,无交叉依赖;migration 脚本是一次性 artifact 不进运行时
+- 可扩展 ✅:`selectMultiOrDefault` 三态 helper 可复用其他可选字段;段定位正则修复模式可借鉴(凡是用 `\s*\n` 当段定界的都要警惕)
+- 灵活修改 ✅:回滚路径清晰 — 每个 fix 独立的 diff 段
+- 渐进披露 ✅:CHANGELOG 三层结构(背景 / 各 fix 触发 + 设计 / 兼容性自检),老人看自检条目,新人读背景即可
+- 鲁棒性 ✅:正则改严收紧锚点;分隔符根除一类 markdown 解析错觉;migration 默认 dry-run + 检测目标已存在跳过
+- 人可读 ✅:每个 fix 都有「触发 / 根因 / 设计目标」三段式
+- 高复用 ✅:migration 脚本 generic `【...】` 块替换,任意 vault 跑通(只要 task dir 是 `04 Inbox/task`)
+- 工程化 ✅:patch bump、CHANGELOG 完整、真实 vault dogfood + dry-run 反测
+
+---
+
 ## [v0.7.10] - 2026-06-02 — feat:`--create-task` 补 `--adhd-priority` flag(对齐 quickadd 交互维度)
 
 > **触发**:用户问「CLI 不支持 `--adhd-priority` 吗?」— dogfood 发现 quickadd-快记任务-v2 早就交互收集了 ADHD 优先级(`待抢救/有 DDL/自由待办`)写进 task md frontmatter,但 v0.7.0 的非交互 `--create-task` 一键模式漏了这个 flag,外部业务 / `/同步任务到飞书` skill 路径建任务时 `adhd_priority` 永远留空。

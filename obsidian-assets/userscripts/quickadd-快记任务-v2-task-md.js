@@ -62,6 +62,7 @@ function isoWeek(date) {
 // v0.4.2 state machine sentinels
 const BACK = "__BACK__";       // step fn 返回此值 = 回上一步
 const CANCEL = "__CANCEL__";   // step fn 返回此值 = 整体取消(Esc / 标题空)
+const SKIPPED = "__SKIPPED__"; // v0.7.12: step fn 返回此值 = silent skip(没向用户弹 UI,BACK 时透过)
 
 // suggester 包装:第一项可选加「⬅ 回上一步」
 // canBack=false → 不加(用于 Step 1 priority,没有上一步)
@@ -85,8 +86,8 @@ async function inputWithBack(quickAddApi, label, placeholder, defaultValue) {
 
 // 多选循环 helper(执行月/周 复用),v0.4.2 加 back 支持
 // recentList 空 → 直接返回 [defaultValue](不弹窗;若 defaultValue=null → 返回 [])
-// defaultValue=null → 首项显示「❌ 跳过 / 不填」(可选字段语义)
-// defaultValue=<具体值> → 首项显示「⏭ 用默认(<值>)」(有默认值语义)
+// defaultValue=null → 首项只显示「❌ 跳过 / 不填」(可选字段语义)
+// defaultValue=<具体值> → 首项同时显示「⏭ 用默认(<值>)」+「❌ 跳过 / 不填」(v0.7.11 加跳过)
 //
 // v0.4.2 back 语义:
 //   - 首次进入(还没选任何值)→ 顶部加「⬅ 回上一步」,选了 → 返回 BACK
@@ -102,22 +103,21 @@ async function selectMultiOrDefault(quickAddApi, recentList, defaultValue, label
 
     const opts = [];
     const vals = [];
-    // 首次进入时加「⬅ 回上一步」
     if (selected.length === 0) {
+      // 首次进入:顶部「⬅ 回上一步」+「⏭ 用默认」(有 default 时)+「❌ 跳过 / 不填」
       opts.push("⬅ 回上一步");
       vals.push(BACK);
-    }
-    // 首项 / done 项
-    let firstOption;
-    if (selected.length === 0) {
-      firstOption = defaultValue === null
-        ? `❌ 跳过 / 不填(${label})`
-        : `⏭ 用默认(${defaultValue})`;
+      if (defaultValue !== null) {
+        opts.push(`⏭ 用默认(${defaultValue})`);
+        vals.push("__DEFAULT__");
+      }
+      opts.push(`❌ 跳过 / 不填(${label})`);
+      vals.push("__SKIP__");
     } else {
-      firstOption = `✓ 完成,已选 [${selected.join(", ")}]`;
+      // 已选 ≥1 个:首项变完成
+      opts.push(`✓ 完成,已选 [${selected.join(", ")}]`);
+      vals.push("__DONE__");
     }
-    opts.push(firstOption);
-    vals.push(selected.length === 0 ? "__DEFAULT__" : "__DONE__");
     // 剩余 enum 选项
     remaining.forEach(x => {
       opts.push(`${emoji} ${x}`);
@@ -127,7 +127,8 @@ async function selectMultiOrDefault(quickAddApi, recentList, defaultValue, label
     const pick = await quickAddApi.suggester(opts, vals);
     if (pick === undefined) return CANCEL;
     if (pick === BACK) return BACK;
-    if (pick === "__DEFAULT__") return defaultValue === null ? [] : [defaultValue];
+    if (pick === "__DEFAULT__") return [defaultValue];
+    if (pick === "__SKIP__") return [];
     if (pick === "__DONE__") break;
     selected.push(pick);
   }
@@ -167,11 +168,19 @@ function isStepActive(stepName, state) {
   return true;
 }
 
-// 给定 idx,找上一个 active step 的 idx;找不到返回 -1
-function findPrevActive(idx, state) {
+// 给定 idx,找上一个 active 且**非 silent-skipped** step 的 idx;找不到返回 -1
+// v0.7.12: 加 silentSkipped 参数,BACK 跳转时跳过那些 silent skip 的 step(没弹 UI 的)
+//          避免"用户在 stepA 按 BACK → 跳回 silent-skipped step → 立即又被推到 stepA"的死循环
+function findPrevActive(idx, state, silentSkipped) {
   let j = idx - 1;
-  while (j >= 0 && !isStepActive(STEPS[j], state)) j--;
-  return j;
+  while (j >= 0) {
+    const stepName = STEPS[j];
+    if (isStepActive(stepName, state) && !(silentSkipped && silentSkipped.has(stepName))) {
+      return j;
+    }
+    j--;
+  }
+  return -1;
 }
 
 // ============================================================
@@ -224,7 +233,7 @@ async function stepParentLevel1(state, qa, ctx) {
   if (!ctx.qopts.active_top_level || ctx.qopts.active_top_level.length === 0) {
     state.parentName = null;
     state.parentRecordId = null;
-    return null;
+    return SKIPPED;  // v0.7.12: 没弹 UI,BACK 时透过
   }
   const topNames = ctx.qopts.active_top_level.map(p => p.name);
   const pick = await pickWithBack(qa,
@@ -247,12 +256,12 @@ async function stepParentLevel1(state, qa, ctx) {
 async function stepParentLevel2(state, qa, ctx) {
   if (!state.parentRecordId || !ctx.qopts.subprojects_by_parent) {
     if (state.parentName) state.titlePrefix = `【${state.parentName}】`;
-    return null;
+    return SKIPPED;  // v0.7.12
   }
   const subs = ctx.qopts.subprojects_by_parent[state.parentRecordId] || [];
   if (subs.length === 0) {
     state.titlePrefix = `【${state.parentName}】`;
-    return null;
+    return SKIPPED;  // v0.7.12
   }
   const subNames = subs.map(s => s.name);
   const pick = await pickWithBack(qa,
@@ -274,7 +283,7 @@ async function stepParentLevel2(state, qa, ctx) {
 async function stepProjectMinor(state, qa, ctx) {
   if (!ctx.qopts.recent_project_minor || ctx.qopts.recent_project_minor.length === 0) {
     state.projectMinor = [];
-    return null;
+    return SKIPPED;  // v0.7.12
   }
   const pick = await pickWithBack(qa,
     ["❌ 跳过 / 不填(项目小类)", ...ctx.qopts.recent_project_minor.map(x => `🏷 ${x}`)],
@@ -302,7 +311,8 @@ async function stepSubcategoryManual(state, qa, ctx) {
     state.subcategoryList = [];
   }
   if (state.subcategoryList.length > 0) {
-    state.titlePrefix = `【${state.category}/${state.subcategoryList.join("/")}】`;
+    // v0.7.11 改 `/` → `-`:`/` 被 sanitize 转 `_` → 文件名 _ 进 dataview wikilink 触发 markdown emphasis 配对 → wikilink 渲染失败
+    state.titlePrefix = `【${state.category}-${state.subcategoryList.join("-")}】`;
   } else {
     state.titlePrefix = `【${state.category}】`;
   }
@@ -377,6 +387,11 @@ async function stepDue(state, qa, ctx) {
 async function stepMonths(state, qa, ctx) {
   const nowBJ = new Date(Date.now() + 8 * 3600 * 1000);
   const defaultMonth = `${nowBJ.getUTCFullYear() % 100} 年 ${nowBJ.getUTCMonth() + 1} 月`;
+  // v0.7.12: qopts 空时 silent skip — 让 wizard 知道 BACK 时透过这步
+  if (!ctx.qopts.recent_months || ctx.qopts.recent_months.length === 0) {
+    state.months = [defaultMonth];
+    return SKIPPED;
+  }
   const sel = await selectMultiOrDefault(qa, ctx.qopts.recent_months, defaultMonth, "执行月", "📆");
   if (sel === CANCEL || sel === BACK) return sel;
   state.months = sel;
@@ -389,6 +404,11 @@ async function stepWeeks(state, qa, ctx) {
   const defaultWeekPrefix = `${iso.year % 100}W${String(iso.week).padStart(2, "0")}`;
   const matchedRecentWeek = (ctx.qopts.recent_weeks || []).find(w => w.startsWith(defaultWeekPrefix));
   const defaultWeek = matchedRecentWeek || defaultWeekPrefix;
+  // v0.7.12: qopts 空时 silent skip
+  if (!ctx.qopts.recent_weeks || ctx.qopts.recent_weeks.length === 0) {
+    state.weeks = [defaultWeek];
+    return SKIPPED;
+  }
   const sel = await selectMultiOrDefault(qa, ctx.qopts.recent_weeks, defaultWeek, "执行周", "📅");
   if (sel === CANCEL || sel === BACK) return sel;
   state.weeks = sel;
@@ -397,19 +417,55 @@ async function stepWeeks(state, qa, ctx) {
 
 async function stepIsToday(state, qa, ctx) {
   // v0.6.5:3 选 1,补登 today_source 字段语义(原硬编码 unplanned 是 bug,丢失计划/非计划分流)
-  const pick = await pickWithBack(qa,
-    [
+  // v0.7.12:dogfood 实证 QuickAdd suggester 偶发 idx 映射偏移(返回的字符串不是用户实际点的项)
+  //   终极方案:① suggester 主选(用户要的视觉)+ displays === actualItems 双保险
+  //             ② inputPrompt y/n 二次确认 — 弹框上显示「你刚选的是 XX」,用户必看清,错就 n 重选
+  //             两段式确认 → 即使 QuickAdd 内部 idx 抖动,用户也不会被锁定到错选项
+  while (true) {
+    const optsBack = ctx.canBack ? ["⬅ 回上一步"] : [];
+    const opts = [
+      ...optsBack,
       "📥 进需求池(默认,后续在飞书勾今日)",
       "⭐ 今日 · 计划(前一晚 / 早晨规划好的)",
       "🌀 今日 · 非计划(临时插入,ADHD 自觉察用)",
-    ],
-    ["false", "planned", "unplanned"],
-    ctx.canBack
-  );
-  if (pick === CANCEL || pick === BACK) return pick;
-  state.isToday = pick !== "false";
-  state.todaySource = pick === "false" ? null : pick;
-  return null;
+    ];
+    const pick = await qa.suggester(opts, opts);
+    console.warn("[快记任务 v2] stepIsToday raw pick:", JSON.stringify(pick));
+    if (pick === undefined || pick === null) return CANCEL;
+    if (typeof pick !== "string") return CANCEL;
+    if (pick.startsWith("⬅")) return BACK;
+
+    // emoji 前缀解析
+    let summary, isToday, todaySource;
+    if (pick.startsWith("📥")) {
+      summary = "📥 进需求池"; isToday = false; todaySource = null;
+    } else if (pick.startsWith("⭐")) {
+      summary = "⭐ 今日 · 计划"; isToday = true; todaySource = "planned";
+    } else if (pick.startsWith("🌀")) {
+      summary = "🌀 今日 · 非计划"; isToday = true; todaySource = "unplanned";
+    } else {
+      summary = "📥 进需求池(fallback)"; isToday = false; todaySource = null;
+    }
+
+    // 二次确认:inputPrompt y/n 绕开 suggester idx 映射风险
+    const confirm = await qa.inputPrompt(
+      `你刚选的是: ${summary}\n\n` +
+      `✅ 回车 / 输 y = 确认\n` +
+      `🔁 输 n = 重选`,
+      "y", "y"
+    );
+    if (confirm === undefined || confirm === null) return CANCEL;
+    const c = String(confirm).trim().toLowerCase();
+    if (c === "n" || c === "no" || c === "否" || c === "重" || c === "重选") {
+      if (ctx.Notice) new ctx.Notice(`🔁 重新选择...`, 2000);
+      continue;
+    }
+    state.isToday = isToday;
+    state.todaySource = todaySource;
+    if (ctx.Notice) new ctx.Notice(`✅ 已选: ${summary}`, 3000);
+    console.warn("[快记任务 v2] stepIsToday 解析:", { pick: pick.slice(0, 30), isToday, todaySource });
+    return null;
+  }
 }
 
 async function stepStatus(state, qa, ctx) {
@@ -479,24 +535,35 @@ async function runWizard(qaApi, qopts, Notice) {
     title: null,
   };
 
+  // v0.7.12: 追踪 silent skip 的 step(没向用户弹 UI 的),BACK 时透过它们
+  // 触发场景:qopts 拉飞书选项失败 / recent 数组为空 → stepProjectMinor / stepMonths 等直接 return SKIPPED
+  // 修复 bug:之前 silent skip 走 return null 让 i 自增,用户在下一步按 BACK 会回到 silent skip step,
+  //          立即又被推到下一步,表象就是"回不去上一步"
+  const silentSkipped = new Set();
+
   let i = 0;
   while (i < STEPS.length) {
     const stepName = STEPS[i];
     if (!isStepActive(stepName, state)) { i++; continue; }
-    const canBack = findPrevActive(i, state) >= 0;
-    const result = await STEP_DISPATCH[stepName](state, qaApi, { canBack, qopts });
+    const canBack = findPrevActive(i, state, silentSkipped) >= 0;
+    const result = await STEP_DISPATCH[stepName](state, qaApi, { canBack, qopts, Notice });
     if (result === CANCEL) {
       new Notice("❌ 已取消", 3000);
       return null;
     }
     if (result === BACK) {
-      const prev = findPrevActive(i, state);
+      const prev = findPrevActive(i, state, silentSkipped);
       if (prev < 0) {
         new Notice("⚠️ 已是第一步,无法后退(Esc 整体取消)", 3000);
         continue;
       }
       i = prev;
       continue;
+    }
+    if (result === SKIPPED) {
+      silentSkipped.add(stepName);
+    } else {
+      silentSkipped.delete(stepName);  // 这步有 UI 了 → 撤销 silent 标记
     }
     i++;
   }
@@ -518,6 +585,10 @@ module.exports = async function (params) {
 
     const vaultRoot = app.vault.adapter.basePath || app.vault.adapter.getBasePath();
     // v0.3.4: install.sh 装的时候 sed 替换占位符为 sync.py 绝对路径
+    // ⚠️ 不要加 if 判断检测占位符 — install.sh 的 sed 是 `s|占位符|路径|g` 全替换,
+    //    if 里的占位符也会被替换成同样路径,if 永远为 true 走 fallback,误导诊断
+    //    (v0.7.12 第 1 次加 fallback 就踩了这个坑,Console 显示 electron.asar 错路径)
+    //    若占位符未替换 → python3 命令直接 ENOENT,catch 块打 Notice 让用户跑 install.sh
     const syncScript = "__SYNC_PY_ABS_PATH__";
     const userPaths = [
       `${process.env.HOME}/.local/bin`,

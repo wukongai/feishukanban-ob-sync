@@ -26,6 +26,7 @@
       "Bash(git stash:*)",
       "Bash(git push origin:*)",
       "Bash(git push gitee:*)",
+      "Bash(git push all:*)",
       "Bash(git pull:*)",
       "Bash(git checkout:*)",
       "Bash(git switch:*)",

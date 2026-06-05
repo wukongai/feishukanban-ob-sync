@@ -268,7 +268,10 @@ module.exports = async function (params) {
     const newLine = buildLine(today, data);
 
     let newContent;
-    const sectionRegex = /^(## +📈 +执行明细\s*\n)((?:.*\n)*?)(?=\n## |\n*$)/m;
+    // v0.7.11(2026-06-04):header 严禁 \s*\n(\s 含 \n,贪婪吃换行)→ 用 [ \t]*\r?\n
+    //   lookahead 也去掉 \n*$ fallback(JS multiline $ 几乎随处匹配,会让 body 提前终止)
+    //   bug 前:空段后面的「📦 交付」段被整个吞进 body → 新行追加到了交付段
+    const sectionRegex = /^(## +📈 +执行明细[ \t]*\r?\n)([\s\S]*?)(?=\n## )/m;
     const secMatch = content.match(sectionRegex);
     if (secMatch) {
       const header = secMatch[1];
@@ -279,16 +282,24 @@ module.exports = async function (params) {
       const newBody = trimmedBody ? `${trimmedBody}\n${newLine}\n` : `\n${newLine}\n`;
       newContent = content.replace(sectionRegex, `${header}${newBody}`);
     } else {
-      const marker = "## ✅ 完成标记";
-      if (!content.includes(marker)) {
+      // v0.7.11(2026-06-04):fallback 锚点改用「## 📦 交付」(模板规定执行明细在交付前)
+      //   旧版用「## ✅ 完成标记」做锚点 → 新段被插到所有其他段之后(交付/相关资料/复盘
+      //   之后),违反模板顺序 → 导致 6 个老 task md 段顺序错乱。
+      //   交付段优先,缺时退回完成标记。
+      const deliverMarker = "## 📦 交付";
+      const completeMarker = "## ✅ 完成标记";
+      const anchor = content.includes(deliverMarker) ? deliverMarker
+                   : content.includes(completeMarker) ? completeMarker
+                   : null;
+      if (!anchor) {
         new Notice(
-          `❌ task md 没有「## ✅ 完成标记」段,无法自动插入「## 📈 执行明细」\n请手动加段后再试`,
+          `❌ task md 没有「## 📦 交付」或「## ✅ 完成标记」段,无法自动插入「## 📈 执行明细」\n请手动加段后再试`,
           7000
         );
         return;
       }
       const newSection = `## 📈 执行明细\n\n${newLine}\n\n\n`;
-      newContent = content.replace(marker, newSection + marker);
+      newContent = content.replace(anchor, newSection + anchor);
     }
 
     // v0.7.8(2026-06-02):顺手推进 frontmatter.status — 让 dataview「当日状态」跨日也对齐当前意图
