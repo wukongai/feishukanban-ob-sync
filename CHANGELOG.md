@@ -2,6 +2,130 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.8.0] - 2026-06-04 — feat:布丁 backlog ↔ OB task md 自动镜像 MVP(Phase 1+2+3+4 落地)
+
+> **背景**:用户日常在 zhixing-game 仓库 `docs/backlog/` 维护布丁需求池(170+ 条),同时在 OB vault `04 Inbox/task/` 用 task 看板做工作管理。两边长期没有自动关联 → 经常漏建 task md → 飞书看板/今日 todo 视图也漏。今天日常会话发现 6 条 backlog status 严重滞后(实际已 done 但没改),触发"系统性建对账机制"的需求。
+> **决策**:做 backlog → task md 单向自动镜像(双向不做,避免循环)。两个触发点(OB QuickAdd + CC PostToolUse hook)→ 统一中间件脚本 → 落 OB vault 04 Inbox/task/。task md 默认 `today: false` 进**需求池**,推飞书走现有 `--create-task` 用户主动触发。
+> **影响**:新 backlog 不再遗漏;历史 170+ 条用 backfill 工具批量处理(本版本不强制 apply,等用户 review 报告)。
+
+### 🆕 核心交付物
+
+| 文件 | 作用 |
+|---|---|
+| `scripts/backlog_to_task.py` | 中间件 v0.1.0(create/update/scan 三模式 + 幂等 + 日志) |
+| `scripts/backlog_backfill.py` | 历史回填 v0.1.0(模糊匹配 + 3 档模式 + 对账报告) |
+| `obsidian-assets/userscripts/quickadd-新建布丁需求-后处理.js` | OB Macro Step 2 userscript |
+| `zhixing-game/.claude/hooks/post-backlog-sync.py` | zhixing-game CC PostToolUse hook(异步触发) |
+| `docs/design/backlog-to-task-mirror.md` | 设计 spec(reviewed) |
+| `docs/design/backlog-to-task-mirror-plan.md` | 实施 plan(plan-ready,7 Phase) |
+| `docs/tutorial/06-backlog-to-task-mirror.md` | 用户教程(含 UI 配置 + 排查) |
+
+### 🛠 task md frontmatter 新增 5 字段
+
+| 字段 | 类型 | 作用 |
+|---|---|---|
+| `backlog_source` | wikilink `"[[<slug>]]"` | 关联源 backlog md,OB 可点击跳转 |
+| `backlog_path` | str | 仓库相对路径(冗余给 grep 用) |
+| `backlog_priority` | str | 镜像 backlog priority(P0-P3/optim/idea) |
+| `backlog_status_seen` | str | 上次同步看到的 backlog status(漂移检测基础) |
+| `backlog_synced_at` | ISO datetime | 上次同步时间戳 |
+
+### 🛠 OB QuickAdd「🎮 新建布丁需求」从 Template 升级为 Macro
+
+`~/Documents/OB/.obsidian/plugins/quickadd/data.json` 改动:
+- choice `zhixing-backlog-new` type 从 `"Template"` 改 `"Macro"`,内嵌 2-step macro(Template + UserScript)
+- 顶层 `macros[]` 数组追加同步 macro 定义
+- 改前 backup → `data.json.bak-20260604-pre-macro`
+
+### 🛠 zhixing-game `.claude/settings.json` 加 PostToolUse hook
+
+```json
+"PostToolUse": [
+  {
+    "matcher": "Write|Edit|MultiEdit",
+    "hooks": [
+      { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/post-backlog-sync.py", "timeout": 5 }
+    ]
+  }
+]
+```
+
+hook 内 `BACKLOG_PATTERN` 只匹配 `docs/backlog/(P[0-3]|optim|idea|unrated|fix)-*.md`,异步 Popen 中间件,失败 exit 0 不阻塞 CC。
+
+### 🛠 模糊匹配算法(backfill 用)
+
+`scripts/backlog_backfill.py` 的 `title_similarity` 综合 4 个维度取最大:
+1. **Jaccard**(token 集合相似度)
+2. **Containment**(单向包含)
+3. **LCS**(最长公共连续子串)
+4. **Chunk overlap**(共享 ≥2 字 token 数 / 3)
+
+综合 score = `0.7 × title_max + 0.15 × tag_jaccard + 0.15 × time_window(±60 天)`
+
+5 个已知配对验证:
+- `P1-习惯养成打卡 ↔ 功能：日常习惯打卡` = 0.52
+- `P1-学员侧Skill ↔ 功能：学员侧skill` = 0.82
+- `P1-视频音频付费试看 ↔ 布丁视频可以单篇付费` = 0.61
+- `optim-微信双刷新 ↔ 微信移动端 H5 双刷新` = 0.85
+- `optim-pg_stat_statements`(已 apply) = 1.00
+
+### 📊 历史 backlog 对账(2026-06-04 跑 report-only)
+
+| 类别 | 数量 |
+|---|---|
+| 已有 backlog_source 关联 | 1(测试用) |
+| auto-accept 自动关联(score ≥ 0.55) | 47 |
+| 应新建 task md(无候选) | 4 |
+| 待人工 review(0.15 ≤ score < 0.55) | 128 |
+| 总计 | 180 |
+
+报告:`~/.claude/reports/backlog-backfill-2026-06-04-*.md`
+
+本版本**不强制 apply**,等用户 review 报告后用 `--apply` 真改。
+
+### 📝 改动文件
+
+- 🆕 `scripts/backlog_to_task.py` 中间件
+- 🆕 `scripts/backlog_backfill.py` 回填工具
+- 🆕 `obsidian-assets/userscripts/quickadd-新建布丁需求-后处理.js`
+- 🆕 `docs/design/backlog-to-task-mirror.md` 设计 spec
+- 🆕 `docs/design/backlog-to-task-mirror-plan.md` 实施 plan
+- 🆕 `docs/tutorial/06-backlog-to-task-mirror.md` 用户教程
+- 🛠 `~/Documents/OB/.obsidian/plugins/quickadd/data.json` Macro 升级(改前 backup)
+- 🛠 vault `01 Project/00 进行中/应用产品/小工具开发/feishukanban-ob-sync/userscripts/quickadd-新建布丁需求-后处理.js` (从 obsidian-assets cp)
+- 🛠 `~/Documents/CodingProject/zhixing-game/.claude/hooks/post-backlog-sync.py`(新 hook)
+- 🛠 `~/Documents/CodingProject/zhixing-game/.claude/settings.json` 加 PostToolUse 整块
+- 🆕 `~/Documents/CodingProject/zhixing-game/docs/superpowers/handoff/2026-06-04-backlog-status-对齐-handoff.md`(配套)
+- 🆕 `~/Documents/CodingProject/zhixing-game/docs/superpowers/handoff/2026-06-04-backlog-status-对齐-完成回执.md`(zhixing-game CC 写)
+
+### ⚠️ 用户侧需要做的事
+
+- **必做**:重启 Obsidian 或 Disable/Enable QuickAdd 插件 → Cmd+P 测一条「🎮 新建布丁需求」走全链路
+- **可选**:跑 `python3 scripts/backlog_backfill.py --report-only` 看历史对账报告 → 决定要不要 `--apply` 回填
+- **紧急关闭**:`export BACKLOG_TO_TASK_DISABLE=1`
+
+### ⚖️ 8 条原则自评
+
+| # | 原则 | 评分 | 备注 |
+|---|---|---|---|
+| 1 | 解耦 | ⭐⭐⭐⭐⭐ | 中间件不调飞书,hook 不耦合中间件实现,失败不阻塞触发方 |
+| 2 | 可扩展 | ⭐⭐⭐⭐ | 加新触发点只要再挂 hook 调同一脚本;字段映射表分离 |
+| 3 | 灵活修改 | ⭐⭐⭐⭐ | hook 改名秒关;env kill switch;backup 文件 |
+| 4 | 渐进披露 | ⭐⭐⭐⭐ | 用户视角"task 看板自动出现",不需要懂中间件;高级用户看 frontmatter |
+| 5 | 鲁棒性 | ⭐⭐⭐⭐⭐ | hook 失败 exit 0,Popen 异步 start_new_session,原子写 tmp.replace |
+| 6 | 人可读 | ⭐⭐⭐⭐ | 字段直白,docstring 完整,tutorial 含详细配置步骤 |
+| 7 | 高复用 | ⭐⭐ | **显式违反** — 现在写死布丁。修复路径:Phase 4+ 用 yaml config 化项目名 / vault 路径 |
+| 8 | 工程化 | ⭐⭐⭐⭐ | 设计文档 + plan + tutorial 三件套,VERSION bump,日志写 ~/.claude/logs/ |
+
+### 🔮 下一步候选
+
+- Phase 4 真 apply(用户 review 报告后)
+- Phase 5:`scripts/backlog_drift_check.py` 漂移检测(扫 backlog_status_seen ≠ 当前 status,产 weekly report)
+- Phase 7:dogfood 1 周 + 反馈调整
+- 字段命名考虑加 YAML config 化(对应 8 原则 #7 修复路径)
+
+---
+
 ## [v0.7.11] - 2026-06-04 — fix:quickadd / sync.py 6 月初 dogfood 修复包(3 路独立 fix)
 
 > **背景**:6 月初连续 dogfood 暴露 3 个独立 bug,统一归到一次 patch release(都是表层 fix,无 breaking change)。

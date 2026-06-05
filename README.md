@@ -3,9 +3,13 @@
 > 📋 **Obsidian ↔ 飞书项目管理多维表 全闭环同步工具**。让你既享受 Obsidian 的 ADHD 友好「子弹笔记式任务流」,又拥有飞书的「项目看板可视化」,**两端永远一致**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.7.11-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.8.0-blue.svg)](CHANGELOG.md)
 
 ---
+
+## 🚀 v0.8.0 上线 — 布丁 backlog ↔ OB task md 自动镜像(MVP)(2026-06-04)
+
+**布丁(zhixing-game)的 `docs/backlog/*.md` 与 OB vault `04 Inbox/task/*.md` 现在自动一对一镜像**,新建 backlog 不再遗漏到 task 看板。两个触发点:① **OB Cmd+P「🎮 新建布丁需求」**(QuickAdd Template 升级为 Macro,Step 1 套模板建 backlog,Step 2 调中间件镜像 task)② **zhixing-game CC Write/Edit/MultiEdit** 到 `docs/backlog/<前缀>-*.md` 触发 PostToolUse hook。统一中间件 `scripts/backlog_to_task.py`(create/update/scan 三模式,幂等不重复建,默认 dry-run + `--apply`);task md 默认 `today: false` 进**需求池**(不进今日 todo);frontmatter 加 5 个 `backlog_*` 字段(`backlog_source` wikilink / `backlog_path` / `backlog_priority` / `backlog_status_seen` / `backlog_synced_at`)做精确关联与漂移检测基础。配套 `scripts/backlog_backfill.py` 一次性回填历史 170+ 条(主题模糊匹配 Jaccard+containment+LCS+chunk overlap 取最大,3 档模式 report-only/dry-run/apply)。紧急关闭:`BACKLOG_TO_TASK_DISABLE=1`。详见 [CHANGELOG v0.8.0](CHANGELOG.md#v080---2026-06-04) + [设计文档](docs/design/backlog-to-task-mirror.md) + [tutorial 06](docs/tutorial/06-backlog-to-task-mirror.md)。
 
 ## 🚀 v0.7.0 上线 — 非交互 `--create-task`,外部项目一条命令写任务到飞书+OB(2026-06-01)
 
