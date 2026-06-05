@@ -65,6 +65,27 @@ PRIORITY_MAP = {
     "fix": "P2",
 }
 
+# backlog status → task status 映射(task 7 态:todo/doing/subdone/done/block/cancel/idea)
+# 2026-06-05:Phase 4 backfill 发现 23 条已 done 的 backlog 被建为 task status=todo,污染需求池。
+# 让中间件读 backlog status 镜像到 task,避免假"待办"。
+BACKLOG_STATUS_TO_TASK_STATUS = {
+    "done": "done",
+    "shelved": "cancel",
+    "superseded": "cancel",
+    "cancel": "cancel",
+    "cancelled": "cancel",
+    "doing": "doing",
+    "in_progress": "doing",
+    "active": "doing",
+    "drafting": "doing",
+    "partial": "doing",
+    "paused": "block",
+    "block": "block",
+    "blocked": "block",
+    "idea": "idea",
+    # 默认(backlog / todo / open / pending / ready / unrated 等):"todo"
+}
+
 # backlog 文件名跳过(不是真需求,只是规范文档)
 SKIP_BACKLOG_PATTERNS = re.compile(r"(README|_index|\.bak)", re.IGNORECASE)
 
@@ -196,6 +217,16 @@ def build_task_md(backlog_fm, body, slug, title, backlog_path_rel):
     backlog_priority = str(backlog_fm.get("priority", "")).strip()
     backlog_status = str(backlog_fm.get("status", "")).strip()
     task_priority = PRIORITY_MAP.get(backlog_priority, "P3")
+    # 镜像 backlog status → task status(默认 todo)
+    task_status = BACKLOG_STATUS_TO_TASK_STATUS.get(backlog_status, "todo")
+    # done 状态:抄 backlog 的 done_date,没有就填今天
+    task_done_date = ""
+    if task_status == "done":
+        raw_dd = backlog_fm.get("done_date")
+        if isinstance(raw_dd, str) and raw_dd.strip():
+            task_done_date = raw_dd.strip()[:10]
+        else:
+            task_done_date = derive_today_date()
     estimate_hours = parse_estimate_hours(backlog_fm.get("estimate", ""))
 
     # created 字段:用 backlog 的 created,降级到现在
@@ -238,13 +269,13 @@ def build_task_md(backlog_fm, body, slug, title, backlog_path_rel):
 
     fm_block = f"""---
 priority: {task_priority}
-status: todo
+status: {task_status}
 today: false
 today_source:
 today_source_history:
 today_history: []
 created: {created_str}
-done_date:
+done_date: {task_done_date}
 due:
 category: 产品项目
 subcategory:

@@ -68,12 +68,31 @@ from backlog_to_task import (  # noqa
 # ============================================================
 
 # 中文停用词 / task 通用前缀(影响关键词分布)
+# 2026-06-05 大扩:回滚 26 条误关联后发现 chunk_overlap 在通用词上误判严重
 STOP_TOKENS = {
+    # 语气虚词
     "的", "了", "和", "与", "及", "对", "在", "为", "是", "也",
-    "task", "功能", "优化", "修复", "v1", "v2", "v3", "bug",
-    "布丁开发", "布丁内容", "ob", "内容工厂",
+    "把", "被", "让", "从", "向", "用", "以", "等", "都",
+    # task 元词
+    "task", "功能", "优化", "修复", "升级", "改造", "重构",
+    "v1", "v2", "v3", "v4", "bug", "fix", "feat",
+    # 项目类前缀
+    "布丁", "布丁开发", "布丁内容", "ob", "内容工厂", "aicoding",
+    "ai", "agent", "skill", "skills", "cc", "claude", "obsidian",
+    # priority 前缀
     "P0", "P1", "P2", "P3", "optim", "idea", "unrated", "fix",
-    "md", "需求", "需要", "完成", "实现", "新建",
+    # 通用动词 / 名词(高频且无主题区分度)
+    "md", "需求", "需要", "完成", "实现", "新建", "管理",
+    "标签", "案例", "更新", "发布", "上传", "同步", "分享",
+    "支持", "支撑", "处理", "方案", "设计", "开发", "测试",
+    "增加", "添加", "删除", "查看", "查询",
+    "视频", "音频", "图片", "文章", "内容", "数据", "信息",
+    "系统", "平台", "工具", "技能", "技术", "学习",
+    "用户", "学员", "页面", "页", "段", "卡", "块",
+    "可以", "应该", "或者", "比如", "需要", "这个", "那个",
+    "多个", "多种", "多端", "多个", "全部", "整个", "一些", "一个",
+    # 中性方位 / 时间词
+    "里", "中", "外", "前", "后", "上", "下", "时", "时候",
 }
 
 TOKEN_PATTERN = re.compile(r"[\w\-]+", re.UNICODE)
@@ -100,28 +119,40 @@ def tokenize(text):
 
 
 def title_similarity(bl_title, tk_title):
-    """多维度标题相似度 — Jaccard / contains / LCS / chunk overlap 取 max。
-    对中文短主题更鲁棒。"""
+    """多维度标题相似度 — Jaccard / contains / LCS 取 max。
+
+    2026-06-05 重写:删 chunk_overlap(中文 2-char window 噪声太大,
+    "优化/管理/标签"等通用词命中 2-3 个就给满分,产生 false positive)。
+    保留:
+      - Jaccard tokens(扩 STOP_TOKENS 过滤)
+      - Containment(必须 ≥ 0.6 占比才算分)
+      - LCS substring(必须 ≥ 3 字符,中文 2 字常见词不算)
+    高置信 case(score ≥ 0.55)= 至少一个维度极强,误判率显著降低。
+    """
     bl = (bl_title or "").lower().strip()
     tk = (tk_title or "").lower().strip()
     if not bl or not tk:
         return 0.0
 
-    # 1. Jaccard tokens
+    # 1. Jaccard tokens(STOP_TOKENS 大扩,见上)
     bl_tokens = tokenize(bl_title)
     tk_tokens = tokenize(tk_title)
     jaccard = 0.0
     if bl_tokens and tk_tokens:
         jaccard = len(bl_tokens & tk_tokens) / max(len(bl_tokens | tk_tokens), 1)
 
-    # 2. Containment(单向包含)
+    # 2. Containment(只算"短的几乎被长的全包含"的情况)
     contain_score = 0.0
-    if bl in tk:
-        contain_score = len(bl) / max(len(tk), 1)
-    elif tk in bl:
-        contain_score = len(tk) / max(len(bl), 1)
+    if bl in tk and len(bl) >= 3:
+        ratio = len(bl) / max(len(tk), 1)
+        contain_score = ratio if ratio >= 0.6 else 0.0
+    elif tk in bl and len(tk) >= 3:
+        ratio = len(tk) / max(len(bl), 1)
+        contain_score = ratio if ratio >= 0.6 else 0.0
 
-    # 3. 最长公共连续子串 LCS substring
+    # 3. 最长公共连续子串 — 要求 ≥ 5 字符(避免"训练营"3 字这种通用主题词通吃)
+    #    2026-06-05 第二轮调:之前用 3 字 + ratio=LCS/min 在短 task 标题(如「训练营」)
+    #    上产生 ratio=1.0 误判 — 改 5 字 + ratio=LCS/max 双重收紧。
     longest = ""
     for i in range(len(bl)):
         for j in range(len(tk)):
@@ -130,13 +161,11 @@ def title_similarity(bl_title, tk_title):
                 k += 1
             if k > len(longest):
                 longest = bl[i:i + k]
-    lcs_score = len(longest) / max(min(len(bl), len(tk)), 1) if longest and len(longest) >= 2 else 0.0
+    lcs_score = 0.0
+    if longest and len(longest) >= 5:
+        lcs_score = len(longest) / max(len(bl), len(tk), 1)
 
-    # 4. 共享 ≥ 2 字 chunks 数(中文关键词命中数)
-    shared_chunks = [t for t in bl_tokens & tk_tokens if len(t) >= 2]
-    chunk_score = min(1.0, len(shared_chunks) / 3.0)
-
-    return max(jaccard, contain_score, lcs_score, chunk_score)
+    return max(jaccard, contain_score, lcs_score)
 
 
 def extract_task_title(task_md_path, task_fm, task_body):
