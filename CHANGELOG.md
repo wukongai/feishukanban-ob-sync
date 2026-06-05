@@ -2,6 +2,61 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.8.1] - 2026-06-05 — fix:快记任务模板补「## 📈 执行明细」空段 + vault 内 userscripts 升级路径
+
+> **背景**:dogfood 报告新建 task md 跑「记录今日明细」后,明细行写到了「📦 交付」段下,不是「📈 执行明细」段下。根因链:
+> 1. `quickadd-快记任务-v2-task-md.js` 内联模板**缺**「## 📈 执行明细」空段(v0.7.11 commit message 提到要补但只改了 sync.py 的 `create_task_from_params`,UserScript 漏修)
+> 2. vault 内 userscripts 是 install.sh `cp + sed` 装出来的**物理文件**(不是 symlink),仓库 v0.7.11 sectionRegex 修复后 vault 没拿到 → 旧版 `\s*\n` 贪婪吃换行,body 越过交付段标题,新行追加到了交付段下
+>
+> **决策**:
+> - Fix A:`quickadd-快记任务-v2-task-md.js` 内联模板第 727 行后补「## 📈 执行明细」空段,与 `task-template.md` / `sync.py` create_task_from_params 三处模板对齐
+> - Fix B:dogfood 实例 vault 内 7 个 userscripts 用仓库新版 `cp + sed inject` 重装一遍(等价 `install.sh --apply --force` Step 4,但只做 userscripts,不动 template/base/rules),旧版加 `.bak.v0712-<ts>` 备份
+>
+> **影响**:之后新建 task md 自动带空的「## 📈 执行明细」段;「记录今日明细」走 if 分支精准命中,不再 fallback 误写交付段。漏修的 6 月初 dogfood 实例(本次发现的 1 个)已手动校正。
+
+### 🛠 变更
+
+| 文件 | 改动 |
+|---|---|
+| `obsidian-assets/userscripts/quickadd-快记任务-v2-task-md.js` | 内联模板第 727 行后补「## 📈 执行明细」空段 |
+| `CHANGELOG.md` | 加本段 |
+| `README.md` | badge bump v0.8.0 → v0.8.1 |
+
+### 🛠 v0.7.11 commit message 与实际改动的 gap(本次修补)
+
+v0.7.11 commit message 写:「顺带:fallback 锚点改用「## 📦 交付」(模板规定执行明细在交付前)、create_task_from_params 模板加 ## 📈 执行明细 空段。」
+
+实际改了三处:`sync.py:5454`(create_task_from_params 模板)、`sync.py:3069`(sectionRegex)、`obsidian-assets/userscripts/quickadd-记录今日明细.js:274`(sectionRegex + fallback 锚点)。
+
+**漏掉**:`obsidian-assets/userscripts/quickadd-快记任务-v2-task-md.js` 内联模板第 727 行后的执行明细空段。三个模板里只有它没补,导致 QuickAdd 创建的 task md 始终缺这段,「记录今日明细」要走 fallback,触发 vault 旧脚本的贪婪 bug。本版补齐。
+
+### 🏛 架构 8 原则自检
+
+| # | 原则 | 自检 |
+|---|------|----|
+| 1 | 解耦 | UserScript 内联模板 / `task-template.md` / sync.py `create_task_from_params` 三处模板**冗余**,任意一处改了另两处不会自动跟。本次只对齐数据,**没解决**根本耦合(P2 follow-up:抽出 `task_skeleton_h2_order.yaml` 单一来源) |
+| 2 | 可扩展 | OK,新加 H2 段三处都按同样位置补即可 |
+| 3 | 灵活修改 | 一行 Edit,可秒回滚 |
+| 4 | 渐进披露 | 模板空段 = 新人看到段名就知道这里要填什么,符合 |
+| 5 | 鲁棒性 | 修了 fallback 触发条件,if 分支命中率↑,鲁棒性↑ |
+| 6 | 人可读 | OK |
+| 7 | 高复用 | 同 #1,模板冗余暂未抽象 |
+| 8 | 工程化 | install.sh `cp + sed` 物理文件 vs symlink 的 trade-off 是已知决策(v0.3.4 因 __filename 失败而改 cp),本次暴露了「仓库改了不会自动同步到 vault」的副作用 → P1 follow-up:install.sh 加 `--upgrade-userscripts-only` flag 单独同步 userscripts(不动 template/base/rules)|
+
+### 🔥 v0.7.11 修复但 vault 没拿到 → 本次手动覆盖的脚本
+
+dogfood 实例 vault `/Users/aim5/Documents/OB/01 Project/00 进行中/应用产品/小工具开发/feishukanban-ob-sync/userscripts/`(2026-05-27 用户决策的统一位置):
+
+| 文件 | vault 旧版日期 | 升级到 |
+|---|---|---|
+| `quickadd-记录今日明细.js` | 2026-05-30(v0.6.7) | v0.7.11 sectionRegex + 交付段 fallback 锚点 |
+| `quickadd-快记任务-v2-task-md.js` | 2026-06-04 01:37 | v0.7.11 + v0.8.1 执行明细空段 |
+| `quickadd-完成task.js` / `quickadd-批量推今日-task-md.js` / `quickadd-拉今日todo.js` / `quickadd-拉当前task.js` / `quickadd-推当前task.js` | 各异 | 与仓库 hash 对齐 |
+
+旧文件加 `.bak.v0712-20260605-161608` 后缀备份,可回滚。
+
+---
+
 ## [v0.8.0] - 2026-06-04 — feat:布丁 backlog ↔ OB task md 自动镜像 MVP(Phase 1+2+3+4 落地)
 
 > **背景**:用户日常在 zhixing-game 仓库 `docs/backlog/` 维护布丁需求池(170+ 条),同时在 OB vault `04 Inbox/task/` 用 task 看板做工作管理。两边长期没有自动关联 → 经常漏建 task md → 飞书看板/今日 todo 视图也漏。今天日常会话发现 6 条 backlog status 严重滞后(实际已 done 但没改),触发"系统性建对账机制"的需求。
