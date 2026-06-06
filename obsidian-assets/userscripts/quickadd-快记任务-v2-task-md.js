@@ -678,6 +678,14 @@ module.exports = async function (params) {
     const todayHistoryInit = state.isToday ? `[${dateContext}]` : `[]`;
     // v0.6.5: today_source 由 Step 7 用户选择(planned/unplanned),不再硬编码 unplanned
     const todaySourceLine = state.todaySource ? `today_source: ${state.todaySource}` : `today_source:`;
+    // v0.8.4(2026-06-06):today_source_history lockstep — 与 today_history 长度对齐
+    // 修补根因:历史模板只写 today_history、漏写 today_source_history → 半残 task md
+    //         → sync.py pull-task 跑出来 today_history 长但 src_history 短的不对齐
+    //         → journal dataview 第一道闸通过但 src_history 解析半残(已由 sync.py --repair-history 修存量)
+    // 今后建 task 时直接写齐,根除新增半残
+    const todaySourceHistoryInit = state.isToday && state.todaySource
+      ? `[${state.todaySource}]`
+      : `[]`;
 
     const content = `---
 priority: ${state.priority}
@@ -685,6 +693,7 @@ status: ${state.status}
 today: ${state.isToday}
 today_history: ${todayHistoryInit}
 ${todaySourceLine}
+today_source_history: ${todaySourceHistoryInit}
 created: ${createdISO}
 ${dueLine}
 done_date:

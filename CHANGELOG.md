@@ -2,6 +2,46 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.8.4] - 2026-06-06 — fix:Cmd+P「快记任务」UserScript 模板缺 today_source_history 字段(v0.8.3 半残根因之二)
+
+> **触发**:v0.8.3 commit 后追查 task B 的实际创建路径。task B `tags: [task]`(无 `external-created`)→ **不是** sync.py `--create-task` 路径建出来的(那条路径会必加 `external-created` tag,line 3740),而是 **OB 端 Cmd+P「📝 快记任务」UserScript 建的**。
+> **根因**:`obsidian-assets/userscripts/quickadd-快记任务-v2-task-md.js` 的 frontmatter 模板 [line 686-687] 只写 `today_history` + `today_source`,**完全没写 `today_source_history` 字段** → Cmd+P 每次新建 task 都漏这个字段 → v0.8.3 的 11 条 case B 半残 task md(`today_history` 长但 `today_source_history` 短)绝大部分都来自这里。
+> **诊断要点**(供未来排查 task md 来源):
+>   - `tags: [task, external-created]` → sync.py `--create-task`(VS Code 项目工程窗口 / 同步 skill)
+>   - `tags: [task, pulled-from-feishu]` → `_create_task_md_from_feishu_record`(pull-today 反向建)
+>   - `tags: [task]`(只这一个)→ **OB 端 Cmd+P UserScript**(本次根因)
+
+### 🛠 改动
+
+| 文件 | 改动点 |
+|---|---|
+| `obsidian-assets/userscripts/quickadd-快记任务-v2-task-md.js` | 新加 `todaySourceHistoryInit` 常量(`state.isToday && state.todaySource` → `[${state.todaySource}]`,否则 `[]`)+ frontmatter 模板加 `today_source_history: ${todaySourceHistoryInit}` 行,lockstep 对齐 `today_history` 长度 |
+| `~/.claude/skills/同步任务到飞书/SKILL.md` | path B B2 `today_history` 维护说明后,新增 `today_source_history` lockstep 强制要求(长度严格相等 / 缺位补 `""` / 末位填新 source) + apply 前自检清单加同样要求 |
+
+### 📋 升级 vault 端 userscript(必做)
+
+仓库源改完后,vault 端 userscript 副本(install.sh 装的 cp,不是 symlink)需要重装才生效:
+
+```bash
+./install.sh \
+  --vault-path /Users/aim5/Documents/OB \
+  --scripts-dir "<vault 内 userscripts 上一级路径>" \
+  --userscripts-only --apply --force
+```
+
+注意:`--userscripts-only`(v0.8.1)+ `--force` 配合,只重装 9 个 userscripts,不动 template / base / rules / quickadd snippet。
+
+### ✅ 验证
+
+新建 task 走 Cmd+P → frontmatter 应含完整 4 字段:`today` / `today_history` / `today_source` / `today_source_history`,且 `today_source_history` 与 `today_history` 长度严格相等。无半残状态 → journal 今日 section 立即显示。
+
+### 📚 关联
+
+- 上一版:[v0.8.3](#v083---2026-06-06) — sync.py 加 `--repair-history` 修存量、`_normalize_today_history_lockstep` helper、push_task_md 入口 warning
+- v0.8.3 是修 sync.py 端的漏 + 存量;v0.8.4 是修 userscript 端的新增源头。两者搭档把这个字段 lockstep 根治。
+
+---
+
 ## [v0.8.3] - 2026-06-06 — fix:today_history / today_source_history 半残状态根治 + `--repair-history` 修存量
 
 > **触发**:用户截图显示 task.base 里两条今日 task(`today=true` + `priority`/`status` 都齐),但 journal「今日计划/今日非计划」section **看不到其中一条**。排查发现 task 的 frontmatter 缺 `today_history` / `today_source_history` 字段 → journal dataview 第一道闸 `if (!p.today_history) return false` 直接过滤掉。
