@@ -57,6 +57,7 @@ from backlog_to_task import (  # noqa
     DEFAULT_TASK_DIR,
     DEFAULT_BACKLOG_DIR,
     DEFAULT_LOG_DIR,
+    BEIJING_TZ,
     sync_one,
 )
 
@@ -351,7 +352,7 @@ def main():
         sys.stderr.write(f"⛔ vault 不存在: {vault_root}\n")
         sys.exit(2)
 
-    now = datetime.now()
+    now = datetime.now(BEIJING_TZ)
     week_label = args.week or now.strftime("%Y-W%V")
 
     if args.report_file:

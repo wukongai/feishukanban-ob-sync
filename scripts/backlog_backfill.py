@@ -60,6 +60,7 @@ from backlog_to_task import (  # noqa
     DEFAULT_TASK_DIR,
     DEFAULT_BACKLOG_DIR,
     DEFAULT_LOG_DIR,
+    BEIJING_TZ,
 )
 
 
@@ -503,7 +504,7 @@ def main():
     vault_root = Path(args.vault).resolve()
     log_dir = Path(args.log_dir)
     report_file = Path(args.report_file) if args.report_file else (
-        Path.home() / ".claude/reports" / f"backlog-backfill-{datetime.now().strftime('%Y-%m-%d-%H%M')}.md"
+        Path.home() / ".claude/reports" / f"backlog-backfill-{datetime.now(BEIJING_TZ).strftime('%Y-%m-%d-%H%M')}.md"
     )
 
     if not vault_root.is_dir():

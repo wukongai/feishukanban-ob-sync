@@ -30,7 +30,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 try:
@@ -48,6 +48,11 @@ DEFAULT_VAULT = Path.home() / "Documents/OB"
 DEFAULT_TASK_DIR = "04 Inbox/task"
 DEFAULT_BACKLOG_DIR = Path.home() / "Documents/CodingProject/zhixing-game/docs/backlog"
 DEFAULT_LOG_DIR = Path.home() / ".claude/logs"
+
+# 时区固定北京(对齐 sync.py 主流程 _now_with_tz 设计)。
+# 2026-06-06 bug fix:之前用 naive datetime.now() 在 Denver 时区取了系统本地时间,
+# 生成的 task md 文件名前缀 + backlog_synced_at 都成了"昨天"。
+BEIJING_TZ = timezone(timedelta(hours=8))
 
 # task md 标题前缀 / 项目挂靠
 TASK_TITLE_PREFIX = "【布丁开发】"
@@ -150,11 +155,11 @@ def derive_title(fm, body, slug):
 
 
 def derive_today_iso():
-    return datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    return datetime.now(BEIJING_TZ).strftime("%Y-%m-%dT%H:%M:%S")
 
 
 def derive_today_date():
-    return datetime.now().strftime("%Y-%m-%d")
+    return datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
 
 
 def parse_estimate_hours(estimate_str):
