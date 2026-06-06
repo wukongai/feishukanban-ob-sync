@@ -8,6 +8,8 @@
 #   ./install.sh --scripts-dir <vault-rel-path>     # 自定义装到 vault 哪个相对位置
 #                                                   # 默认 scripts/feishukanban-ob-sync
 #   ./install.sh --apply --force                    # 覆盖已存在的文件(慎用)
+#   ./install.sh --userscripts-only --apply --force # v0.8.1:仅升级 userscripts(跳过 symlink scripts / template / base / rules / quickadd snippet)
+#                                                   # 适合「仓库 quickadd 改了,vault 物理 copy 没拿到」的升级场景
 #
 # 行为(简化版,2026-05-26 v0.3.2 定型 / 2026-05-27 v0.3.3 仅版本 bump):
 #   1. 检查依赖(python3 / feishu-cli / Obsidian)
@@ -17,6 +19,8 @@
 #   5. 复制 templates / base / rules(检查 mtime,默认不覆盖)
 #   6. 输出 QuickAdd choices JSON snippet 让用户粘贴(path 字段自动跟 --scripts-dir)
 #   7. 提示后续手动步骤(飞书表字段 + config.yaml)
+#
+# --userscripts-only 模式跳过 Step 3 / 5 / 6 / 7,只跑 Step 1 / 2 / 4(v0.8.1)
 
 set -euo pipefail
 
@@ -27,6 +31,8 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APPLY=0
 FORCE=0
 VAULT=""
+# v0.8.1:仅升级 userscripts(跳过 symlink scripts / template / base / rules / quickadd snippet)
+USERSCRIPTS_ONLY=0
 # v0.3.2: SCRIPTS_DIR 是 vault 相对路径(从 vault 根算起,不含前导/尾随 /)
 # 默认开源友好值;用户可用 --scripts-dir 覆盖装到 vault 任意位置
 # 自适应原理:userscripts/*.js 用 __filename 推导 sync.py 路径,
@@ -45,8 +51,9 @@ while [[ $# -gt 0 ]]; do
       # 去掉前后多余的 /,接受 "foo/bar" / "/foo/bar" / "foo/bar/" 等格式
       SCRIPTS_DIR="${2#/}"; SCRIPTS_DIR="${SCRIPTS_DIR%/}"
       shift 2 ;;
+    --userscripts-only) USERSCRIPTS_ONLY=1; shift ;;
     --help|-h)
-      head -22 "${BASH_SOURCE[0]}" | tail -20
+      head -25 "${BASH_SOURCE[0]}" | tail -23
       exit 0 ;;
     *) echo "❌ 未知参数: $1"; exit 1 ;;
   esac
@@ -77,6 +84,7 @@ log "📦 feishukanban-ob-sync v0.3.8 install"
 log "============================================================"
 [[ $APPLY -eq 0 ]] && log "📌 模式: dry-run(--apply 才真执行)" || log "🚀 模式: --apply(真执行)"
 log "📂 装到 vault 相对路径: $SCRIPTS_DIR(用 --scripts-dir 改)"
+[[ $USERSCRIPTS_ONLY -eq 1 ]] && log "⚙️  --userscripts-only:仅升级 userscripts,跳过 symlink scripts / template / base / rules / quickadd snippet"
 log ""
 
 log "Step 1: 依赖检查"
@@ -123,30 +131,35 @@ ok "vault: $VAULT"
 log ""
 
 # ============================================================
-# Step 3: symlink scripts
+# Step 3: symlink scripts(--userscripts-only 跳过)
 # ============================================================
-log "Step 3: symlink scripts(sync.py + auto_collect_today.py)"
 SCRIPTS_TARGET="$VAULT/$SCRIPTS_DIR"
-run_or_dry mkdir -p "$SCRIPTS_TARGET"
-
-# sync.py
-if [[ -e "$SCRIPTS_TARGET/sync.py" && $FORCE -eq 0 ]]; then
-  warn "sync.py 已存在 → 跳过(用 --force 覆盖)"
+if [[ $USERSCRIPTS_ONLY -eq 1 ]]; then
+  log "Step 3: 跳过(--userscripts-only)"
+  log ""
 else
-  [[ $APPLY -eq 1 && -e "$SCRIPTS_TARGET/sync.py" ]] && rm "$SCRIPTS_TARGET/sync.py"
-  run_or_dry ln -s "$REPO_DIR/sync.py" "$SCRIPTS_TARGET/sync.py"
-  ok "  symlink: $SCRIPTS_TARGET/sync.py → $REPO_DIR/sync.py"
-fi
+  log "Step 3: symlink scripts(sync.py + auto_collect_today.py)"
+  run_or_dry mkdir -p "$SCRIPTS_TARGET"
 
-# auto_collect_today.py
-if [[ -e "$SCRIPTS_TARGET/auto_collect_today.py" && $FORCE -eq 0 ]]; then
-  warn "auto_collect_today.py 已存在 → 跳过"
-else
-  [[ $APPLY -eq 1 && -e "$SCRIPTS_TARGET/auto_collect_today.py" ]] && rm "$SCRIPTS_TARGET/auto_collect_today.py"
-  run_or_dry ln -s "$REPO_DIR/scripts/auto_collect_today.py" "$SCRIPTS_TARGET/auto_collect_today.py"
-  ok "  symlink: $SCRIPTS_TARGET/auto_collect_today.py"
+  # sync.py
+  if [[ -e "$SCRIPTS_TARGET/sync.py" && $FORCE -eq 0 ]]; then
+    warn "sync.py 已存在 → 跳过(用 --force 覆盖)"
+  else
+    [[ $APPLY -eq 1 && -e "$SCRIPTS_TARGET/sync.py" ]] && rm "$SCRIPTS_TARGET/sync.py"
+    run_or_dry ln -s "$REPO_DIR/sync.py" "$SCRIPTS_TARGET/sync.py"
+    ok "  symlink: $SCRIPTS_TARGET/sync.py → $REPO_DIR/sync.py"
+  fi
+
+  # auto_collect_today.py
+  if [[ -e "$SCRIPTS_TARGET/auto_collect_today.py" && $FORCE -eq 0 ]]; then
+    warn "auto_collect_today.py 已存在 → 跳过"
+  else
+    [[ $APPLY -eq 1 && -e "$SCRIPTS_TARGET/auto_collect_today.py" ]] && rm "$SCRIPTS_TARGET/auto_collect_today.py"
+    run_or_dry ln -s "$REPO_DIR/scripts/auto_collect_today.py" "$SCRIPTS_TARGET/auto_collect_today.py"
+    ok "  symlink: $SCRIPTS_TARGET/auto_collect_today.py"
+  fi
+  log ""
 fi
-log ""
 
 # ============================================================
 # Step 4: 装 QuickAdd UserScripts(cp + sed 注入 sync.py 路径)
@@ -185,43 +198,61 @@ log ""
 
 # ============================================================
 # Step 5: 复制 templates / base / rules(不覆盖已有,除非 --force)
+# --userscripts-only 跳过
 # ============================================================
-log "Step 5: 复制 obsidian-assets(模板 / base / rules)"
-
-# 5.1 task 模版
-TASK_TPL_TARGET="$VAULT/03 Resources/素材库/模版/task 模版.md"
-if [[ -e "$TASK_TPL_TARGET" && $FORCE -eq 0 ]]; then
-  warn "task 模版 已存在 → 跳过"
+if [[ $USERSCRIPTS_ONLY -eq 1 ]]; then
+  log "Step 5: 跳过(--userscripts-only)"
+  log ""
 else
-  run_or_dry mkdir -p "$(dirname "$TASK_TPL_TARGET")"
-  run_or_dry cp "$REPO_DIR/obsidian-assets/templates/task-template.md" "$TASK_TPL_TARGET"
-  ok "  task 模版 → $TASK_TPL_TARGET"
-fi
+  log "Step 5: 复制 obsidian-assets(模板 / base / rules)"
 
-# 5.2 _task.base
-TASK_BASE_TARGET="$VAULT/04 Inbox/task/_task.base"
-if [[ -e "$TASK_BASE_TARGET" && $FORCE -eq 0 ]]; then
-  warn "_task.base 已存在 → 跳过"
-else
-  run_or_dry mkdir -p "$(dirname "$TASK_BASE_TARGET")"
-  run_or_dry cp "$REPO_DIR/obsidian-assets/base/_task.base" "$TASK_BASE_TARGET"
-  ok "  _task.base → $TASK_BASE_TARGET"
-fi
+  # 5.1 task 模版
+  TASK_TPL_TARGET="$VAULT/03 Resources/素材库/模版/task 模版.md"
+  if [[ -e "$TASK_TPL_TARGET" && $FORCE -eq 0 ]]; then
+    warn "task 模版 已存在 → 跳过"
+  else
+    run_or_dry mkdir -p "$(dirname "$TASK_TPL_TARGET")"
+    run_or_dry cp "$REPO_DIR/obsidian-assets/templates/task-template.md" "$TASK_TPL_TARGET"
+    ok "  task 模版 → $TASK_TPL_TARGET"
+  fi
 
-# 5.3 主 rules
-RULES_TARGET="$VAULT/.claude/rules/feishu-project-sync.md"
-if [[ -e "$RULES_TARGET" && $FORCE -eq 0 ]]; then
-  warn "rules/feishu-project-sync.md 已存在 → 跳过"
-else
-  run_or_dry mkdir -p "$(dirname "$RULES_TARGET")"
-  run_or_dry cp "$REPO_DIR/obsidian-assets/rules/feishu-project-sync.md" "$RULES_TARGET"
-  ok "  rules → $RULES_TARGET"
+  # 5.2 _task.base
+  TASK_BASE_TARGET="$VAULT/04 Inbox/task/_task.base"
+  if [[ -e "$TASK_BASE_TARGET" && $FORCE -eq 0 ]]; then
+    warn "_task.base 已存在 → 跳过"
+  else
+    run_or_dry mkdir -p "$(dirname "$TASK_BASE_TARGET")"
+    run_or_dry cp "$REPO_DIR/obsidian-assets/base/_task.base" "$TASK_BASE_TARGET"
+    ok "  _task.base → $TASK_BASE_TARGET"
+  fi
+
+  # 5.3 主 rules
+  RULES_TARGET="$VAULT/.claude/rules/feishu-project-sync.md"
+  if [[ -e "$RULES_TARGET" && $FORCE -eq 0 ]]; then
+    warn "rules/feishu-project-sync.md 已存在 → 跳过"
+  else
+    run_or_dry mkdir -p "$(dirname "$RULES_TARGET")"
+    run_or_dry cp "$REPO_DIR/obsidian-assets/rules/feishu-project-sync.md" "$RULES_TARGET"
+    ok "  rules → $RULES_TARGET"
+  fi
+  log ""
 fi
-log ""
 
 # ============================================================
 # Step 6: 输出 QuickAdd choices JSON snippet(给用户手动粘贴)
+# --userscripts-only 跳过(Step 7 同样跳过,合并到文件末尾的 fi)
 # ============================================================
+if [[ $USERSCRIPTS_ONLY -eq 1 ]]; then
+  log "Step 6: 跳过(--userscripts-only)"
+  log ""
+  log "Step 7: 跳过(--userscripts-only)"
+  log ""
+  log "============================================================"
+  log "✅ userscripts 升级完成。Cmd+Q 重启 Obsidian 让新脚本生效。"
+  log "============================================================"
+  exit 0
+fi
+
 log "Step 6: QuickAdd choices(用户需手动加到 .obsidian/plugins/quickadd/data.json)"
 log ""
 
