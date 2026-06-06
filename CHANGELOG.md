@@ -2,6 +2,42 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.8.2] - 2026-06-06 — fix:backlog→task 镜像日期取北京时间(根治 Denver 时区 bug)
+
+> **触发**:zhixing-game CC 在北京时间 06-06 上午 10:02 用 Write 工具建 backlog,PostToolUse hook 链到 `scripts/backlog_to_task.py` 落 OB task md,**实际生成文件名前缀 = 2026-06-05**(用户系统在 Denver UTC-7,naive `datetime.now()` 取了本地时间)→ 用户在 OB 今日列表按 06-06 过滤看不到 → 来问"为啥没建"。
+> **根因**:v0.8.0 新加的 3 个独立 scripts 用了 naive `datetime.now()`,绕过了 `sync.py` 主流程已经默认 `Asia/Shanghai` 的 `_now_with_tz`。
+> **影响**:今后所有 backlog→task 镜像 task md 文件名前缀 + frontmatter `backlog_synced_at` 都取北京时间,跟主流程 / `task-template` 一致。
+
+### 🛠 改动
+
+| 文件 | 改动点 |
+|---|---|
+| `scripts/backlog_to_task.py` | `from datetime import datetime, timedelta, timezone` + 加 `BEIJING_TZ = timezone(timedelta(hours=8))` 常量 + `derive_today_iso()` / `derive_today_date()` 改用 `datetime.now(BEIJING_TZ)` |
+| `scripts/backlog_backfill.py` | import `BEIJING_TZ`,line 506 报告文件名时间戳 `datetime.now(BEIJING_TZ)` |
+| `scripts/backlog_drift_check.py` | import `BEIJING_TZ`,line 354 `week_label` 时间戳 `datetime.now(BEIJING_TZ)` |
+
+### ✅ 验证
+
+```bash
+TZ=America/Denver python3 -c "
+import sys; sys.path.insert(0, 'scripts')
+from backlog_to_task import derive_today_iso, derive_today_date
+print(derive_today_iso())   # → 2026-06-06T11:43:58 ✓(系统 Denver 21:43 跨日)
+print(derive_today_date())  # → 2026-06-06 ✓
+"
+```
+
+### 🔗 跨工程协作记录
+
+- handoff(zhixing-game 发起):`zhixing-game/docs/superpowers/handoff/2026-06-06-feishukanban-ob-sync-backlog到task日期取Denver时区-bug-handoff.md`
+- 回执 + 残留 2 个测试文件清理:zhixing-game 侧 completed
+
+### 🔮 方案 B 候选(后续如需)
+
+3 个独立 scripts 改读 `config.yaml` 的 `behavior.timezone`,跟 `sync.py` 完全统一。当前方案 A(硬编码 `Asia/Shanghai`)足用,等真有别时区需求再升级。
+
+---
+
 ## [v0.8.1] - 2026-06-05 — fix:快记任务模板补「## 📈 执行明细」空段 + vault 内 userscripts 升级路径
 
 > **背景**:dogfood 报告新建 task md 跑「记录今日明细」后,明细行写到了「📦 交付」段下,不是「📈 执行明细」段下。根因链:
