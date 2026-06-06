@@ -2,7 +2,7 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
-## [v0.8.4] - 2026-06-06 — fix:Cmd+P「快记任务」UserScript 模板缺 today_source_history 字段(v0.8.3 半残根因之二)
+## [v0.8.5] - 2026-06-06 — fix:Cmd+P「快记任务」UserScript 模板缺 today_source_history 字段(v0.8.3 半残根因之二)
 
 > **触发**:v0.8.3 commit 后追查 task B 的实际创建路径。task B `tags: [task]`(无 `external-created`)→ **不是** sync.py `--create-task` 路径建出来的(那条路径会必加 `external-created` tag,line 3740),而是 **OB 端 Cmd+P「📝 快记任务」UserScript 建的**。
 > **根因**:`obsidian-assets/userscripts/quickadd-快记任务-v2-task-md.js` 的 frontmatter 模板 [line 686-687] 只写 `today_history` + `today_source`,**完全没写 `today_source_history` 字段** → Cmd+P 每次新建 task 都漏这个字段 → v0.8.3 的 11 条 case B 半残 task md(`today_history` 长但 `today_source_history` 短)绝大部分都来自这里。
@@ -38,7 +38,29 @@
 ### 📚 关联
 
 - 上一版:[v0.8.3](#v083---2026-06-06) — sync.py 加 `--repair-history` 修存量、`_normalize_today_history_lockstep` helper、push_task_md 入口 warning
-- v0.8.3 是修 sync.py 端的漏 + 存量;v0.8.4 是修 userscript 端的新增源头。两者搭档把这个字段 lockstep 根治。
+- v0.8.3 是修 sync.py 端的漏 + 存量;v0.8.5 是修 userscript 端的新增源头。两者搭档把这个字段 lockstep 根治。
+
+---
+
+## [v0.8.4] - 2026-06-06 — fix:backlog→task 中间件生成的 task md 对齐模板裸空风格(根治 `today_history: []` 假"半残")
+
+> **触发**:zhixing-game CC 在 v0.8.3 发布后用 v0.8.2 backlog→task hook 链路新建测试 backlog,vault 落 task md 后用户报"没有 today_history"。实际中间件 `scripts/backlog_to_task.py` 的 `build_task_md` 把 `today_history` / `iteration_week` / `iteration_month` 三字段拼成显式空 list(`xxx: []`),跟 `task-template.md` 的标准裸空(`xxx:`,YAML 解析为 None)风格不一致。
+> **根因**:v0.8.3 的 dataview 半残状态判定把空 list 当 falsy → 把这条 today=false 进需求池的 task 也误归"半残"。
+> **修(3 行)**:中间件 `fm_block` 拼接里这 3 字段从 `xxx: []` 改成 `xxx:`。
+
+### 🛠 改动
+
+| 文件 | 改动点 |
+|---|---|
+| `scripts/backlog_to_task.py` | `build_task_md` 3 字段裸空对齐模板:`today_history:` / `iteration_week:` / `iteration_month:`(不再写 `[]`) |
+
+### 📋 历史 task md 兼容性
+
+历史 106 条 backlog→task 镜像 task md 仍含 `xxx: []` 格式,dataview 实际行为差异极小(空 list vs None);不主动批量改,等下次 dogfood 报告再决定要不要补 `backlog_fix_history_fields.py`。
+
+### 🔗 关联
+
+由 zhixing-game CC 处理(handoff 链路),独立于 OB CC 的 v0.8.3/v0.8.5 修复路径,但同属"今日字段半残"主题。
 
 ---
 
