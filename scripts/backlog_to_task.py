@@ -278,7 +278,7 @@ status: {task_status}
 today: false
 today_source:
 today_source_history:
-today_history: []
+today_history:
 created: {created_str}
 done_date: {task_done_date}
 due:
@@ -297,8 +297,8 @@ parent_inspiration:
 日志:
 feishu_record:
 feishu_url:
-iteration_week: []
-iteration_month: []
+iteration_week:
+iteration_month:
 completion_month:
 backlog_source: "[[{slug}]]"
 backlog_path: {backlog_path_rel}
