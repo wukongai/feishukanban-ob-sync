@@ -2,6 +2,51 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.8.3] - 2026-06-06 — fix:today_history / today_source_history 半残状态根治 + `--repair-history` 修存量
+
+> **触发**:用户截图显示 task.base 里两条今日 task(`today=true` + `priority`/`status` 都齐),但 journal「今日计划/今日非计划」section **看不到其中一条**。排查发现 task 的 frontmatter 缺 `today_history` / `today_source_history` 字段 → journal dataview 第一道闸 `if (!p.today_history) return false` 直接过滤掉。
+> **根因(双重)**:
+>   1. `pull-task` 单条拉 + `pull-today` plan_skip 分支只补 `today_history`、**漏补 `today_source_history`** → 长期跑下来部分 task 长度不对齐
+>   2. OB 端手工 Edit frontmatter / 旧 task 模板 / 多步操作中途断裂 → 产生 `today=true` 但 history 字段缺的"半残状态",sync.py 标准路径不会主动修
+> **影响**:journal 今日 section 看不到部分今日 task,但 task.base / 飞书侧能看到 → 视觉错位、对用户造成"任务凭空消失"困惑。
+
+### 🛠 改动
+
+| 文件 / 函数 | 改动点 |
+|---|---|
+| `sync.py` `_normalize_today_history_lockstep()` (新增 helper) | 提炼 v0.7.2 plan_set_true 的内联 lockstep 逻辑为公用函数(today_history append 不重 + today_source_history 长度对齐 + 末位赋 source),供 pull-task / pull-today / repair-history 共享 |
+| `sync.py` `pull_task_from_feishu()` (line 3926+) | 用 helper 替换 inline 计算,**补 today_source_history 同步更新**(原来只算 today_history) |
+| `sync.py` `pull_today_from_feishu()` plan_set_true 循环 | 用 helper 替换 v0.7.2 内联逻辑(无功能变化,代码简化) |
+| `sync.py` `pull_today_from_feishu()` plan_skip 预计算 + apply | **新加 `src_history_diffs` 预计算 dict + apply 循环写入**,修「plan_skip 跨天 today 老 task 只补 today_history、漏补 today_source_history」 |
+| `sync.py` `repair_today_history_lockstep()` (新增) | `--repair-history` CLI:扫 vault 找 today=true 但 history 字段缺/不对齐的 task md,锚点 = `created` 日期(不破坏历史保真),dry-run + `--apply` 两阶段 |
+| `sync.py` `push_task_md()` 入口守卫 | parse 后检测 today=true + history 字段缺/不对齐,**warning + 提示 `--repair-history`**(不自动修,避免副作用) |
+| `sync.py` argparse + main 路由 | 加 `--repair-history` flag |
+
+### 📋 修复存量
+
+```bash
+# 看会修哪些
+python3 sync.py --repair-history --vault /Users/aim5/Documents/OB
+
+# 真改
+python3 sync.py --repair-history --apply --vault /Users/aim5/Documents/OB
+```
+
+实测 2026-06-06 user vault 扫到 11 条半残 task md(1 条 case A 完全缺 today_history、10 条 case B src_history 长度不对齐),全部修复成功 → journal 今日 section 恢复正常显示。
+
+### ✅ 验证
+
+1. task A「【内容工厂】OB 选题快捷录入」(20:12 创建,字段齐全)→ journal「🐿️ 今日非计划」section 显示 ✓
+2. task B「【OB】日志属性扫尾」(13:38 创建,完全缺 history)→ `--repair-history` 修复后 journal 显示 ✓
+3. 跨天老 task(如「TA 训练营」5/26-6/6 跨 13 天 today)→ src_history 对齐到 13 位,末位 = `today_source`,语义安全(老空位保留,新位用 today_source) ✓
+
+### 📚 关联
+
+- 旧:[CHANGELOG v0.7.2](CHANGELOG.md#v072) — 首次引入 today_source_history(plan_set_true 写入)
+- 旧:[CHANGELOG v0.4.0+ Step 3](CHANGELOG.md#v040-step-3) — plan_skip 补 today_history(只补一边,v0.8.3 补另一边)
+
+---
+
 ## [v0.8.2] - 2026-06-06 — fix:backlog→task 镜像日期取北京时间(根治 Denver 时区 bug)
 
 > **触发**:zhixing-game CC 在北京时间 06-06 上午 10:02 用 Write 工具建 backlog,PostToolUse hook 链到 `scripts/backlog_to_task.py` 落 OB task md,**实际生成文件名前缀 = 2026-06-05**(用户系统在 Denver UTC-7,naive `datetime.now()` 取了本地时间)→ 用户在 OB 今日列表按 06-06 过滤看不到 → 来问"为啥没建"。

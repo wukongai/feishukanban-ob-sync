@@ -654,6 +654,44 @@ def update_md_frontmatter(md_path: Path, updates: dict) -> bool:
         return False
 
 
+def _normalize_today_history_lockstep(
+    history, src_history, today_iso: str, source: str
+) -> tuple:
+    """today_history / today_source_history 双字段 lockstep normalize(v0.8.3,2026-06-06)
+
+    保证两字段一致性(journal dataview 渲染依赖此对齐):
+    - today_history 含 today_iso(若缺则末位追加,不重复)
+    - today_source_history 长度 == len(today_history),老 task 缺失位置补 ""
+    - 今天位置(末位)的 source 设为参数值;若今天已存在但 source 不同 → 覆盖
+      (场景:同一天先 unplanned 后 pull-today 改 planned)
+
+    Args:
+        history: 原 today_history 列表(可能为 None/非 list/含非字符串)
+        src_history: 原 today_source_history 列表(同上)
+        today_iso: 今天日期 ISO(YYYY-MM-DD)
+        source: 今天的 source 值(planned / unplanned)
+
+    Returns:
+        (new_history, new_src_history): 都是 list[str],已 lockstep 对齐
+        调用方与原始比较即可判断是否变化。
+
+    抽离自 pull_today_from_feishu plan_set_true 内联逻辑(v0.7.2),
+    供 pull-task / pull-today plan_skip / --repair-history 共享,
+    消除「只补一边」的半残状态。
+    """
+    new_hist = [str(h) for h in history] if isinstance(history, list) else []
+    new_src = [str(s) for s in src_history] if isinstance(src_history, list) else []
+    if today_iso not in new_hist:
+        new_hist.append(today_iso)
+    while len(new_src) < len(new_hist) - 1:
+        new_src.append("")
+    if len(new_src) < len(new_hist):
+        new_src.append(source)
+    else:
+        new_src[len(new_hist) - 1] = source
+    return new_hist, new_src
+
+
 def inject_completion_link(md_path: Path, title: str, record_url: str) -> bool:
     """task md「## ✅ 完成标记」段下的裸 `- [ ] <title>` 行 → 替换为带 URL 的 markdown link
     `- [ ] [<title>](record_url)`,让 dataview TASK 渲染时变成可点击链接(直达飞书 record)
@@ -3368,6 +3406,31 @@ def push_task_md(md_path: Path, apply: bool = False, _silent_fail: bool = False,
     if task is None:
         return _fail(f"parse_task_md 失败: {md_path}")
 
+    # v0.8.3(2026-06-06):today_history / today_source_history 半残状态守卫(警告级)
+    # 场景:OB 端手工 Edit / 旧模板 / 多步操作中途断裂 → today=true 但 history 缺
+    # 不自动修(避免副作用),只 warning + 提示 --repair-history;journal 那边会因此查不到
+    try:
+        _raw = md_path.read_text(encoding="utf-8")
+        _fm_now, _, _ = parse_frontmatter(_raw)
+        if _fm_now and _fm_now.get("today") is True:
+            _th = _fm_now.get("today_history")
+            _tsh = _fm_now.get("today_source_history")
+            _th_list = _th if isinstance(_th, list) else []
+            _tsh_list = _tsh if isinstance(_tsh, list) else []
+            _bad = False
+            _reason = ""
+            if not _th_list:
+                _bad = True
+                _reason = "today_history 缺/空"
+            elif len(_tsh_list) != len(_th_list):
+                _bad = True
+                _reason = f"today_history({len(_th_list)})/today_source_history({len(_tsh_list)})长度不对齐"
+            if _bad:
+                print(f"    ⚠️  half-state: today=true 但 {_reason} → journal dataview 可能查不到")
+                print(f"        修复:python3 sync.py --repair-history --apply")
+    except Exception:
+        pass
+
     is_create = not task.get("record_id")
     action = "CREATE" if is_create else "UPDATE"
 
@@ -3923,26 +3986,36 @@ def pull_task_from_feishu(input_path_or_rid: str, apply: bool = False) -> None:
     fm_updates, fm_summary = _diff_frontmatter_with_feishu(md_path, fs_fields)
     h2_updates, h2_summary = _diff_h2_sections_with_feishu(md_path, fs_fields)
 
-    # today_history compute(对齐 pull-today plan_skip)
+    # today_history / today_source_history lockstep(v0.8.3,2026-06-06:补漏的 src_history)
+    # 飞书侧勾今日 → OB 端 today_history 含今天 + today_source_history 末位 = "planned"
     today_iso = _now_with_tz(config).strftime("%Y-%m-%d")
     history_diff = None
+    src_history_diff = None
     try:
         fm_cur, _, _ = parse_frontmatter(md_path.read_text(encoding="utf-8"))
-        history = fm_cur.get("today_history", []) if fm_cur else []
-        if not isinstance(history, list):
-            history = []
-        if today_iso not in [str(h) for h in history]:
-            history_diff = history + [today_iso]
+        cur_history = fm_cur.get("today_history", []) if fm_cur else []
+        cur_src_history = fm_cur.get("today_source_history", []) if fm_cur else []
+        cur_history_str = [str(h) for h in cur_history] if isinstance(cur_history, list) else []
+        cur_src_history_str = [str(s) for s in cur_src_history] if isinstance(cur_src_history, list) else []
+        new_history, new_src_history = _normalize_today_history_lockstep(
+            cur_history_str, cur_src_history_str, today_iso, "planned"
+        )
+        if new_history != cur_history_str:
+            history_diff = new_history
+        if new_src_history != cur_src_history_str:
+            src_history_diff = new_src_history
     except Exception:
         pass
 
-    if not fm_updates and not h2_updates and history_diff is None:
+    if not fm_updates and not h2_updates and history_diff is None and src_history_diff is None:
         print(f"\n✅ OB ↔ 飞书 已对齐,无需更新")
         return
 
     print(f"\n📋 diff:")
     if history_diff:
         print(f"  📅 today_history += {today_iso}")
+    if src_history_diff:
+        print(f"  📅 today_source_history lockstep → {src_history_diff}")
     for field, ob_val, fs_val in fm_summary:
         def _short(v, limit=35):
             s = str(v).replace("\n", " / ")
@@ -3963,6 +4036,8 @@ def pull_task_from_feishu(input_path_or_rid: str, apply: bool = False) -> None:
     final_updates = dict(fm_updates)
     if history_diff:
         final_updates["today_history"] = history_diff
+    if src_history_diff:
+        final_updates["today_source_history"] = src_history_diff
     if final_updates:
         if update_md_frontmatter(md_path, final_updates):
             print(f"  ✅ frontmatter 更新 {len(final_updates)} 字段")
@@ -3972,6 +4047,130 @@ def pull_task_from_feishu(input_path_or_rid: str, apply: bool = False) -> None:
         if update_h2_section_in_task_md(md_path, h2_title, new_content):
             print(f"  ✅ H2 段更新: {h2_title}")
     print(f"\n✅ pull-task 完成")
+
+
+def repair_today_history_lockstep(apply: bool = False) -> None:
+    """v0.8.3(2026-06-06):扫 vault 修存量 today_history / today_source_history 半残状态。
+
+    背景:
+    - sync.py 标准路径(--create-task / pull-today plan_set_true/plan_skip / pull-task)
+      v0.8.3 起已保证 today/today_history/today_source/today_source_history 四字段一致。
+    - 但历史遗留可能产生半残状态:旧 task 模板没这俩字段、多步操作中途断裂、
+      OB 端手工 Edit frontmatter 漏字段、外部工具(skill / userscript)只写两字段漏两字段 等。
+    - 半残状态 → journal dataview 第一道闸 `if (!p.today_history) return false` 直接过滤
+      → task 在 journal 看不到(但在 task.base 里 today=true 可见,容易困惑)。
+
+    扫描条件(满足其一即标半残):
+      A. frontmatter `today: true` 但 `today_history` 字段缺 / 为空 list / 不是 list
+      B. `today_history` 有值但 `today_source_history` 长度 != len(today_history)
+         (含完全缺 today_source_history 字段的 case)
+
+    修复策略(锚点 = created 日期,不是今天 — 不破坏历史保真):
+    - case A 缺 today_history:用 [created 日期] 单元素 list 兜底(created 是 task 客观日期)
+    - case B 不对齐:长度补齐到 len(today_history),缺失位置补 "",
+      末位用 today_source 值(缺 → 默认 "unplanned",对应"非计划",最保守)
+
+    用法:
+        python3 sync.py --repair-history          # dry-run 看会修哪些
+        python3 sync.py --repair-history --apply  # 真改
+    """
+    vault_root = find_vault_root()
+
+    print(f"\n{'=' * 60}")
+    print(f"🔧 repair-history:修复 today_history / today_source_history 半残状态")
+    if not apply:
+        print(f"📌 dry-run(--apply 才真改)")
+    print(f"{'=' * 60}\n")
+
+    candidates = []  # [(md_path, fm, fixes)]:fixes = {"today_history": new, "today_source_history": new}
+
+    for md in vault_root.rglob("*.md"):
+        if any(part.startswith(".") for part in md.parts):
+            continue
+        if md.name.startswith("_") or ".bak-" in md.name:
+            continue
+        try:
+            text = md.read_text(encoding="utf-8")
+            fm, _, _ = parse_frontmatter(text)
+        except Exception:
+            continue
+        if not fm:
+            continue
+
+        # 必须 today: true 才算半残目标(today: false 缺 history 是正常状态)
+        if fm.get("today") is not True:
+            continue
+
+        cur_history = fm.get("today_history")
+        cur_src_history = fm.get("today_source_history")
+        cur_source = fm.get("today_source") or "unplanned"  # 默认 unplanned 最保守
+        created_raw = fm.get("created")
+
+        # 抽 created 日期(YAML datetime / 字符串两种形态)
+        created_iso = ""
+        if created_raw is not None:
+            s = str(created_raw)
+            m = re.match(r"^(\d{4}-\d{2}-\d{2})", s)
+            if m:
+                created_iso = m.group(1)
+
+        cur_history_list = cur_history if isinstance(cur_history, list) else []
+        cur_src_history_list = cur_src_history if isinstance(cur_src_history, list) else []
+        cur_history_str = [str(h) for h in cur_history_list]
+        cur_src_history_str = [str(s) for s in cur_src_history_list]
+
+        fixes = {}
+
+        # case A:today=true 但 today_history 缺/空
+        if not cur_history_str:
+            if not created_iso:
+                print(f"  ⚠️  {md.relative_to(vault_root)}: today=true 但 today_history 空且无 created,跳过")
+                continue
+            cur_history_str = [created_iso]
+            fixes["today_history"] = cur_history_str
+
+        # case B:对齐 today_source_history 长度(包括完全缺字段的 case)
+        target_src = list(cur_src_history_str)
+        while len(target_src) < len(cur_history_str) - 1:
+            target_src.append("")
+        if len(target_src) < len(cur_history_str):
+            target_src.append(cur_source)
+        if target_src != cur_src_history_str:
+            fixes["today_source_history"] = target_src
+
+        if fixes:
+            candidates.append((md, fm, fixes))
+
+    if not candidates:
+        print(f"✅ 无半残 task md,所有 today=true 的 task 都有齐 history 字段")
+        return
+
+    print(f"📋 找到 {len(candidates)} 条半残 task md\n")
+    for md, fm, fixes in candidates[:20]:
+        try:
+            rel = md.relative_to(vault_root)
+        except Exception:
+            rel = md
+        print(f"  📝 {rel}")
+        for k, v in fixes.items():
+            print(f"     • {k} → {v}")
+    if len(candidates) > 20:
+        print(f"  ... 还有 {len(candidates) - 20} 条")
+
+    if not apply:
+        print(f"\n📌 dry-run 完成。--apply 真改 frontmatter")
+        return
+
+    print(f"\n🚀 开始 apply...")
+    ok_count = 0
+    fail_count = 0
+    for md, fm, fixes in candidates:
+        if update_md_frontmatter(md, fixes):
+            ok_count += 1
+        else:
+            fail_count += 1
+            print(f"  ❌ {md.relative_to(vault_root)}: 更新失败")
+    print(f"\n✅ repair-history 完成:{ok_count} 修 / {fail_count} 失败")
 
 
 def migrate_today_history_unquoted(apply: bool = False) -> None:
@@ -5605,19 +5804,28 @@ def pull_today_from_feishu(apply: bool = False) -> None:
     # 但 today_history 只有 [..., 5/28],缺 5/29 → 5/29 journal dataview
     # contains(today_history, this.file.day) 不匹配 → 不显示
     # 修:预计算并标识,dry-run 显示 + apply 写入
+    # v0.8.3(2026-06-06):并行预计算 today_source_history(plan_skip 走 planned source,
+    # 同 plan_set_true),修「只补 today_history 漏补 src_history」半残 bug
     today_date_iso_for_history = _now_with_tz(config).strftime("%Y-%m-%d")  # v0.5.1
     history_diffs: dict = {}  # rid -> new today_history(含今日)
+    src_history_diffs: dict = {}  # rid -> new today_source_history(lockstep,v0.8.3)
     for rid, _t, p in plan_skip:
         try:
             fm_cur, _, _ = parse_frontmatter(p.read_text(encoding="utf-8"))
-            history = fm_cur.get("today_history", []) if fm_cur else []
-            if not isinstance(history, list):
-                history = []
+            cur_history = fm_cur.get("today_history", []) if fm_cur else []
+            cur_src_history = fm_cur.get("today_source_history", []) if fm_cur else []
         except Exception:
-            history = []
-        history_strs = [str(h) for h in history]
-        if today_date_iso_for_history not in history_strs:
-            history_diffs[rid] = history + [today_date_iso_for_history]
+            cur_history = []
+            cur_src_history = []
+        cur_history_str = [str(h) for h in cur_history] if isinstance(cur_history, list) else []
+        cur_src_history_str = [str(s) for s in cur_src_history] if isinstance(cur_src_history, list) else []
+        new_history, new_src_history = _normalize_today_history_lockstep(
+            cur_history_str, cur_src_history_str, today_date_iso_for_history, "planned"
+        )
+        if new_history != cur_history_str:
+            history_diffs[rid] = new_history
+        if new_src_history != cur_src_history_str:
+            src_history_diffs[rid] = new_src_history
 
     # Step 5: 打印计划摘要
     print(f"📋 计划摘要:")
@@ -5673,7 +5881,7 @@ def pull_today_from_feishu(apply: bool = False) -> None:
     # v0.6.1:把 plan_skip 也算进 early-return 判断 — plan_skip 内会跑 _pull_details
     # 即使 frontmatter 全对齐,飞书子表可能加了 daily 明细 record 需要拉回 OB 段
     has_detail_sync_potential = bool(detail_records_by_task) and bool(plan_skip or plan_set_true or plan_set_false)
-    if not (plan_set_true or plan_set_false or plan_missing or field_diffs or history_diffs or has_detail_sync_potential):
+    if not (plan_set_true or plan_set_false or plan_missing or field_diffs or history_diffs or src_history_diffs or has_detail_sync_potential):
         print(f"\n✅ OB ↔ 飞书 today 状态 + today_history + 字段已对齐,无需更新")
         return
 
@@ -5724,30 +5932,18 @@ def pull_today_from_feishu(apply: bool = False) -> None:
         )
 
     for rid, title, p in plan_set_true:
-        # 读现有 today_history,append 当日(去重)
-        # v0.7.2:同步读 today_source_history,按天追加 "planned"
+        # v0.7.2:today_history + today_source_history 双字段 lockstep,飞书勾今日 = planned
+        # v0.8.3(2026-06-06):内联逻辑提炼到 _normalize_today_history_lockstep helper
         try:
             fm_cur, _, _ = parse_frontmatter(p.read_text(encoding="utf-8"))
-            history = fm_cur.get("today_history", []) if fm_cur else []
-            if not isinstance(history, list):
-                history = []
-            src_history = fm_cur.get("today_source_history", []) if fm_cur else []
-            if not isinstance(src_history, list):
-                src_history = []
+            cur_history = fm_cur.get("today_history", []) if fm_cur else []
+            cur_src_history = fm_cur.get("today_source_history", []) if fm_cur else []
         except Exception:
-            history = []
-            src_history = []
-        if today_date_iso not in history:
-            history.append(today_date_iso)
-        # v0.7.2:today_source_history 与 today_history 长度对齐,今天补 "planned"
-        # 老 task 可能没 src_history 或长度落后,一次补齐到 len(history)-1,再 append "planned"
-        while len(src_history) < len(history) - 1:
-            src_history.append("")
-        if len(src_history) < len(history):
-            src_history.append("planned")
-        else:
-            # 已对齐:今天位置覆盖为 planned(场景:同一天先 unplanned 后 pull-today 改 planned)
-            src_history[len(history) - 1] = "planned"
+            cur_history = []
+            cur_src_history = []
+        history, src_history = _normalize_today_history_lockstep(
+            cur_history, cur_src_history, today_date_iso, "planned"
+        )
         # v0.3.6: today_source 区分计划/非计划(ADHD 自觉察)
         # pull-today 触发 set today=true = 早晨规划好的拉来 → planned
         base = {
@@ -5790,17 +5986,20 @@ def pull_today_from_feishu(apply: bool = False) -> None:
     for rid, title, p in plan_skip:
         has_field_diff = rid in field_diffs
         has_history_diff = rid in history_diffs
+        has_src_history_diff = rid in src_history_diffs  # v0.8.3:补 today_source_history
 
         # v0.6.0(2026-05-29):detail pull 先跑一次,看有无变化(纳入 skip 判断)
         det_res = _pull_details(rid, p)
         has_detail_change = bool(det_res and det_res.get("changed"))
 
-        if not has_field_diff and not has_history_diff and not has_detail_change:
-            continue  # 完全跳:today + today_history + 字段 + H2 段 + 明细都对齐
+        if not has_field_diff and not has_history_diff and not has_src_history_diff and not has_detail_change:
+            continue  # 完全跳:today + today_history + today_source_history + 字段 + H2 段 + 明细都对齐
 
         updates = dict(field_diffs[rid]["updates"]) if has_field_diff else {}
         if has_history_diff:
             updates["today_history"] = history_diffs[rid]
+        if has_src_history_diff:
+            updates["today_source_history"] = src_history_diffs[rid]  # v0.8.3
         # frontmatter 更新
         fm_ok = True
         if updates:
@@ -5811,6 +6010,8 @@ def pull_today_from_feishu(apply: bool = False) -> None:
             parts = []
             if has_history_diff:
                 parts.append(f"today_history += {today_date_iso_for_history}")
+            if has_src_history_diff:
+                parts.append(f"today_source_history lockstep")
             if fm_n:
                 parts.append(f"{fm_n} 字段")
             if h2_changed:
@@ -5820,7 +6021,7 @@ def pull_today_from_feishu(apply: bool = False) -> None:
             label = " + ".join(parts) if parts else "0(无变化)"
             print(f"  🔄 {p.name}: {label} sync(today 已对齐)")
             success_count += 1
-            if fm_n or h2_changed or has_history_diff or has_detail_change:
+            if fm_n or h2_changed or has_history_diff or has_src_history_diff or has_detail_change:
                 field_sync_count += 1
         else:
             print(f"  ❌ {p.name}: 字段 sync 失败")
@@ -5911,6 +6112,8 @@ def main():
                         help="v0.4.0+ Step 3(2026-05-28)一次性 migration — 把 today_history unquoted 改 quoted(修 dataview 不显示 bug)")
     parser.add_argument("--migrate-today-history-unquote", action="store_true",
                         help="v0.4.0+ Step 3(2026-05-29)反向 migration — quoted 改回 unquoted(上次 quoted 方向错了)")
+    parser.add_argument("--repair-history", action="store_true",
+                        help="v0.8.3(2026-06-06):扫 vault 修复 today_history/today_source_history 半残状态(today=true 但 history 缺) → 锚点=created 日期")
     parser.add_argument("--since", help="--pull 模式的起始日期(YYYY-MM-DD)")
     parser.add_argument("--only-completed", action="store_true",
                         help="只同步已完成 task ([x] / [-]),跳过未完成的")
@@ -6004,6 +6207,10 @@ def main():
 
     if args.migrate_today_history_unquote:
         migrate_today_history_unquoted(apply=args.apply)
+        return
+
+    if args.repair_history:
+        repair_today_history_lockstep(apply=args.apply)
         return
 
     if args.create_task:
