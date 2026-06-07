@@ -3,9 +3,13 @@
 > 📋 **Obsidian ↔ 飞书项目管理多维表 全闭环同步工具**。让你既享受 Obsidian 的 ADHD 友好「子弹笔记式任务流」,又拥有飞书的「项目看板可视化」,**两端永远一致**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.8.5-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.9.0-blue.svg)](CHANGELOG.md)
 
 ---
+
+## 🚀 v0.9.0 上线 — task md schema 真相源 + `--validate-task-md` + `--create-task` 补 titlePrefix(2026-06-07)
+
+OB CC 通过 sync.py 路径手工建 task md 时,**与 Macro v2(Cmd+P「快记任务」UserScript)输出漂移** — 文件名/H1 缺「【父项目】」前缀 + `subcategory` 误填 + `today_source_history` 漏写。本次发布 3 件事修根因:① **sync.py 顶部加 `TASK_MD_SCHEMA` dataclass tuple**(28 字段,schema 真相源,`parse_task_md`/`_build_...`/`validate` 三路引用);② **新增 `--validate-task-md <path>` CLI**(6 维度校验:必填 / enum / wikilink / 文件名前缀对齐 / H1 自洽 / today_history lockstep)+ `--apply` 机械修复;③ **`--create-task` 补 titlePrefix**(`parent_project` 非空 → 文件名/H1/完成标记/飞书任务标题自动加「【最终归属】」前缀,与 Macro v2 等效)。**Breaking change**:`--create-task --parent-project X` 现在产出文件名带「【X】」前缀(预期内 minor bump)。详见 [CHANGELOG v0.9.0](CHANGELOG.md#v090---2026-06-07) + [设计文档](docs/design/2026-06-07-task-md-schema-真相源-validate-and-titleprefix.md)。
 
 ## 🚀 v0.8.0 上线 — 布丁 backlog ↔ OB task md 自动镜像(MVP)(2026-06-04)
 

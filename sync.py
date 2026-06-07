@@ -39,6 +39,7 @@ import sys                       # 退出码 + stderr
 import tempfile                  # --create-task dry-run 时把生成的 task md 写临时文件解析(不污染 vault)
 import time                      # 飞书 base/v3 code=5000 限流退避重试
 import urllib.parse              # Obsidian URL Scheme 编码(中文/空格)
+from dataclasses import dataclass  # v0.9.0: TaskMdField schema 真相源
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -48,6 +49,89 @@ try:
 except ImportError:
     print("❌ 缺少依赖: pip install pyyaml", file=sys.stderr)
     sys.exit(1)
+
+
+# ============================================================
+# v0.9.0(2026-06-07): task md frontmatter schema 真相源
+# ============================================================
+# 背景: handoff `2026-06-07-OB-CC手工创建task-md缺Macro-v2等效路径` —
+# OB CC 手写 task md 时与 Macro v2 输出漂移, schema 散布 4 处(parse_task_md /
+# _build_task_md_content_from_params / Macro v2 / task-template.md), 没单一真相源.
+# 本 schema 固化到 sync.py 顶部 dataclass, parse / build / validate 三路都引用,
+# 加新字段只需改一处, OB 端 rules 文档反向链接到 commit permalink.
+
+@dataclass(frozen=True)
+class TaskMdField:
+    """task md frontmatter 单字段定义(真相源)"""
+    name: str                                      # yaml key
+    required: bool = False                         # 缺 → validate 报 error
+    type: str = "str"                              # str / bool / int / float / list / wikilink / date / iso_datetime
+    enum: Optional[tuple] = None                   # 枚举白名单(None = 非枚举)
+    default_empty: str = ""                        # 模板渲染空值(如 "[]" / "false")
+    sync_to_feishu: bool = True                    # 推飞书? OB-only 字段设 False
+    feishu_select: bool = False                    # 走飞书 select 字段(配合 validate_select_value)
+    note: str = ""                                 # 给 validate 报告 / 文档生成用
+
+
+# 字段顺序 = 模板渲染顺序; 加新字段在合适位置插入
+TASK_MD_SCHEMA: tuple[TaskMdField, ...] = (
+    TaskMdField("priority", type="str",
+                enum=("P0", "P1", "P2", "P3"), feishu_select=True,
+                note="价值优先级(纯价值维度,不含时间)"),
+    TaskMdField("status", required=True, type="str",
+                enum=("todo", "doing", "subdone", "done", "block", "cancel", "idea"),
+                default_empty="todo", feishu_select=True),
+    TaskMdField("today", required=True, type="bool", default_empty="false"),
+    TaskMdField("today_history", required=True, type="list", default_empty="[]",
+                note="今日历史(每次进 today 追加一日);与 today_source_history 长度一致(lockstep)"),
+    TaskMdField("today_source", type="str",
+                enum=("planned", "unplanned"), sync_to_feishu=False),
+    TaskMdField("today_source_history", required=True, type="list", default_empty="[]",
+                sync_to_feishu=False,
+                note="与 today_history 一一对应,OB-only(不推飞书)"),
+    TaskMdField("created", required=True, type="iso_datetime",
+                note="ISO 8601 北京时间;无引号"),
+    TaskMdField("due", type="date"),
+    TaskMdField("done_date", type="date"),
+    TaskMdField("category", type="str", feishu_select=True,
+                enum=("产品项目", "杂务", "技能工具", "领域学习")),
+    TaskMdField("subcategory", type="list", feishu_select=True,
+                note="非产品项目分支(杂务/技能工具/领域学习)二级分类;产品项目分支应为空"),
+    TaskMdField("project_minor", type="list", feishu_select=True,
+                note="产品项目分支三级分类;非产品项目分支应为空(白名单见飞书)"),
+    TaskMdField("adhd_priority", type="str",
+                enum=("待抢救", "有 DDL", "自由待办"), feishu_select=True),
+    TaskMdField("estimate_hours", type="float"),
+    TaskMdField("actual_hours", type="float"),
+    TaskMdField("efficiency", type="str",
+                enum=("高", "中", "低"), feishu_select=True),
+    TaskMdField("quality", type="str",
+                enum=("高", "中", "低"), feishu_select=True),
+    TaskMdField("parent_project", type="wikilink",
+                note="最终归属(选小类用小类名,否则大类名);非空 → 文件名/H1 加「【<名>】」前缀"),
+    TaskMdField("parent_subproject", type="wikilink", sync_to_feishu=False,
+                note="OB-only,不推飞书"),
+    TaskMdField("parent_task", type="wikilink"),
+    TaskMdField("parent_inspiration", type="wikilink"),
+    TaskMdField("日志", required=True, type="wikilink",
+                note="形如 [[journals/YYYY-MM-DD]]"),
+    TaskMdField("feishu_record", type="str",
+                note="CREATE 后由 sync.py 回填,人不手改"),
+    TaskMdField("feishu_url", type="str",
+                note="CREATE 后由 sync.py 回填,人不手改"),
+    TaskMdField("iteration_week", type="list"),
+    TaskMdField("iteration_month", type="list"),
+    TaskMdField("completion_month", type="str", note="完成时自动算"),
+    TaskMdField("tags", required=True, type="list", default_empty="[task]"),
+)
+
+
+def task_md_schema_field(name: str) -> Optional[TaskMdField]:
+    """按 name 查 schema 字段(字段总数 ~28, O(n) 够用)"""
+    for f in TASK_MD_SCHEMA:
+        if f.name == name:
+            return f
+    return None
 
 
 # ============================================================
@@ -3332,11 +3416,325 @@ def push_journal(file_path: Path, apply: bool = False, only_completed: bool = Fa
     print(f"{'='*60}\n")
 
 
+def validate_task_md(path: Path, apply: bool = False) -> int:
+    """v0.9.0(2026-06-07):校验 task md 是否对齐 Macro v2 schema
+
+    校验维度(对齐 docs/design/2026-06-07-...md spec):
+      1. frontmatter 必填字段存在(TaskMdField.required)
+      2. enum 字段值在白名单(TaskMdField.enum)
+      3. wikilink 字段格式正确(parent_project/parent_task 等)
+      4. 文件名前缀对齐 parent_project(产品项目分支)/category-sub(其他分支)
+      5. H1 对齐文件名(去日期前缀)
+      6. today_history / today_source_history lockstep 长度一致
+
+    --apply 机械修复:
+      - 文件名/H1/完成标记行 前缀缺失 → 自动 mv 文件 + 改 H1 + 改完成标记
+      - subcategory/project_minor 非法 enum 值 → 清空对应字段
+      - today_history / source_history lockstep 不齐 → 走 _normalize_today_history_lockstep
+
+    Args:
+        path: task md 路径
+        apply: True = 机械修复;False = dry-run 报告
+
+    Returns:
+        exit code: 0 = 全 pass / 1 = 有 error 未修复
+    """
+    if not path.exists():
+        print(f"❌ 文件不存在: {path}", file=sys.stderr)
+        return 1
+
+    config = load_config()
+    text = path.read_text(encoding="utf-8")
+    fm, _, body = parse_frontmatter(text)
+    if fm is None:
+        print(f"❌ 文件无 frontmatter,不是合法 task md: {path}", file=sys.stderr)
+        return 1
+
+    issues: list[dict] = []     # 每条: {severity, code, message, fix}
+    auto_fixes: list[dict] = [] # --apply 时要执行的修复 {action, ...}
+
+    # === 1. 必填字段 ===
+    for schema_field in TASK_MD_SCHEMA:
+        if not schema_field.required:
+            continue
+        v = fm.get(schema_field.name)
+        # list 字段:裸空 / [] / None 都算"模板裸空"合法(对齐 task-template.md 风格)
+        # 半残问题(today_history 1 条 / source 0 条)由 lockstep 校验单独抓,这里不重复报
+        if schema_field.type == "list":
+            continue
+        is_missing = v is None or (isinstance(v, str) and not v.strip())
+        if is_missing:
+            issues.append({
+                "severity": "error",
+                "code": "missing_required",
+                "message": f"必填字段 `{schema_field.name}` 缺失或为空 — {schema_field.note or '(见 schema)'}",
+                "fix": f"手动补 `{schema_field.name}: ...` 行(--apply 不自动修)",
+            })
+
+    # === 2. enum 字段白名单 ===
+    for schema_field in TASK_MD_SCHEMA:
+        if not schema_field.enum:
+            continue
+        v = fm.get(schema_field.name)
+        if v is None or v == "":
+            continue
+        # list 类(如 subcategory),逐项校验
+        if isinstance(v, list):
+            invalid = [str(x) for x in v if str(x).strip() and str(x).strip() not in schema_field.enum]
+            if invalid:
+                issues.append({
+                    "severity": "warn",
+                    "code": "invalid_enum_list",
+                    "message": f"`{schema_field.name}` 含白名单外值 {invalid}(白名单: {list(schema_field.enum)})",
+                    "fix": "--apply 清空该字段(走模板裸空)",
+                })
+                auto_fixes.append({"action": "clear_field", "field": schema_field.name})
+        else:
+            sv = str(v).strip()
+            if sv and sv not in schema_field.enum:
+                issues.append({
+                    "severity": "error",
+                    "code": "invalid_enum",
+                    "message": f"`{schema_field.name}` = {sv!r} 不在白名单 {list(schema_field.enum)}",
+                    "fix": "--apply 清空该字段(避免推飞书时撞 invalid_request)",
+                })
+                auto_fixes.append({"action": "clear_field", "field": schema_field.name})
+
+    # === 3. wikilink 字段格式 ===
+    for schema_field in TASK_MD_SCHEMA:
+        if schema_field.type != "wikilink":
+            continue
+        v = fm.get(schema_field.name)
+        if v is None or v == "":
+            continue
+        sv = str(v).strip()
+        # 合法格式: "[[X]]" 或 "[[X|Y]]"
+        if not re.match(r'^\[\[[^\]]+\]\]$', sv):
+            issues.append({
+                "severity": "warn",
+                "code": "wikilink_format",
+                "message": f"`{schema_field.name}` = {sv!r} 不是 wikilink 格式(期望 \"[[X]]\")",
+                "fix": "手动改成 `[[X]]` 形式",
+            })
+
+    # === 4. 文件名前缀 / H1 / 完成标记三者自洽 ===
+    # 设计:**尊重文件名现状**(老数据可能 parent_project 空但文件名有前缀)。
+    #   - 三者(文件名 / H1 / 完成标记行)前缀必须一致(error)
+    #   - frontmatter 推导的 expected_prefix 与文件名前缀不一致 → warn(建议补 parent_project)
+    pp = ""
+    if fm.get("parent_project"):
+        m = re.match(r'^\[\[([^\]|]+)(?:\|[^\]]*)?\]\]$', str(fm["parent_project"]).strip())
+        pp = m.group(1).strip() if m else str(fm["parent_project"]).strip()
+    cat = str(fm.get("category") or "").strip()
+    sub_list_raw = fm.get("subcategory")
+    sub_list = [str(s).strip() for s in sub_list_raw if str(s).strip()] if isinstance(sub_list_raw, list) else []
+    expected_prefix = _compute_title_prefix(pp, cat, sub_list)
+
+    stem = path.stem
+    m_date = re.match(r'^(\d{4}-\d{2}-\d{2})-(.+)$', stem)
+    filename_prefix = ""
+    title_in_filename = ""
+    if not m_date:
+        issues.append({
+            "severity": "error",
+            "code": "filename_no_date",
+            "message": f"文件名 {stem!r} 缺 YYYY-MM-DD 日期前缀",
+            "fix": "手动改文件名(--apply 不自动修)",
+        })
+    else:
+        date_part = m_date.group(1)
+        rest = m_date.group(2)
+        # 解析文件名实际前缀: 起始处的 【...】 段
+        m_pref = re.match(r'^(【[^】]+】)(.*)$', rest)
+        if m_pref:
+            filename_prefix = m_pref.group(1)
+            title_in_filename = m_pref.group(2)
+        else:
+            title_in_filename = rest
+
+        # 4a. 期望 vs 实际前缀
+        if expected_prefix and not filename_prefix:
+            # frontmatter 说应该有前缀,但文件名没 → error
+            expected_filename = f"{date_part}-{expected_prefix}{title_in_filename}.md"
+            issues.append({
+                "severity": "error",
+                "code": "filename_prefix_missing",
+                "message": (f"文件名缺前缀 {expected_prefix!r}\n"
+                            f"     当前:{stem}.md\n"
+                            f"     期望:{expected_filename}"),
+                "fix": "--apply 自动 mv 文件 + 改 H1 + 改完成标记行",
+            })
+            auto_fixes.append({
+                "action": "add_filename_prefix",
+                "expected_prefix": expected_prefix,
+                "new_filename": expected_filename,
+            })
+        elif expected_prefix and filename_prefix and expected_prefix != filename_prefix:
+            # 两者都有但不一致 → warn(可能用户改名后 frontmatter 没跟,或反之)
+            issues.append({
+                "severity": "warn",
+                "code": "prefix_mismatch",
+                "message": (f"文件名前缀 {filename_prefix!r} 与 frontmatter 推导的 {expected_prefix!r} 不一致\n"
+                            f"     文件名:{stem}.md\n"
+                            f"     frontmatter:parent_project={pp!r}, category={cat!r}\n"
+                            f"     如需对齐:手动改 frontmatter 或文件名(--apply 不自动选边)"),
+                "fix": "手动决定哪边是真相源",
+            })
+        elif not expected_prefix and filename_prefix:
+            # frontmatter 推不出前缀(parent_project 空 + 非 subcategory 分支),但文件名有前缀
+            # 这是 vault 历史数据常见情况 — 给 warn 建议补 parent_project
+            inner = filename_prefix.strip("【】")
+            issues.append({
+                "severity": "warn",
+                "code": "filename_prefix_no_frontmatter",
+                "message": (f"文件名前缀 {filename_prefix!r} 但 frontmatter parent_project 空\n"
+                            f"     建议补 `parent_project: \"[[{inner}]]\"` 以让飞书「产品项目」link 字段同步生效"),
+                "fix": "手动补 frontmatter(--apply 不自动改,避免猜测)",
+            })
+
+    # === 5. H1 / 完成标记 必须与文件名前缀一致(三者自洽)===
+    if m_date:
+        h1_m = re.search(r'^# +(.+?)$', body, re.MULTILINE)
+        # 计算"目标前缀"用于三者对齐:有 expected_prefix 用它,否则用 filename_prefix
+        target_prefix = expected_prefix if (expected_prefix and not filename_prefix) else filename_prefix
+        target_title_body = title_in_filename or stem
+        expected_h1 = f"{target_prefix}{target_title_body}"
+        if h1_m:
+            h1_text = h1_m.group(1).strip()
+            if h1_text != expected_h1 and target_prefix:
+                issues.append({
+                    "severity": "warn",
+                    "code": "h1_filename_mismatch",
+                    "message": (f"H1 与文件名(去日期前缀)不一致\n"
+                                f"     H1:{h1_text!r}\n"
+                                f"     期望:{expected_h1!r}"),
+                    "fix": "--apply 跟随文件名前缀修复时一起改" if expected_prefix else "手动改 H1",
+                })
+        else:
+            issues.append({
+                "severity": "warn",
+                "code": "h1_missing",
+                "message": "正文找不到 # H1 标题",
+                "fix": "手动加 `# <标题>` 行",
+            })
+
+    # === 6. today_history / today_source_history lockstep ===
+    th = fm.get("today_history")
+    tsh = fm.get("today_source_history")
+    th_list = th if isinstance(th, list) else ([] if th in (None, "") else [str(th)])
+    tsh_list = tsh if isinstance(tsh, list) else ([] if tsh in (None, "") else [str(tsh)])
+    if len(th_list) != len(tsh_list):
+        issues.append({
+            "severity": "error",
+            "code": "lockstep_mismatch",
+            "message": (f"today_history({len(th_list)} 条) 与 today_source_history({len(tsh_list)} 条) "
+                        f"长度不一致(必须 lockstep)"),
+            "fix": "--apply 复用 --repair-history 算法对齐",
+        })
+        auto_fixes.append({
+            "action": "fix_lockstep",
+            "today_history": th_list,
+            "today_source_history": tsh_list,
+        })
+
+    # === 报告 ===
+    pass_count = len(TASK_MD_SCHEMA) - len(issues)  # 粗略;严格说要按维度算
+    err_count = sum(1 for i in issues if i["severity"] == "error")
+    warn_count = sum(1 for i in issues if i["severity"] == "warn")
+
+    print(f"\n{'=' * 60}")
+    print(f"🔍 校验 task md schema: {path.name}")
+    if expected_prefix:
+        print(f"    期望前缀: {expected_prefix}")
+    print(f"{'=' * 60}")
+    if not issues:
+        print(f"  ✅ 全部通过(无 error,无 warn)")
+    for it in issues:
+        icon = "❌" if it["severity"] == "error" else "⚠️ "
+        print(f"  {icon} [{it['code']}] {it['message']}")
+        if it.get("fix"):
+            print(f"     修复:{it['fix']}")
+    print(f"\n📊 总计:{err_count} error / {warn_count} warn")
+
+    # === --apply 机械修复 ===
+    if apply and auto_fixes:
+        print(f"\n🔧 --apply 跑机械修复({len(auto_fixes)} 项):")
+        # fm_updates 复用 update_md_frontmatter — 它已经处理多行 yaml list 续行(v0.5.4)
+        # 空字符串触发"key:"裸空(removal 语义),list 走 _format_yaml_value inline 化
+        fm_updates: dict = {}
+        new_path = path
+        new_body = body
+        for fx in auto_fixes:
+            if fx["action"] == "clear_field":
+                fm_updates[fx["field"]] = ""
+                print(f"  ✓ 清空字段 `{fx['field']}`")
+            elif fx["action"] == "fix_lockstep":
+                # 对齐策略:短的补 "" 到长的长度(保守,不丢历史)
+                target_len = max(len(fx["today_history"]), len(fx["today_source_history"]))
+                fixed_th = list(fx["today_history"]) + [""] * (target_len - len(fx["today_history"]))
+                fixed_tsh = list(fx["today_source_history"]) + [""] * (target_len - len(fx["today_source_history"]))
+                fm_updates["today_history"] = fixed_th
+                fm_updates["today_source_history"] = fixed_tsh
+                print(f"  ✓ today_history / source_history lockstep 对齐(target_len={target_len})")
+            elif fx["action"] == "add_filename_prefix":
+                new_prefix = fx["expected_prefix"]
+                # 改 H1(仅当不已带前缀)
+                new_body = re.sub(
+                    r'^(# +)(.+?)$',
+                    lambda m: (f"{m.group(1)}{new_prefix}{m.group(2)}"
+                               if not m.group(2).startswith(new_prefix) else m.group(0)),
+                    new_body, count=1, flags=re.MULTILINE,
+                )
+                # 改完成标记行(在 ## ✅ 完成标记 段下第一个 - [ ])
+                marker_idx = new_body.find("## ✅ 完成标记")
+                if marker_idx >= 0:
+                    before = new_body[:marker_idx]
+                    after = new_body[marker_idx:]
+                    after = re.sub(
+                        r'^(\s*-\s+\[[ x\-/]\]\s+)(.+?)$',
+                        lambda m: (f"{m.group(1)}{new_prefix}{m.group(2)}"
+                                   if not m.group(2).startswith(new_prefix)
+                                   and not re.match(r'^\[.+?\]\(.+?\)\s*$', m.group(2).strip())
+                                   else m.group(0)),
+                        after, count=1, flags=re.MULTILINE,
+                    )
+                    new_body = before + after
+                print(f"  ✓ 文件名前缀:H1 + 完成标记行已加 {new_prefix!r}")
+                new_path = path.parent / fx["new_filename"]
+
+        # 1) body 改动直接落盘(走完整文件改写,因 update_md_frontmatter 也走 read+write)
+        if new_body != body:
+            fm_match = re.match(r'^(---\s*\n.*?\n---\s*\n)(.*)$', text, re.DOTALL)
+            if fm_match:
+                path.write_text(fm_match.group(1) + new_body + ("" if new_body.endswith("\n") else "\n"),
+                                encoding="utf-8")
+        # 2) frontmatter 改动走现成 update_md_frontmatter(处理多行 list 续行)
+        if fm_updates:
+            update_md_frontmatter(path, fm_updates)
+        # 3) 文件名 rename(在内容改完之后)
+        if new_path != path:
+            path.rename(new_path)
+            print(f"  ✓ 文件已改名: {path.name} → {new_path.name}")
+            path = new_path
+
+        print(f"\n✅ --apply 修复完成。再次跑 --validate-task-md 确认 0 error。")
+        return 0
+
+    if err_count > 0 and not apply:
+        return 1
+    return 0
+
+
 def push_task_md(md_path: Path, apply: bool = False, _silent_fail: bool = False,
-                 strict_soft: bool = False, strict_select: bool = False) -> Optional[dict]:
+                 strict_soft: bool = False, strict_select: bool = False,
+                 skip_today_flag: bool = False) -> Optional[dict]:
     """单 task md 推送到飞书(CREATE/UPDATE) — 2026-05-25 上线
 
     用法:python3 sync.py --task-md path/to/task.md [--apply]
+
+    skip_today_flag(v0.8.6,2026-06-06):批量补推历史日期场景(`--push-all-today --push-date 2026-06-05`)
+    专用,从 payload 里 pop 掉 today_flag 对应的飞书字段,避免把 OB 当下 today=false
+    误覆盖到飞书「是否今日」字段。默认 False(原行为不变)。
 
     流程:
     1. (v0.4.0+ 2026-05-28)路径不存在 → vault 内 rglob 同名 fallback
@@ -3462,6 +3860,20 @@ def push_task_md(md_path: Path, apply: bool = False, _silent_fail: bool = False,
         print(f"    👥 用户故事: {prev}{'...' if len(task['user_story']) > 60 else ''}")
 
     fields = build_fields_payload(task, config, VAULT_ROOT, existing_delivery="")
+
+    # v0.8.6(2026-06-06):补推历史日期场景下 today_flag 字段不写回飞书
+    # 触发:push_all_today_task_md(date_iso=昨日)→ 单条 push_task_md(skip_today_flag=True)
+    # 原因:OB 当下 today 字段已被昨晚或今早 pull/手动改成 false,直接 push 会把飞书侧
+    # 「是否今日」=true 覆盖成 false,污染用户在飞书看板上的勾选状态。本字段交由用户
+    # 在飞书看板手动管(确认后用 --pull-today 拉回 OB,清 today_history 里对应日期)
+    if skip_today_flag:
+        today_field_name = (
+            config.get("task_md_fields", {}).get("today_flag") or {}
+        ).get("field_name")
+        if today_field_name and today_field_name in fields:
+            del fields[today_field_name]
+            print(f"    ⏭  跳过 today_flag → 飞书「{today_field_name}」字段(补推历史日期,不动当下状态)")
+
     print(f"\n    Payload: {json.dumps(fields, ensure_ascii=False, indent=6)[:800]}")
 
     # v0.7.9(2026-06-02):select 字段白名单校验输出(配合 _select_warnings / _select_dropped_invalid)
@@ -3607,6 +4019,38 @@ def push_task_md(md_path: Path, apply: bool = False, _silent_fail: bool = False,
     return {"success": True, "action": action, "record_id": record_id, "path": str(md_path)} if _silent_fail else None
 
 
+def _compute_title_prefix(parent_project: str, category: str, subcategory_list: list) -> str:
+    """v0.9.0(2026-06-07):对齐 Macro v2 titlePrefix 拼接逻辑
+
+    Macro v2 行为(quickadd-快记任务-v2-task-md.js):
+    - 产品项目分支:state.titlePrefix = `【${state.subName || state.parentName}】`
+      → 最终归属 = 小类名 ?? 大项目名;在 CLI 层就是 parent_project 一个字段
+    - 非产品项目分支:有 sub → `【${category}-${sub1}-${sub2}...】`,无 sub → `【${category}】`
+
+    Args:
+        parent_project: "[[X]]" / "X" / "" — 已传 _build... 处理过(裸名或带括号都容)
+        category: "产品项目" / "杂务" / "技能工具" / "领域学习" / ""
+        subcategory_list: list[str],非产品项目分支的二级分类(如 ["财务", "家务"])
+
+    Returns:
+        "【<X>】" 或 "" (无前缀)
+    """
+    pp = (parent_project or "").strip().lstrip("[").rstrip("]").strip()
+    if pp:
+        return f"【{pp}】"
+    cat = (category or "").strip()
+    # 产品项目分支:parent_project 空 = 用户没选具体项目 → 无前缀(对齐 Macro v2 行为,
+    # 永远不生成「【产品项目】」这种把大类名当前缀的怪标题)
+    if cat == "产品项目":
+        return ""
+    subs = [s.strip() for s in (subcategory_list or []) if s and s.strip()]
+    if cat and subs:
+        return f"【{cat}-{'-'.join(subs)}】"
+    if cat:
+        return f"【{cat}】"
+    return ""
+
+
 def _build_task_md_content_from_params(args, config: dict) -> tuple:
     """v0.7.0(2026-05-31):外部业务参数 → 规范 OB task md 内容字符串
 
@@ -3645,7 +4089,6 @@ def _build_task_md_content_from_params(args, config: dict) -> tuple:
         return str(v).strip() if v is not None else ""
 
     title = _s(args.title)
-    safe_title = re.sub(r'[/\\*?:"<>|]', "_", title).strip()
 
     status = _s(args.status) or "todo"              # 默认 todo;整体状态由调用方/人决定,不强行 done
     priority = _s(args.priority)                    # P0/P1/P2/P3,空 = 不推
@@ -3664,6 +4107,16 @@ def _build_task_md_content_from_params(args, config: dict) -> tuple:
     retrospective = _s(args.retrospective)         # → ## 🪞 复盘
     parent_task = _s(getattr(args, "parent_task", ""))  # 父任务 stem/[[stem]] → frontmatter parent_task
     parent_project = _s(getattr(args, "parent_project", ""))  # 所属产品项目 → frontmatter parent_project
+
+    # v0.9.0(2026-06-07):subcategory list — 非产品项目分支的二级分类(对齐 Macro v2)
+    # 走 argparse action="append",每条 --subcategory <s>;CLI 不传 → []
+    subcategory_list = [s.strip() for s in (getattr(args, "subcategory", None) or []) if s and s.strip()]
+
+    # v0.9.0:titlePrefix 对齐 Macro v2 — 产品项目分支用 parent_project,其他分支用 category[-sub...]
+    # 影响:文件名 / H1 / 完成标记行 / safe_title 都加 prefix
+    title_prefix = _compute_title_prefix(parent_project, category, subcategory_list)
+    title_with_prefix = f"{title_prefix}{title}"
+    safe_title = re.sub(r'[/\\*?:"<>|]', "_", title_with_prefix).strip()
 
     # today 语义:有 today_source(planned/unplanned)= 今日 task → today: true
     # 无 today_source = 不在今日清单 → today: false
@@ -3707,6 +4160,12 @@ def _build_task_md_content_from_params(args, config: dict) -> tuple:
     else:
         parent_project_line = "parent_project:"
 
+    # v0.9.0:subcategory 行 — 非空 → YAML inline list,空 → 裸 `subcategory:`
+    subcategory_line = (
+        f"subcategory: [{', '.join(subcategory_list)}]"
+        if subcategory_list else "subcategory:"
+    )
+
     # === frontmatter:保留 task 标准全字段(OB base/dataview schema,留空也留)===
     frontmatter = f"""---
 {_fm("priority", priority)}
@@ -3718,7 +4177,7 @@ today: {today_bool}
 created: {created_iso}
 {_fm("done_date", done_date)}
 {_fm("category", category)}
-subcategory:
+{subcategory_line}
 project_minor:
 {_fm("adhd_priority", adhd_priority)}
 {_fm("estimate_hours", estimate_hours)}
@@ -3747,7 +4206,7 @@ tags:
         return f"## {heading}\n{content_text}".rstrip()
 
     parts = [
-        f"# {title}",
+        f"# {title_with_prefix}",
         _sec("👥 用户故事", user_story),
         _sec("✅ 验收条件", acceptance),
         _sec("💡 执行思路", thinking),
@@ -3757,7 +4216,7 @@ tags:
         _sec("🔗 相关资料", log_link),
         _sec("🪞 复盘", retrospective),
         # 完成标记段:dataview TASK 渲染 + CREATE 后 inject 飞书链接
-        _sec("✅ 完成标记", f"- [ ] {title}"),
+        _sec("✅ 完成标记", f"- [ ] {title_with_prefix}"),
     ]
     body = "\n\n".join(parts) + "\n"
 
@@ -4375,23 +4834,36 @@ def migrate_today_history_quoted(apply: bool = False) -> None:
 
 
 def push_all_today_task_md(apply: bool = False, strict_soft: bool = False,
-                            strict_select: bool = False) -> None:
+                            strict_select: bool = False,
+                            date_iso: Optional[str] = None) -> None:
     """v0.4.0+ Step 3(2026-05-28):批量推 OB today=true task md 到飞书(forward 方向)
 
     用法:
-        python3 sync.py --push-all-today              # dry-run 看哪些会推
-        python3 sync.py --push-all-today --apply      # 真推
+        python3 sync.py --push-all-today                              # dry-run 推今日
+        python3 sync.py --push-all-today --apply                      # 真推今日
+        python3 sync.py --push-all-today --push-date 2026-06-05       # v0.8.6:dry-run 补推某日
+        python3 sync.py --push-all-today --push-date 2026-06-05 --apply  # 真推某日
 
     场景:AI 助手 / Claude Code 在 OB 端补充了多条 task md 的「## 📦 交付」/
     「## 🪞 复盘」/「## 💡 执行思路」等 H2 段后,一键把所有今日 task 的改动推到飞书看板
     (对称 pull-today 飞书 → OB 的反向操作)
 
     扫描范围:全 vault(对齐 v0.4.0 Step 3 `_scan_ob_task_md_by_feishu_record` 的全 vault 扫)
-    过滤(v0.5.4 起 union):
-      - OB today=true → 推(同步所有字段)
-      - 飞书 是否今日=true 但 OB today=false → 推(同步"取消今日",把 false 写回飞书)
-    旧版只筛 OB today=true,导致用户在 OB 端把 today 改成 false 时这条被过滤,
-    飞书侧 是否今日 永远停留在 true。
+
+    两种模式(v0.8.6,2026-06-06):
+    ① 今日模式(date_iso=None 或 == 今天)— 原行为:
+       - OB today=true → 推(同步所有字段)
+       - 飞书 是否今日=true 但 OB today=false → 推「取消今日」(把 false 写回飞书)
+
+    ② 补推历史模式(date_iso=昨日/更早日期)— v0.8.6 新增:
+       - 解决「第二天早上补推前一日」的痛点 — 当下 OB today=false / 飞书 是否今日=false
+         的昨日 task 在旧逻辑里被全部过滤,只能一条条推
+       - 筛 OB today_history 含 date_iso 的全部 task → 推
+       - 不走「取消今日」union(飞书侧 是否今日 是当下状态,跟历史日期无关)
+       - 强制 skip_today_flag=True:本次 push 不写回 today_flag → 飞书「是否今日」字段
+         (避免把昨日 OB 当下 false 错误覆盖到飞书今日勾选)
+       - 飞书侧今日勾选交由用户自己在看板上手动管,确认后 `--pull-today` 拉回 OB 自动清
+         today + today_history 里对应日期(参考 pull_today_from_feishu 的 plan_set_false 分支)
 
     冲突策略:OB 覆盖飞书(对称 pull-today 的"飞书覆盖 OB")
     防御:`build_fields_payload` 内部已 handle 空字段(空字段不写),不会清空飞书侧已有数据
@@ -4399,8 +4871,15 @@ def push_all_today_task_md(apply: bool = False, strict_soft: bool = False,
     config = load_config()
     vault_root = find_vault_root()
 
+    today_iso = _now_with_tz(config).strftime("%Y-%m-%d")
+    is_historical = bool(date_iso) and date_iso != today_iso
+
     print(f"\n{'='*60}")
-    print(f"🎯 push-all-today: 批量推 OB today=true task md → 飞书 forward")
+    if is_historical:
+        print(f"🎯 push-date={date_iso}: 批量补推 OB today_history 含 {date_iso} 的 task md → 飞书")
+        print(f"📌 模式:补推历史(skip_today_flag=True,today_flag 字段不写回飞书)")
+    else:
+        print(f"🎯 push-all-today: 批量推 OB today=true task md → 飞书 forward")
     if not apply:
         print(f"📌 dry-run(--apply 才真写)")
     print(f"{'='*60}\n")
@@ -4409,32 +4888,44 @@ def push_all_today_task_md(apply: bool = False, strict_soft: bool = False,
     print("⏳ 扫 OB vault task md(全 vault,按 feishu_record 建索引)...")
     ob_index = _scan_ob_task_md_by_feishu_record(vault_root)
 
-    # v0.5.4(2026-05-28):拉飞书侧「是否今日」=true 的 record_id 列表,
-    # 让"OB 把 today: true 改成 false"这种"取消今日"场景也能被推上去
-    # (原版只筛 OB today=true → 改 false 的 task 被直接过滤,飞书侧永远不更新)
-    print("⏳ 拉飞书侧 是否今日=true record_id 列表(为侦测取消今日)...")
-    feishu_today_rids: set = set()
-    try:
-        all_records, all_ids, fields_meta = _fetch_all_records_from_feishu(config)
-        feishu_today_rids = {rid for rid, _ in filter_today_tasks(all_records, all_ids, fields_meta, config)}
-        print(f"✅ 飞书 是否今日=true: {len(feishu_today_rids)} 条")
-    except Exception as e:
-        print(f"⚠️  拉飞书侧 是否今日=true 列表失败({e}),只推 OB today=true(取消今日场景将漏推)")
+    if is_historical:
+        # v0.8.6:补推历史模式 — 筛 today_history 含 date_iso 的 task
+        # 不拉飞书侧 是否今日 union(那是当下状态,跟历史日期无关)
+        push_rids = {
+            rid for rid, entry in ob_index.items()
+            if date_iso in (entry.get("today_history") or [])
+        }
+        cancel_today_rids: set = set()
+        ob_today_rids = push_rids  # 仅用于汇总打印,全部走 today_history 命中
+        today_entries = [(rid, ob_index[rid]) for rid in push_rids]
+        print(f"✅ 待补推 {len(today_entries)} 条(today_history 含 {date_iso})\n")
+    else:
+        # v0.5.4(2026-05-28):拉飞书侧「是否今日」=true 的 record_id 列表,
+        # 让"OB 把 today: true 改成 false"这种"取消今日"场景也能被推上去
+        # (原版只筛 OB today=true → 改 false 的 task 被直接过滤,飞书侧永远不更新)
+        print("⏳ 拉飞书侧 是否今日=true record_id 列表(为侦测取消今日)...")
+        feishu_today_rids: set = set()
+        try:
+            all_records, all_ids, fields_meta = _fetch_all_records_from_feishu(config)
+            feishu_today_rids = {rid for rid, _ in filter_today_tasks(all_records, all_ids, fields_meta, config)}
+            print(f"✅ 飞书 是否今日=true: {len(feishu_today_rids)} 条")
+        except Exception as e:
+            print(f"⚠️  拉飞书侧 是否今日=true 列表失败({e}),只推 OB today=true(取消今日场景将漏推)")
 
-    # 分类:
-    # - ob_today_true: OB today=true → 推所有字段(原行为)
-    # - cancel_today: 飞书=true 但 OB today=false / 缺失 → 推 today=false(取消今日)
-    ob_today_rids = {rid for rid, entry in ob_index.items() if entry["today"]}
-    cancel_today_rids = {
-        rid for rid in feishu_today_rids
-        if rid in ob_index and not ob_index[rid]["today"]
-    }
-    push_rids = ob_today_rids | cancel_today_rids
-    today_entries = [(rid, ob_index[rid]) for rid in push_rids]
-    print(f"✅ 待推 {len(today_entries)} 条(today=true: {len(ob_today_rids)},取消今日: {len(cancel_today_rids)})\n")
+        ob_today_rids = {rid for rid, entry in ob_index.items() if entry["today"]}
+        cancel_today_rids = {
+            rid for rid in feishu_today_rids
+            if rid in ob_index and not ob_index[rid]["today"]
+        }
+        push_rids = ob_today_rids | cancel_today_rids
+        today_entries = [(rid, ob_index[rid]) for rid in push_rids]
+        print(f"✅ 待推 {len(today_entries)} 条(today=true: {len(ob_today_rids)},取消今日: {len(cancel_today_rids)})\n")
 
     if not today_entries:
-        print("⚠️  无可推 task md(OB today=true 与 飞书 是否今日=true 均空),退出")
+        if is_historical:
+            print(f"⚠️  无 today_history 含 {date_iso} 的 task md,退出")
+        else:
+            print("⚠️  无可推 task md(OB today=true 与 飞书 是否今日=true 均空),退出")
         return
 
     # 逐条 push
@@ -4453,7 +4944,8 @@ def push_all_today_task_md(apply: bool = False, strict_soft: bool = False,
         except Exception:
             print(f"📍 {p}{' [取消今日]' if is_cancel else ''}")
         result = push_task_md(p, apply=apply, _silent_fail=True,
-                              strict_soft=strict_soft, strict_select=strict_select)
+                              strict_soft=strict_soft, strict_select=strict_select,
+                              skip_today_flag=is_historical)
         if result is None:
             # 不应该到这里(_silent_fail=True 必返 dict)
             fail_count += 1
@@ -4472,8 +4964,12 @@ def push_all_today_task_md(apply: bool = False, strict_soft: bool = False,
             failures.append((p, result.get("error", "未知错误")))
 
     print(f"\n{'='*60}")
-    print(f"📊 push-all-today {'apply' if apply else 'dry-run'} 汇总:")
-    print(f"  ✅ 成功: {success_count}({create_count} CREATE / {update_count} UPDATE,其中 {cancel_count} 条为取消今日)")
+    if is_historical:
+        print(f"📊 push-date={date_iso} {'apply' if apply else 'dry-run'} 汇总:")
+        print(f"  ✅ 成功: {success_count}({create_count} CREATE / {update_count} UPDATE,today_flag 字段已跳过)")
+    else:
+        print(f"📊 push-all-today {'apply' if apply else 'dry-run'} 汇总:")
+        print(f"  ✅ 成功: {success_count}({create_count} CREATE / {update_count} UPDATE,其中 {cancel_count} 条为取消今日)")
     print(f"  ❌ 失败: {fail_count}")
     if failures:
         print(f"\n失败详情:")
@@ -6106,6 +6602,10 @@ def main():
                         help="2026-05-26 上线:飞书「是否今日」=true → OB task md frontmatter today=true(双向对齐)")
     parser.add_argument("--push-all-today", action="store_true",
                         help="v0.4.0+ Step 3(2026-05-28):反向方向 — 批量推 OB today=true task md 到飞书 forward")
+    parser.add_argument("--push-date",
+                        help="v0.8.6(2026-06-06)配合 --push-all-today 用:补推指定日期 YYYY-MM-DD 的 task "
+                             "(筛 today_history 含该日,且本次 push 不写回 today_flag → 飞书「是否今日」字段)。"
+                             "解决「第二天早上补推前一日」场景,不指定则默认推今日")
     parser.add_argument("--pull-task",
                         help="v0.5.3(2026-05-29):单条拉 — 飞书 record → OB(类 git 单条粒度,不动其他 task)。参数:task md 路径 或 record_id")
     parser.add_argument("--migrate-today-history", action="store_true",
@@ -6118,6 +6618,11 @@ def main():
     parser.add_argument("--only-completed", action="store_true",
                         help="只同步已完成 task ([x] / [-]),跳过未完成的")
     parser.add_argument("--task-md", help="task md 模式:单 task md 推送到飞书(CREATE/UPDATE)")
+    parser.add_argument("--validate-task-md",
+                        help="v0.9.0(2026-06-07):校验 task md 是否对齐 Macro v2 schema — "
+                             "frontmatter 必填字段 / enum 白名单 / 文件名「【父项目】」前缀 / "
+                             "H1 对齐 / today_history lockstep。--apply 跑机械修复(改文件名 + H1 + "
+                             "完成标记 + 清非法字段 + 修 lockstep)。OB CC 手工建 task md 后必跑")
     parser.add_argument("--resolve-project",
                         help="给 userscript 用:解析 OB 项目名(如 '00 布丁')→ 输出 JSON(含 override 命中 / 一级 record_id / 二级子 records)")
     parser.add_argument("--quickadd-options", action="store_true",
@@ -6157,7 +6662,13 @@ def main():
     parser.add_argument("--parent-project",
                         help="--create-task 所属产品项目(传项目名或 [[项目名]]):写入 OB frontmatter "
                              "parent_project,apply 时由 push_task_md 解析为飞书「产品项目」link/select。"
-                             "前提:飞书关联表存在该项目,否则该字段跳过(不阻断其他字段)")
+                             "前提:飞书关联表存在该项目,否则该字段跳过(不阻断其他字段)。"
+                             "v0.9.0:非空时文件名/H1 自动加「【<最终归属>】」前缀,对齐 Macro v2")
+    parser.add_argument("--subcategory", action="append",
+                        help="--create-task 二级分类(可重复;非产品项目分支用,如杂务的 财务/家务):"
+                             "写入 OB frontmatter subcategory list + 飞书「小类」select。"
+                             "v0.9.0:无 --parent-project 时,与 --category 组合拼文件名/H1 前缀「【<cat>-<sub1>-<sub2>】」。"
+                             "白名单外值默认宽松跳过 + warn,加 --strict-select 则拒推")
     parser.add_argument("--json", action="store_true",
                         help="--create-task 末尾输出机器可读 JSON(success/record_id/url/task_md),供外部 SOP 捕获")
     parser.add_argument("--strict-soft-sections", action="store_true",
@@ -6217,11 +6728,23 @@ def main():
         create_task_from_params(args, apply=args.apply, json_out=args.json)
         return
 
+    if args.validate_task_md:
+        exit_code = validate_task_md(Path(args.validate_task_md), apply=args.apply)
+        sys.exit(exit_code)
+
     if args.pull_today:
         pull_today_from_feishu(apply=args.apply)
     elif args.push_all_today:
+        # v0.8.6:--push-date YYYY-MM-DD 校验
+        push_date = (args.push_date or "").strip() or None
+        if push_date:
+            try:
+                datetime.strptime(push_date, "%Y-%m-%d")
+            except ValueError:
+                print(f"❌ --push-date 格式错(要 YYYY-MM-DD,如 2026-06-05): {push_date!r}", file=sys.stderr)
+                sys.exit(1)
         push_all_today_task_md(apply=args.apply, strict_soft=args.strict_soft_sections,
-                                strict_select=args.strict_select)
+                                strict_select=args.strict_select, date_iso=push_date)
     elif args.pull_task:
         pull_task_from_feishu(args.pull_task, apply=args.apply)
     elif args.pull:

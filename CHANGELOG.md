@@ -2,6 +2,109 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.9.0] - 2026-06-07 — feat:task md schema 真相源 + `--validate-task-md` + `--create-task` 补 titlePrefix(Macro v2 等效)
+
+> **触发**:OB CC 通过 `sync.py --task-md` 路径手工建 task md 时,**与 Macro v2(Cmd+P「快记任务」UserScript)输出不等效** — 文件名/H1 缺「【父项目】」前缀 + `subcategory/project_minor` 误填 + `today_source_history` 漏写。4 轮迭代才修对,根因是 schema 真相源散布 4 处(`parse_task_md` / `_build_task_md_content_from_params` / Macro v2 / `task-template.md`),没单一真相源 + 没校验工具兜底。详见 [handoff](docs/handoff/OB对接/2026-06-07-OB-CC手工创建task-md缺Macro-v2等效路径-handoff.md) + [反向回执](docs/handoff/OB对接/2026-06-07-OB-CC手工创建task-md缺Macro-v2等效路径-反向回执.md)。
+
+### 🛠 改动
+
+| 文件 | 改动点 |
+|---|---|
+| `sync.py` | 顶部加 `TaskMdField` dataclass + `TASK_MD_SCHEMA` tuple(28 字段,schema 真相源);新增 `_compute_title_prefix` helper(对齐 Macro v2 titlePrefix 拼接规则);改 `_build_task_md_content_from_params` 让 `--create-task` 自动加文件名/H1/完成标记前缀(产品项目分支用 `parent_project`,其他分支用 `category[-sub...]`);新增 `validate_task_md` + `--validate-task-md <path> [--apply]` CLI(6 维度校验 + 机械修复 — 改文件名 + H1 + 完成标记 + 清非法 enum + 修 lockstep);新增 `--subcategory` flag(可重复,非产品项目分支二级分类) |
+| `docs/design/2026-06-07-task-md-schema-真相源-validate-and-titleprefix.md` | 设计文档 |
+| `docs/handoff/OB对接/2026-06-07-OB-CC手工创建task-md缺Macro-v2等效路径-handoff.md` | OB CC 触发 handoff(从 vault 拷过来) |
+| `docs/handoff/OB对接/2026-06-07-OB-CC手工创建task-md缺Macro-v2等效路径-反向回执.md` | 反向回执,含 OB 端 follow-up 清单(rules 改写 + 加铁律) |
+
+### 🎯 设计取舍
+
+- **复用 `--create-task`,不新增 `--create-task-md`**:`--create-task` 已存在(v0.7.0+),补 titlePrefix 等价于 handoff 期望的新 CLI。避免双 CLI 维护负担(用户拍板)。
+- **schema 放 sync.py 顶部 dataclass,不抽 `lib/task_md_schema.py`**:sync.py 单文件设计原则(用户拍板)。
+- **统一 `--apply` 自动跑所有机械修复,不拆 `--fix-prefix` 等子 flag**:减小 CLI surface;每条 error 在报告里注明"修复方式"。
+- **`_compute_title_prefix` 在 category=产品项目 但 parent_project 空时返回 ""**:对齐 Macro v2 真实行为(永远不生成「【产品项目】」这种把大类名当前缀的怪标题)。
+- **validate 文件名前缀校验「尊重现状」**:老数据可能 filename 有前缀但 parent_project 空 → warn 建议补,而非 error 强求改;两边都有但不一致 → warn 让用户决策。
+- **本地不查飞书 select 白名单**:`subcategory`/`project_minor` 白名单留给 push 路径 `validate_select_value` 守门(已存在);validate 跑得快,不依赖 cli。
+
+### ⚠️ Breaking change(minor bump 预期内)
+
+- **`--create-task --parent-project X --title T` 现在产出文件名 `YYYY-MM-DD-【X】T.md`**(以前是 `YYYY-MM-DD-T.md` 无前缀)
+- **飞书 record 的「任务标题」也跟着加前缀**(对齐 OB 视觉分类)
+- 外部 SOP(zhixing-game 等)如果不期望前缀:不传 `--parent-project` 即可(无前缀路径不变);若想保留前缀变化但避免飞书侧影响,需要在后续 patch 加 `--no-title-prefix` flag
+
+### ✅ 验证
+
+```bash
+# 1. 校验 vault 真实 task md(完美 Macro v2 输出)
+python3 sync.py --vault /OB --validate-task-md "/OB/04 Inbox/task/<完美样本>.md"
+# → 期望前缀: 【AiCoding实践】 / ✅ 全部通过 / 0 error / 0 warn
+
+# 2. 校验老数据(filename 有前缀但 parent_project 空)
+python3 sync.py --vault /OB --validate-task-md "/OB/04 Inbox/task/<老样本>.md"
+# → ⚠️ filename_prefix_no_frontmatter 建议补 parent_project / 0 error / 1 warn
+
+# 3. lockstep 半残修复
+python3 sync.py --vault /OB --validate-task-md "/OB/04 Inbox/task/<半残样本>.md" --apply
+# → ❌ lockstep_mismatch / 🔧 ✓ today_history / source_history lockstep 对齐 / ✅ 修复完成
+
+# 4. --create-task 带前缀产出
+python3 sync.py --vault /OB --create-task --title "测试" --priority P2 \
+  --category 产品项目 --parent-project "AiCoding实践" --json
+# → 目标 task md: 04 Inbox/task/2026-06-07-【AiCoding实践】测试.md
+# → 飞书 payload "任务标题": "【AiCoding实践】测试"
+```
+
+### 📋 OB 端 follow-up(给用户带回 OB CC 决策)
+
+详见 [反向回执](docs/handoff/OB对接/2026-06-07-OB-CC手工创建task-md缺Macro-v2等效路径-反向回执.md):
+
+1. 改 `OB/.claude/rules/base-and-frontmatter.md` 删 schema 表,改为反向链接 sync.py 真相源
+2. 改 `OB/.claude/rules/feishu-project-sync.md` 加铁律「手工建/同步 task md 必先跑 `--validate-task-md`」
+3. (可选)给 OB CC 加 `/检查task md` 轻 skill
+
+---
+
+## [v0.8.6] - 2026-06-06 — feat:批量推日志加日期选择(补推前一日/任意历史日)
+
+> **触发**:用户反馈"第二天早上才记得推头一天的日志,没办法批量推昨日,只能一条条推送"。
+> **根因**:`--push-all-today` 老逻辑只筛 OB `today=true` ∪ 飞书「是否今日」=true union,**昨日的 task 当下 today 多半已被 pull-today / 手动清成 false,飞书侧今日也清空了** → 全部被过滤,Cmd+P「批量推今日」一条都推不动。
+> **修**:CLI 加 `--push-date YYYY-MM-DD` 参数,配合 `--push-all-today` 切换到「补推历史」模式。
+
+### 🛠 改动
+
+| 文件 | 改动点 |
+|---|---|
+| `sync.py` | `push_all_today_task_md` 加 `date_iso` 参数(`None`/今天 → 原行为;历史日 → 筛 `today_history 含 D`,不走「取消今日」union);`push_task_md` 加 `skip_today_flag` 参数 + payload 里 pop 掉 today_flag 对应字段;CLI 加 `--push-date YYYY-MM-DD`(格式校验) |
+| `obsidian-assets/userscripts/quickadd-批量推今日-task-md.js` | v1→v2:Cmd+P 触发后先弹 suggester(📅 今日 / ⏪ 昨日 / 🎯 自定义日期),自定义走 `inputPrompt` 输 YYYY-MM-DD;`--push-date` 透传到 sync.py;Notice 文案 / 解析 regex 兼容两种汇总行格式 |
+
+### 🎯 设计权衡
+
+- **筛选用 `today_history` 含 D**(append-only 历史流),不是当下 `today=true`。即使 D 已过去多日、`today` 字段已被清,今日历史标记仍能定位到这条 task。
+- **补推历史时 `today_flag` 字段不写回飞书**(`skip_today_flag=True`):防止把 OB 当下 `today=false` 错误覆盖到飞书侧今日勾选,飞书「是否今日」由用户在看板手动管,确认后 `--pull-today` 拉回 OB 自动清 `today` + `today_history` 里对应日期。
+- **不走「取消今日」union**:那是"今日当下状态对齐",跟历史日期语义无关。
+
+### ✅ 验证
+
+```bash
+python3 sync.py --vault /OB --push-all-today --push-date 2026-06-05      # dry-run
+# → 模式 banner:🎯 push-date=2026-06-05: 批量补推 OB today_history 含 2026-06-05 的 task md → 飞书
+# → 每条 task 打印 ⏭ 跳过 today_flag → 飞书「是否今日」字段
+# → 汇总:✅ 成功: N(... CREATE / ... UPDATE,today_flag 字段已跳过)
+
+python3 sync.py --vault /OB --push-all-today                             # 老逻辑保留
+# → 模式 banner:🎯 push-all-today: 批量推 OB today=true task md → 飞书 forward
+# → 汇总:✅ 成功: N(... 其中 0 条为取消今日)
+```
+
+### 📋 升级 vault 端 userscript(必做)
+
+```bash
+./install.sh \
+  --vault-path /Users/aim5/Documents/OB \
+  --scripts-dir "<vault 内 userscripts 上一级路径>" \
+  --userscripts-only --apply --force
+```
+
+---
+
 ## [v0.8.5] - 2026-06-06 — fix:Cmd+P「快记任务」UserScript 模板缺 today_source_history 字段(v0.8.3 半残根因之二)
 
 > **触发**:v0.8.3 commit 后追查 task B 的实际创建路径。task B `tags: [task]`(无 `external-created`)→ **不是** sync.py `--create-task` 路径建出来的(那条路径会必加 `external-created` tag,line 3740),而是 **OB 端 Cmd+P「📝 快记任务」UserScript 建的**。
