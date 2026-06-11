@@ -3,9 +3,17 @@
 > 📋 **Obsidian ↔ 飞书项目管理多维表 全闭环同步工具**。让你既享受 Obsidian 的 ADHD 友好「子弹笔记式任务流」,又拥有飞书的「项目看板可视化」,**两端永远一致**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.9.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.9.2-blue.svg)](CHANGELOG.md)
 
 ---
+
+## 🚀 v0.9.2 上线 — skill 路径补两道防呆闸:执行明细每日单条 + 交付绝对路径(2026-06-11)
+
+`/同步任务到飞书` skill 现在要求 apply 命令同时带 `--strict-detail-one-per-day` 和 `--strict-delivery-paths`:同一日期的执行明细拆多行会拒推,交付段出现 `docs/...` / `CHANGELOG.md` 等疑似相对路径也会拒推。默认 CLI / OB 菜单仍保持 warning 宽松模式,不破坏既有工作流。详见 [CHANGELOG v0.9.2](CHANGELOG.md#v092---2026-06-11)。
+
+## 🚀 v0.9.1 上线 — parent_project 全量 active 匹配 + 精确名候选提示(2026-06-10)
+
+`--create-task --parent-project <name>` 现在基于飞书关联项目表的**分页全量 active 项目**解析,不再受单次 `--limit 200` 截断风险影响。精确匹配失败时,CLI 会提示 active 项目总数、前 10 个样例和相近候选(如 `AI自媒体项目` → 推荐 `AI自媒体`),但仍坚持**不自动模糊写入**的安全原则。详见 [CHANGELOG v0.9.1](CHANGELOG.md#v091---2026-06-10)。
 
 ## 🚀 v0.9.0 上线 — task md schema 真相源 + `--validate-task-md` + `--create-task` 补 titlePrefix(2026-06-07)
 

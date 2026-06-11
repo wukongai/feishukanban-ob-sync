@@ -2,6 +2,64 @@
 
 > `feishukanban-ob-sync` — Obsidian ↔ 飞书项目管理多维表双向同步工具。
 
+## [v0.9.2] - 2026-06-11 — fix:skill 路径拦截同日多条执行明细 + 交付相对路径
+
+> **触发**:Content-factory 会话调用 `/同步任务到飞书` 同步 record `recvlV5IDsBZ5B` 时,同一日期执行明细被拆成多行、交付段使用 `docs/...` 相对路径,导致飞书子表只保留 1 条 state record 且交付归属不清。详见 handoff `docs/handoff/OB对接/2026-06-11-skill约束补强-task明细单条+交付绝对路径-handoff.md`。
+
+### 🛠 改动
+
+| 文件 | 改动点 |
+|---|---|
+| `sync.py` | 新增执行明细原始行 lint,检测同一日期多条 `YYYY-MM-DD...` 明细;新增交付段路径 lint,检测 `docs/...` / `src/...` / `CHANGELOG.md` 等疑似相对路径;新增 `--strict-detail-one-per-day` 与 `--strict-delivery-paths` 两个严格 flag,默认只 warning,strict 模式拒推 |
+| `~/.claude/skills/同步任务到飞书/SKILL.md` | 版本号更新到 `2026-06-11.1`;apply 前 checklist 加每日单条明细、交付绝对路径、四个 strict flag;A/B/C 路径命令示例统一补 `--strict-detail-one-per-day --strict-delivery-paths` |
+| `README.md` | badge bump 到 v0.9.2,新增版本摘要 |
+| `docs/ARCHITECTURE.md` | 补 skill 路径 strict lint 防线说明 |
+
+### 🎯 设计取舍
+
+- **默认宽松,skill 显式严格**:不改变 OB Cmd+P 菜单、手工 `--task-md`、普通 `--apply` 的兼容性;只有调用方显式加 strict flag 才拒推。
+- **看原始执行明细段,不只看解析结果**:`2026-06-11 上午 | ...` 这类违规行不会被解析成 detail dict,所以 lint 直接扫 H2 段原始 bullet。
+- **交付路径只拦明显路径形态**:纯文字交付说明不误伤;`docs/...`、`src/...`、`.claude/...`、常见根文件名等才提示改成 OB 双链 / URL / 绝对路径。
+
+### ✅ 验证
+
+```bash
+python3 -m py_compile sync.py
+python3 sync.py --vault /Users/aim5/Documents/OB --task-md /private/tmp/recvlV5IDsBZ5B-good.md \
+  --strict-soft-sections --strict-select --strict-detail-one-per-day --strict-delivery-paths
+python3 sync.py --vault /Users/aim5/Documents/OB --task-md /private/tmp/recvlV5IDsBZ5B-bad.md \
+  --strict-soft-sections --strict-select --strict-detail-one-per-day --strict-delivery-paths
+```
+
+## [v0.9.1] - 2026-06-10 — fix:parent_project 基于全量 active 项目匹配,失败提示加相近候选
+
+> **触发**:OB 侧 `--create-task --parent-project 'AI自媒体项目'` 未命中精确名时,warning 只展示排序前 10 个项目,让用户误以为飞书关联表里没有真实存在的 `AI自媒体`。同时旧实现对产品项目关联表使用单次 `record list --limit 200`,项目数增长后存在真实漏匹配风险。详见 vault handoff `2026-06-10-feishukanban-parent-project-全量active匹配-handoff.md`。
+
+### 🛠 改动
+
+| 文件 | 改动点 |
+|---|---|
+| `sync.py` | 新增 `list_all_bitable_records()` 分页 helper;`build_link_table_index()` / `_extract_link_table_records()` / `query_subprojects_by_parent()` 改为分页拉全量;`parent_project` link 索引默认按 `link_table_active_field` 过滤 active=true;匹配失败时输出 active 项目总数、前 10 个样例和 `difflib`/包含关系相近候选 |
+| `config.example.yaml` | 说明 parent_project link 模式现在分页拉全量 active 项目,失败提示会给候选数量和相近项目 |
+| `docs/ARCHITECTURE.md` | 补 parent_project 全量 active 匹配防御机制 |
+| `README.md` | badge bump 到 v0.9.1,新增版本摘要 |
+
+### 🎯 设计取舍
+
+- **仍然精确匹配落库**:相近候选只用于提示,不自动把 `AI自媒体项目` 写成 `AI自媒体`,避免挂错项目。
+- **active 语义统一**:`--create-task` 解析、`--resolve-project` 和 Cmd+P 快记项目菜单都基于同一张全量关联表;配置了 `link_table_active_field` 时只使用 active=true 项目。
+- **分页兜底 10000 条**:`list_all_bitable_records()` 默认 `200 * 50`,触顶会 warning。当前产品项目表规模远小于该上限。
+
+### ✅ 验证
+
+```bash
+python3 -m py_compile sync.py
+python3 sync.py --vault /Users/aim5/Documents/OB --create-task \
+  --title "parent_project 候选提示测试" \
+  --category 产品项目 --parent-project "AI自媒体项目" \
+  --status todo --priority P3 --today-source unplanned --json
+```
+
 ## [v0.9.0] - 2026-06-07 — feat:task md schema 真相源 + `--validate-task-md` + `--create-task` 补 titlePrefix(Macro v2 等效)
 
 > **触发**:OB CC 通过 `sync.py --task-md` 路径手工建 task md 时,**与 Macro v2(Cmd+P「快记任务」UserScript)输出不等效** — 文件名/H1 缺「【父项目】」前缀 + `subcategory/project_minor` 误填 + `today_source_history` 漏写。4 轮迭代才修对,根因是 schema 真相源散布 4 处(`parse_task_md` / `_build_task_md_content_from_params` / Macro v2 / `task-template.md`),没单一真相源 + 没校验工具兜底。详见 [handoff](docs/handoff/OB对接/2026-06-07-OB-CC手工创建task-md缺Macro-v2等效路径-handoff.md) + [反向回执](docs/handoff/OB对接/2026-06-07-OB-CC手工创建task-md缺Macro-v2等效路径-反向回执.md)。

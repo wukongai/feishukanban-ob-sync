@@ -241,15 +241,16 @@ task_md_fields:
   # 【类型 A】link(双向关联,推荐)— 飞书侧有独立的「项目表」管理所有大项目
   #   sync.py 会:
   #     1. 用 strip_prefix_regex 去 OB 项目名前缀(如 "00 布丁" → "布丁",可选)
-  #     2. 在 link_table_id 表里按 link_table_name_field 精确匹配 → 拿 record_id
-  #     3. 匹配失败 → 跳过该字段并打 warning(不影响其他字段同步)
+  #     2. 分页拉取 link_table_id 表全量 record,默认只保留 active=true 项目
+  #     3. 按 link_table_name_field 精确匹配 → 拿 record_id
+  #     4. 匹配失败 → 跳过该字段并打 warning + 候选数量/相近项目提示(不影响其他字段同步)
   parent_project:
     field_name: 产品项目                  # link 字段名 — null = 跳过同步
     link_table_id: tblXXXXXXXXXX          # 关联表 table_id(从 feishu-cli bitable table list 拿)
     link_table_name_field: 产品项目名      # 关联表里项目名字段
     link_table_parent_field: 父产品        # 关联表里"父产品"字段名(用于二级菜单查子 record;无需二级则不用此字段)
     # v0.3.5 加:关联表里 checkbox 字段名,标识项目当前是否活跃
-    # Cmd+P 快记任务弹大类/小类菜单时只显示活跃项目(归档项目自动隐藏)
+    # Cmd+P 快记任务弹大类/小类菜单、--create-task parent_project 匹配时只使用活跃项目(归档项目自动隐藏)
     # 留空 '' 或注释掉 → 不过滤,所有项目都显示(向后兼容 v0.3.4 及之前)
     link_table_active_field: 当前是否活跃
     strip_prefix_regex: '^\d+\s+'         # OB 端项目名前缀正则(去 "00 " "01 " 等;留空字符串 '' 禁用)

@@ -31,6 +31,7 @@
 """
 
 import argparse                  # 命令行参数解析
+import difflib                   # parent_project 精确匹配失败时给近似候选
 import json                      # 调 cli 时构造 payload
 import os                        # chdir 到 vault(--vault 参数)
 import re                        # 解析 markdown task 行
@@ -296,7 +297,7 @@ def parse_callout_below(content: str, task_line_idx: int, callout_types: list) -
     返回 callout 正文(去掉 > 前缀,合并多行),无则返回 None
 
     2026-05-19 bug fix: 容忍前导空格缩进(Obsidian 标准:list item 下嵌套 callout 要 2 空格缩进)
-    旧 regex `>\s*` 从字符串开头匹配,不接受前导空格 → 错过所有 list 嵌套场景
+    旧 regex `>\\s*` 从字符串开头匹配,不接受前导空格 → 错过所有 list 嵌套场景
     """
     lines = content.split("\n")
     if task_line_idx + 1 >= len(lines):
@@ -1245,7 +1246,7 @@ def parse_execution_details(body_text: str) -> list[dict]:
         - YYYY-MM-DD | 状态 | 计划=... / 估时=2 / 用时=1.5 / 完成度=标准完成 / 复盘=...
 
     Returns: [{date, status, plan?, review?, estimate_hours?, actual_hours?, completion?}, ...]
-             按日期升序排列。同日多行 → 后者覆盖前者(OB 端最新意图为准)。
+             按日期升序排列。同日多行 → 只保留 1 条;strict lint 会提示调用方合并到复盘。
 
     边界:
     - 段缺失 / 空 → []
@@ -1297,6 +1298,135 @@ def parse_execution_details(body_text: str) -> list[dict]:
         details_by_date[date_str] = item
 
     return [details_by_date[d] for d in sorted(details_by_date)]
+
+
+def _extract_execution_detail_raw_entries(body_text: str) -> list[dict]:
+    """抽执行明细原始行,用于 lint 同日拆多行。
+
+    parse_execution_details 只认 `YYYY-MM-DD | 状态 | ...`;事故里常见的
+    `YYYY-MM-DD 上午 | ...` 会被正常解析跳过,所以 lint 必须看原始行。
+    """
+    m = re.search(
+        r'^## +📈 +执行明细.*?\n(.*?)(?=\n## +|\Z)',
+        body_text, re.MULTILINE | re.DOTALL,
+    )
+    if not m:
+        return []
+    section = re.sub(r'<!--.*?-->', '', m.group(1), flags=re.DOTALL)
+
+    entries: list[dict] = []
+    for raw_line in section.splitlines():
+        line = raw_line.strip()
+        if not line or not line.startswith("-"):
+            continue
+        item = line[1:].strip()
+        m_date = re.match(r'^(\d{4}-\d{2}-\d{2})(?:\b|[^\d])', item)
+        if not m_date:
+            continue
+        entries.append({
+            "date": m_date.group(1),
+            "line": item,
+            "is_parseable": bool(re.match(r'^\d{4}-\d{2}-\d{2}\s*\|', item)),
+        })
+    return entries
+
+
+def lint_execution_detail_same_day(body_text: str) -> list[str]:
+    """检测执行明细同一日期拆多行。
+
+    飞书执行明细子表以日期为合并 key,同日多行不会逐条进入子表。默认只 warning;
+    skill 路径配合 --strict-detail-one-per-day 拒推。
+    """
+    by_date: dict[str, list[dict]] = {}
+    for entry in _extract_execution_detail_raw_entries(body_text):
+        by_date.setdefault(entry["date"], []).append(entry)
+
+    warnings: list[str] = []
+    for date, entries in sorted(by_date.items()):
+        if len(entries) <= 1:
+            continue
+        samples = []
+        for entry in entries[:3]:
+            line = entry["line"]
+            samples.append(line[:80] + ("..." if len(line) > 80 else ""))
+        warnings.append(
+            f"{date} 有 {len(entries)} 条执行明细原始行;飞书子表按日期只会保留 1 条,"
+            f"其余过程不会作为 state record 同步。请合并成一行,过程写入「复盘=」。"
+            f"样例:{' / '.join(samples)}"
+        )
+    return warnings
+
+
+_RELATIVE_DELIVERY_PREFIX_RE = re.compile(
+    r'^(?:\.{1,2}/)?(?:docs|doc|src|scripts|script|test|tests|assets|public|'
+    r'obsidian-assets|\.claude|\.codex|\.agents)/'
+)
+_COMMON_RELATIVE_FILE_RE = re.compile(
+    r'^(?:README|CHANGELOG|INSTALL|LICENSE|AGENTS|CLAUDE|SKILL|TODO|ROADMAP)'
+    r'(?:\.[A-Za-z0-9_-]+)?$'
+)
+
+
+def _looks_like_relative_delivery_path(value: str) -> bool:
+    """判断交付段 token 是否像跨项目相对路径。"""
+    s = value.strip().strip(".,;，。；)")
+    if not s or s.startswith(("#", "http://", "https://", "mailto:", "obsidian://")):
+        return False
+    if s.startswith("/") or re.match(r'^[A-Za-z]:[\\/]', s):
+        return False
+    if _RELATIVE_DELIVERY_PREFIX_RE.match(s):
+        return True
+    if _COMMON_RELATIVE_FILE_RE.match(s):
+        return True
+    return False
+
+
+def lint_delivery_paths(delivery_md: str) -> list[str]:
+    """检测交付段里容易断归属的相对路径。
+
+    约定:vault 内笔记用 [[双链]],有 URL 用 markdown link,跨项目文件用绝对路径
+    + 行内 code。默认 warning;skill 路径配合 --strict-delivery-paths 拒推。
+    """
+    if not delivery_md:
+        return []
+
+    warnings: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str, source: str) -> None:
+        cleaned = value.strip()
+        if not cleaned or cleaned in seen:
+            return
+        seen.add(cleaned)
+        warnings.append(
+            f"{source} 使用疑似相对路径 `{cleaned}`;vault 内笔记请改 [[双链]],"
+            f"vault 外文件请改 `/Users/...` 绝对路径并用反引号包住。"
+        )
+
+    for value in re.findall(r'`([^`]+)`', delivery_md):
+        if _looks_like_relative_delivery_path(value):
+            add(value, "行内 code")
+
+    for value in re.findall(r'\]\(([^)]+)\)', delivery_md):
+        if _looks_like_relative_delivery_path(value):
+            add(value, "markdown link")
+
+    for value in re.findall(r'\[\[([^\]]+)\]\]', delivery_md):
+        if "/" in value and _looks_like_relative_delivery_path(value):
+            add(value, "OB 双链")
+
+    scrubbed = re.sub(r'`[^`]+`', ' ', delivery_md)
+    scrubbed = re.sub(r'\[[^\]]*\]\([^)]+\)', ' ', scrubbed)
+    scrubbed = re.sub(r'\[\[[^\]]+\]\]', ' ', scrubbed)
+    for value in re.findall(
+        r'(?<![\w/.-])((?:\.{1,2}/)?(?:docs|doc|src|scripts|script|test|tests|'
+        r'assets|public|obsidian-assets|\.claude|\.codex|\.agents)/[^\s`)>，。；,;]+)',
+        scrubbed,
+    ):
+        if _looks_like_relative_delivery_path(value):
+            add(value, "裸文本")
+
+    return warnings
 
 
 def parse_task_md(md_path: Path, config: dict) -> Optional[dict]:
@@ -1487,6 +1617,8 @@ def parse_task_md(md_path: Path, config: dict) -> Optional[dict]:
         # v0.6.0(2026-05-29):执行明细 — daily 子表数据源
         # list of dict,sync.py push 时跟飞书子表 diff 后补差异
         "execution_details": parse_execution_details(body),
+        "_detail_lint_warnings": lint_execution_detail_same_day(body),
+        "_delivery_lint_warnings": lint_delivery_paths(delivery_text or ""),
     }
 
 
@@ -1873,18 +2005,82 @@ def validate_select_value(
     return valid, warnings, bool(invalid)
 
 
-# 模块级:link 关联表的 名字→record_id 索引缓存,key=link_table_id
+# 模块级:link 关联表的 名字→record_id 索引缓存,key=(link_table_id, name_field, active_field, only_active)
 # v0.2.3 加入(配合 parent_project link 字段)— 同进程内只拉一次关联表,避免重复 API 调用
-_LINK_TABLE_INDEX_CACHE: dict[str, dict[str, str]] = {}
+_LINK_TABLE_INDEX_CACHE: dict[tuple[str, str, Optional[str], bool], dict[str, str]] = {}
 
 
-def build_link_table_index(link_table_id: str, name_field: str, config: dict) -> dict[str, str]:
+def list_all_bitable_records(
+    base_token: str,
+    table_id: str,
+    *,
+    view_id: Optional[str] = None,
+    page_size: int = 200,
+    max_pages: int = 50,
+) -> dict:
+    """分页拉取 bitable record list 的全量结果。
+
+    feishu-cli `record list` 单页上限通常是 200;本 helper 用 offset 聚合
+    fields / data / record_id_list,避免调用方误把单页结果当全表。
+    """
+    all_rows: list = []
+    all_ids: list = []
+    fields: list = []
+    offset = 0
+
+    for page in range(max_pages):
+        cli_args = [
+            "bitable", "record", "list",
+            "--base-token", base_token,
+            "--table-id", table_id,
+            "--limit", str(page_size),
+            "--offset", str(offset),
+        ]
+        if view_id:
+            cli_args.extend(["--view-id", view_id])
+
+        result = run_cli(cli_args)
+        page_rows = result.get("data", [])
+        page_ids = result.get("record_id_list", [])
+        if not fields:
+            fields = result.get("fields", [])
+
+        all_rows.extend(page_rows)
+        all_ids.extend(page_ids)
+
+        if len(page_ids) < page_size:
+            break
+        offset += page_size
+    else:
+        print(
+            f"⚠️  表 {table_id} 已触达分页兜底上限 {page_size * max_pages} 条,"
+            "当前结果可能不完整",
+            file=sys.stderr,
+        )
+
+    return {"fields": fields, "data": all_rows, "record_id_list": all_ids}
+
+
+def _link_active_value_is_true(value) -> bool:
+    """兼容飞书 checkbox / 字符串 / 数字形式的 active 字段。"""
+    return bool(value) and str(value).lower() not in ("false", "0", "")
+
+
+def build_link_table_index(
+    link_table_id: str,
+    name_field: str,
+    config: dict,
+    active_field: Optional[str] = None,
+    only_active: bool = True,
+) -> dict[str, str]:
     """拉关联表所有 record,建 {项目名: record_id} 索引(模块级缓存)
 
     Args:
         link_table_id: 被关联表 table_id(如「产品项目表」tblZ5Zu8v6m5AUx0)
         name_field: 关联表里项目名所在字段(如「产品项目名」)
         config: 全局 config(用 feishu.base_token)
+        active_field: 关联表 active checkbox 字段名;留空则不过滤
+        only_active: active_field 存在时是否只保留 active=true 的项目
 
     Returns: {项目名: record_id} 映射;失败返回空 dict(不阻断主流程)
 
@@ -1893,20 +2089,16 @@ def build_link_table_index(link_table_id: str, name_field: str, config: dict) ->
             {"data": [["项目1名", ...], ["项目2名", ...]], "fields": [...], "record_id_list": [...]}
         通过 fields.index(name_field) 找列号,zip data 和 record_id_list。
     """
-    if link_table_id in _LINK_TABLE_INDEX_CACHE:
-        return _LINK_TABLE_INDEX_CACHE[link_table_id]
+    cache_key = (link_table_id, name_field, active_field, only_active)
+    if cache_key in _LINK_TABLE_INDEX_CACHE:
+        return _LINK_TABLE_INDEX_CACHE[cache_key]
 
     base_token = config["feishu"]["base_token"]
     try:
-        result = run_cli([
-            "bitable", "record", "list",
-            "--base-token", base_token,
-            "--table-id", link_table_id,
-            "--limit", "200",   # 对齐 _extract_link_table_records;默认值不稳定会漏末尾记录
-        ])
+        result = list_all_bitable_records(base_token, link_table_id)
     except Exception as e:
         print(f"⚠️  拉 link 关联表 {link_table_id} 失败,parent_project 同步跳过: {e}")
-        _LINK_TABLE_INDEX_CACHE[link_table_id] = {}
+        _LINK_TABLE_INDEX_CACHE[cache_key] = {}
         return {}
 
     fields = result.get("fields", [])
@@ -1915,21 +2107,47 @@ def build_link_table_index(link_table_id: str, name_field: str, config: dict) ->
 
     if name_field not in fields:
         print(f"⚠️  关联表 {link_table_id} 没有字段「{name_field}」,parent_project 同步跳过")
-        _LINK_TABLE_INDEX_CACHE[link_table_id] = {}
+        _LINK_TABLE_INDEX_CACHE[cache_key] = {}
         return {}
 
     name_idx = fields.index(name_field)
+    active_idx = fields.index(active_field) if (active_field and active_field in fields) else -1
     index: dict[str, str] = {}
     for i, row in enumerate(rows):
         if i >= len(ids):
             break
+        if only_active and active_idx >= 0:
+            active_val = row[active_idx] if active_idx < len(row) else None
+            if not _link_active_value_is_true(active_val):
+                continue
         name = row[name_idx] if name_idx < len(row) else None
         # name 一般是字符串;防御性跳过 dict/list 等异常类型
         if isinstance(name, str) and name.strip():
             index[name.strip()] = ids[i]
 
-    _LINK_TABLE_INDEX_CACHE[link_table_id] = index
+    _LINK_TABLE_INDEX_CACHE[cache_key] = index
     return index
+
+
+def _suggest_link_record_names(query: str, names: list[str], limit: int = 5) -> list[str]:
+    """精确匹配失败时给用户 3-5 个候选,但不自动模糊落库。"""
+    query = (query or "").strip()
+    if not query:
+        return []
+
+    query_lc = query.lower()
+    suggestions: list[str] = []
+
+    for name in names:
+        name_lc = name.lower()
+        if query_lc in name_lc or name_lc in query_lc:
+            suggestions.append(name)
+
+    for name in difflib.get_close_matches(query, names, n=limit, cutoff=0.5):
+        if name not in suggestions:
+            suggestions.append(name)
+
+    return suggestions[:limit]
 
 
 def resolve_link_record_id(
@@ -1938,6 +2156,7 @@ def resolve_link_record_id(
     name_field: str,
     strip_prefix_regex: str,
     config: dict,
+    active_field: Optional[str] = None,
     override_map: Optional[dict] = None,
 ) -> Optional[str]:
     """把 OB 端名字(可能含「00 」「01 」等数字前缀)解析为飞书关联表 record_id
@@ -1954,6 +2173,7 @@ def resolve_link_record_id(
         name_field: 关联表里项目名字段
         strip_prefix_regex: 去前缀正则(可空字符串 = 禁用)
         config: 全局 config
+        active_field: 关联表 active checkbox 字段名;传入后只匹配 active=true 的项目
         override_map: OB 名 → 飞书 record name 的直接映射(如 zhixinggame → 布丁开发)
 
     Returns: 匹配到的 record_id,或 None
@@ -1970,7 +2190,11 @@ def resolve_link_record_id(
             if stripped_for_override in override_map:
                 ob_value = override_map[stripped_for_override]
 
-    index = build_link_table_index(link_table_id, name_field, config)
+    index = build_link_table_index(
+        link_table_id, name_field, config,
+        active_field=active_field,
+        only_active=True,
+    )
     if not index:
         return None  # build_link_table_index 已打 warning
 
@@ -1983,8 +2207,23 @@ def resolve_link_record_id(
     if ob_value.strip() in index:
         return index[ob_value.strip()]
 
-    print(f"⚠️  「{ob_value}」(去前缀「{stripped}」)在飞书关联表里找不到,parent_project 此条跳过")
-    print(f"    可用项目: {', '.join(sorted(index.keys())[:10])}{'...' if len(index) > 10 else ''}")
+    names = sorted(index.keys())
+    sample_count = min(10, len(names))
+    active_label = "可用 active 项目" if active_field else "可用项目"
+    print(
+        f"⚠️  parent_project `{ob_value}` 未命中精确项目名"
+        f"(去前缀: `{stripped}`),此字段跳过"
+    )
+    if names:
+        print(
+            f"    共 {len(names)} 个{active_label}"
+            f"（以下仅展示前 {sample_count} 个样例）: "
+            f"{', '.join(names[:sample_count])}{'...' if len(names) > sample_count else ''}"
+        )
+        suggestions = _suggest_link_record_names(stripped, names)
+        if suggestions:
+            print(f"    你可能想用: {', '.join(suggestions)}")
+    print("    提示:parent_project 仍需精确匹配飞书关联表项目名,不会自动模糊写入")
     return None
 
 
@@ -2045,6 +2284,7 @@ def query_subprojects_by_parent(
     name_field: str,
     parent_field_name: str,
     config: dict,
+    active_field: Optional[str] = None,
 ) -> list[dict]:
     """查飞书关联表里指定父 record_id 的所有子 records
 
@@ -2057,16 +2297,13 @@ def query_subprojects_by_parent(
         name_field: 子 record 名字字段(如「产品项目名」)
         parent_field_name: 父字段名(如「父产品」)
         config: 全局 config
+        active_field: active checkbox 字段名;传入后只返回 active=true 子项目
 
     Returns: [{"name": "布丁开发", "record_id": "recv..."}, ...](顺序 = 表里的存储顺序)
     """
     base_token = config["feishu"]["base_token"]
     try:
-        result = run_cli([
-            "bitable", "record", "list",
-            "--base-token", base_token,
-            "--table-id", link_table_id,
-        ])
+        result = list_all_bitable_records(base_token, link_table_id)
     except Exception as e:
         print(f"⚠️  查子 record 失败: {e}", file=sys.stderr)
         return []
@@ -2080,11 +2317,16 @@ def query_subprojects_by_parent(
 
     name_idx = fields.index(name_field)
     parent_idx = fields.index(parent_field_name)
+    active_idx = fields.index(active_field) if (active_field and active_field in fields) else -1
 
     children = []
     for i, row in enumerate(rows):
         if i >= len(ids):
             break
+        if active_idx >= 0:
+            active_val = row[active_idx] if active_idx < len(row) else None
+            if not _link_active_value_is_true(active_val):
+                continue
         parent_val = row[parent_idx] if parent_idx < len(row) else None
         # 父字段格式:list of {"id": "rec..."}(可能为空)
         if not isinstance(parent_val, list) or not parent_val:
@@ -2119,6 +2361,7 @@ def resolve_project_for_userscript(ob_name: str, config: dict) -> dict:
     link_table_id = cfg.get("link_table_id")
     name_field = cfg.get("link_table_name_field", "产品项目名")
     parent_field = cfg.get("link_table_parent_field", "父产品")
+    active_field = cfg.get("link_table_active_field")
     strip_regex = cfg.get("strip_prefix_regex", r"^\d+\s+")
     override_map = cfg.get("override_map") or {}
 
@@ -2146,7 +2389,10 @@ def resolve_project_for_userscript(ob_name: str, config: dict) -> dict:
     result["effective_name"] = effective_name
 
     # 2. 解析 effective_name → record_id
-    rec_id = resolve_link_record_id(effective_name, link_table_id, name_field, strip_regex, config)
+    rec_id = resolve_link_record_id(
+        effective_name, link_table_id, name_field, strip_regex, config,
+        active_field=active_field,
+    )
     result["parent_record_id"] = rec_id
 
     # 3. override 命中时不查二级(已直接定位到具体 record)
@@ -2156,7 +2402,8 @@ def resolve_project_for_userscript(ob_name: str, config: dict) -> dict:
     # 4. 查该一级的子 records
     if rec_id:
         result["subprojects"] = query_subprojects_by_parent(
-            rec_id, link_table_id, name_field, parent_field, config
+            rec_id, link_table_id, name_field, parent_field, config,
+            active_field=active_field,
         )
 
     return result
@@ -2182,13 +2429,10 @@ def _extract_link_table_records(
         - parent_ids: 父字段 link list 解析的 record_id list,空 list 表示是顶层
     """
     try:
-        # limit=200 是飞书 cli 单次上限,产品项目表通常 <100 条够用
-        result = run_cli([
-            "bitable", "record", "list",
-            "--base-token", config["feishu"]["base_token"],
-            "--table-id", link_table_id,
-            "--limit", "200",
-        ])
+        result = list_all_bitable_records(
+            config["feishu"]["base_token"],
+            link_table_id,
+        )
     except Exception as e:
         print(f"⚠️  关联表 record list 失败: {e}", file=sys.stderr)
         return []
@@ -2222,7 +2466,7 @@ def _extract_link_table_records(
         # active 字段:checkbox 格式 bool / "true" / 1 都算 truthy;未配 active_field → 默认 True
         if active_idx >= 0:
             active_val = row[active_idx] if active_idx < len(row) else None
-            active = bool(active_val) and str(active_val).lower() not in ("false", "0", "")
+            active = _link_active_value_is_true(active_val)
         else:
             active = True
 
@@ -2684,10 +2928,12 @@ def build_fields_payload(task: dict, config: dict, vault_root: Path, existing_de
                 link_table_id = fcfg.get("link_table_id")
                 if link_table_id:
                     name_field = fcfg.get("link_table_name_field", "产品项目名")
+                    active_field = fcfg.get("link_table_active_field")
                     strip_regex = fcfg.get("strip_prefix_regex", r"^\d+\s+")
                     override_map = fcfg.get("override_map") or {}
                     rec_id = resolve_link_record_id(
                         str(value), link_table_id, name_field, strip_regex, config,
+                        active_field=active_field,
                         override_map=override_map,
                     )
                     if rec_id:
@@ -3727,6 +3973,8 @@ def validate_task_md(path: Path, apply: bool = False) -> int:
 
 def push_task_md(md_path: Path, apply: bool = False, _silent_fail: bool = False,
                  strict_soft: bool = False, strict_select: bool = False,
+                 strict_detail_one_per_day: bool = False,
+                 strict_delivery_paths: bool = False,
                  skip_today_flag: bool = False) -> Optional[dict]:
     """单 task md 推送到飞书(CREATE/UPDATE) — 2026-05-25 上线
 
@@ -3929,6 +4177,32 @@ def push_task_md(md_path: Path, apply: bool = False, _silent_fail: bool = False,
         suffix = " [strict 模式 = 已拒推]" if strict_soft and len(empty_segs) == 5 else " — 宽松模式允许继续推"
         print(f"    ⚠️  软段 {len(empty_segs)}/5 段为空:{', '.join(empty_segs)}{suffix}",
               file=sys.stderr)
+
+    # v0.9.2(2026-06-11):skill 路径防呆 lint — 执行明细同日单条 + 交付路径绝对化。
+    detail_lint_warnings = task.get("_detail_lint_warnings") or []
+    if detail_lint_warnings:
+        print(f"\n    🔎 执行明细 lint:{len(detail_lint_warnings)} 条警告")
+        for w in detail_lint_warnings:
+            print(f"     ⚠️  {w}")
+        if strict_detail_one_per_day:
+            return _fail(
+                "⛔ 拒推(--strict-detail-one-per-day):同一日期存在多条执行明细。\n"
+                "   修复:每天保留一条 state record,把当天过程用分号合并到「复盘=」字段。",
+                action=action,
+            )
+
+    delivery_lint_warnings = task.get("_delivery_lint_warnings") or []
+    if delivery_lint_warnings:
+        print(f"\n    🔎 交付路径 lint:{len(delivery_lint_warnings)} 条警告")
+        for w in delivery_lint_warnings:
+            print(f"     ⚠️  {w}")
+        if strict_delivery_paths:
+            return _fail(
+                "⛔ 拒推(--strict-delivery-paths):交付段存在疑似相对路径。\n"
+                "   修复:vault 内笔记用 [[双链]],有 URL 用 markdown link,"
+                "vault 外文件用 `/Users/...` 绝对路径。",
+                action=action,
+            )
 
     # v0.6.0(2026-05-29):执行明细预览(dry-run + apply 都打)
     ob_details = task.get("execution_details", [])
@@ -4293,7 +4567,9 @@ def create_task_from_params(args, apply: bool = False, json_out: bool = False) -
                 tmp_path = Path(tf.name)
             result = push_task_md(tmp_path, apply=False, _silent_fail=True,
                                   strict_soft=getattr(args, "strict_soft_sections", False),
-                                  strict_select=getattr(args, "strict_select", False))
+                                  strict_select=getattr(args, "strict_select", False),
+                                  strict_detail_one_per_day=getattr(args, "strict_detail_one_per_day", False),
+                                  strict_delivery_paths=getattr(args, "strict_delivery_paths", False))
         finally:
             if tmp_path and tmp_path.exists():
                 tmp_path.unlink()
@@ -4314,7 +4590,9 @@ def create_task_from_params(args, apply: bool = False, json_out: bool = False) -
 
     result = push_task_md(target_path, apply=True, _silent_fail=True,
                           strict_soft=getattr(args, "strict_soft_sections", False),
-                          strict_select=getattr(args, "strict_select", False))
+                          strict_select=getattr(args, "strict_select", False),
+                          strict_detail_one_per_day=getattr(args, "strict_detail_one_per_day", False),
+                          strict_delivery_paths=getattr(args, "strict_delivery_paths", False))
 
     success = bool(result and result.get("success"))
     record_id = result.get("record_id") if result else None
@@ -4835,6 +5113,8 @@ def migrate_today_history_quoted(apply: bool = False) -> None:
 
 def push_all_today_task_md(apply: bool = False, strict_soft: bool = False,
                             strict_select: bool = False,
+                            strict_detail_one_per_day: bool = False,
+                            strict_delivery_paths: bool = False,
                             date_iso: Optional[str] = None) -> None:
     """v0.4.0+ Step 3(2026-05-28):批量推 OB today=true task md 到飞书(forward 方向)
 
@@ -4945,6 +5225,8 @@ def push_all_today_task_md(apply: bool = False, strict_soft: bool = False,
             print(f"📍 {p}{' [取消今日]' if is_cancel else ''}")
         result = push_task_md(p, apply=apply, _silent_fail=True,
                               strict_soft=strict_soft, strict_select=strict_select,
+                              strict_detail_one_per_day=strict_detail_one_per_day,
+                              strict_delivery_paths=strict_delivery_paths,
                               skip_today_flag=is_historical)
         if result is None:
             # 不应该到这里(_silent_fail=True 必返 dict)
@@ -6683,6 +6965,15 @@ def main():
                              "走 Claude/skill 路径时由 SKILL.md 强制加此 flag,避免 frontmatter "
                              "笔误悄悄丢字段或撞飞书 code=800010401 invalid_request 宽泛报错。"
                              "跟 --strict-soft-sections 平行设计。")
+    parser.add_argument("--strict-detail-one-per-day", action="store_true",
+                        help="v0.9.2:启用执行明细每日单条严格校验 — 同一日期出现多条执行明细时"
+                             "拒推整条 task。默认宽松(只 warning),走 Claude/skill 路径时强制加此 flag,"
+                             "避免同日过程拆多行后只有 1 条 state record 进入飞书子表。")
+    parser.add_argument("--strict-delivery-paths", action="store_true",
+                        help="v0.9.2:启用交付路径严格校验 — 交付段出现 docs/...、src/...、"
+                             "CHANGELOG.md 等疑似相对路径时拒推。默认宽松(只 warning),走 Claude/"
+                             "skill 路径时强制加此 flag;vault 内笔记用 [[双链]],vault 外文件用"
+                             "`/Users/...` 绝对路径。")
     args = parser.parse_args()
 
     # --vault: 显式切到 vault 根目录,让所有相对路径(args.path / Path(".") / find_vault_root 的 cwd 起点)正确解析
@@ -6744,7 +7035,10 @@ def main():
                 print(f"❌ --push-date 格式错(要 YYYY-MM-DD,如 2026-06-05): {push_date!r}", file=sys.stderr)
                 sys.exit(1)
         push_all_today_task_md(apply=args.apply, strict_soft=args.strict_soft_sections,
-                                strict_select=args.strict_select, date_iso=push_date)
+                                strict_select=args.strict_select,
+                                strict_detail_one_per_day=args.strict_detail_one_per_day,
+                                strict_delivery_paths=args.strict_delivery_paths,
+                                date_iso=push_date)
     elif args.pull_task:
         pull_task_from_feishu(args.pull_task, apply=args.apply)
     elif args.pull:
@@ -6752,7 +7046,9 @@ def main():
     elif args.task_md:
         push_task_md(Path(args.task_md), apply=args.apply,
                      strict_soft=args.strict_soft_sections,
-                     strict_select=args.strict_select)
+                     strict_select=args.strict_select,
+                     strict_detail_one_per_day=args.strict_detail_one_per_day,
+                     strict_delivery_paths=args.strict_delivery_paths)
     elif args.path:
         push_journal(Path(args.path), apply=args.apply, only_completed=args.only_completed)
     else:

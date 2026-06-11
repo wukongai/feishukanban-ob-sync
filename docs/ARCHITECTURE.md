@@ -52,6 +52,10 @@
 
 `run_cli`(所有 feishu-cli 调用的统一入口)遇飞书 base/v3 `code=5000 + msg=空` 自动退避重试:`5s / 15s / 45s × 3 次`,总最长 65s;非限流错误立即抛(行为不变)。dry-run 不调 CLI 不受影响。识别函数 `_is_ratelimit_5000(stderr)` 严格按"`code=5000` 且 `msg=` 后为空 / `(空)` / `（空）`"判定,有 msg 内容的 5000(真实业务错误)不触发重试。
 
+### parent_project 全量 active 匹配(v0.9.1)
+
+`parent_project` 写入飞书「产品项目」link 字段时,候选集合来自关联项目表的分页全量读取,不再受单次 `record list --limit 200` 截断影响。若配置了 `link_table_active_field`,索引和 Cmd+P 项目菜单统一只使用 active=true 项目;精确匹配失败时仍跳过该字段,但会输出 active 项目总数、前 10 个样例和相近候选,避免把"输入名不精确"误判成"飞书里没有这个项目"。
+
 ### 今日历史保真(v0.3.0 → v0.7.3 → v0.7.5)
 
 OB 日志「🎯 今日计划 / 🐿️ 今日非计划」按天渲染,要求即便后续日子改动也不污染历史快照。逐次加固:
@@ -65,12 +69,18 @@ OB 日志「🎯 今日计划 / 🐿️ 今日非计划」按天渲染,要求即
 
 > 边缘 case:用户手动把昨天创建的 task 拖到今日并意图为 unplanned(`created < dateISO`)—— 启发式判不出,需手改 task md 的 `today_source_history` 字段。
 
-### 软段空壳守卫 — strict 模式(v0.7.7)
+### skill strict 守卫 — 软段空壳 / select / 执行明细 / 交付路径(v0.7.7+)
 
 `push_task_md` 在调飞书 upsert 前对五段(用户故事 / 验收条件 / 执行思路 / 执行概述 / 复盘)做空段扫描:
 
 - **默认宽松**(`strict_soft=False`):五段全空 → ⚠️ warning + 继续推 / 部分空 → warning / 零空 → 静默。**OB Cmd+P 菜单路径(快记任务 / 批量推今日 / 完成 task 等所有 UserScript)走此路径** —— 兼容用户"快速建骨架后续手工补"的两段式工作流。
 - **strict 模式**(`--strict-soft-sections`):五段全空 → ⛔ `_fail` 拒推 + 提示用户补。**Claude/skill 路径走此模式**(由 `~/.claude/skills/同步任务到飞书/SKILL.md` 在 A2 / B3 / C2 的 apply 命令里强制加 flag)—— 兜底 Claude 漏补软段就推。
+
+v0.9.2 同一套 strict 思路继续补三道 skill 防线:
+
+- **`--strict-select`**:select 白名单外值拒推,避免字段被宽松跳过后用户误以为已同步。
+- **`--strict-detail-one-per-day`**:扫描「## 📈 执行明细」原始行,同一日期出现多条 `YYYY-MM-DD...` bullet 时拒推。原因:飞书执行明细子表以日期为合并 key,同日拆多行不会逐条进入子表;过程应合并进单条的「复盘=」。
+- **`--strict-delivery-paths`**:扫描「## 📦 交付」段,发现 `docs/...` / `src/...` / `.claude/...` / `CHANGELOG.md` 等疑似相对路径时拒推。原因:vault 外文件必须用绝对路径 + 行内 code,否则飞书侧无仓库归属,OB 双链也会断链或误命中。
 
 辨识标记:仅对 `task["_task_md_mode"]=True`(parse_task_md 路径)生效;老 inline journal 路径无 H2 段概念,不触发守卫。Helper `_check_empty_soft_sections(task)` 返回空段中文名 list,守卫逻辑通过 list 长度 + `strict_soft` 联合决策。
 
